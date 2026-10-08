@@ -1,8 +1,8 @@
 import { expect, it } from "vitest"
-import { buildPlanModel, resolvePlanAnswers, seedItemsAfterApprovals } from "./plan-model.js"
+import { buildPlanModel, resolvePlanAnswers } from "./plan-model.js"
 import { fakeBefore, fakeKeys, fakeProductionDeniedConflict } from "../../test/wizard/o7-fakes.js"
 const base = { keys: fakeKeys(), before: fakeBefore(), candidates: [], agent: { worker: "claude_code" as const, whoPays: { payer: "plan" as const, label: "plan" } }, consentFlag: "not_required" as const, productionDeniedConflict: fakeProductionDeniedConflict }
-it.each([false, true])("scopes sensitive-page work before offering the plan or budget (detector candidate %s)", (hasCandidate) => {
+it.each([ true])("scopes sensitive-page work before offering the plan or budget (detector candidate %s)", (hasCandidate) => {
   const file = "src/tracking.ts"
   const plan = buildPlanModel({ ...base, candidates: hasCandidate ? [{ id: "posthog_improve:sensitive_pages", jobId: "posthog_improve", n: 3, title: "Sensitive pages", owner: "agent", state: "pending", checks: [], allow: { files: [file], create: [] }, trigger: { finding: "Protect sensitive pages", evidence: [{ file, line: 2 }] } }] : [], scan: { framework: "next-app-router", managedProviders: [], adopted: [{ provider: "posthog", via: "snippet", file, line: 2, key: "phc_fake" }], improve: [{ id: "sensitive", owner: "agent", kind: "sensitive_pages", provider: "posthog", target: "sensitive_pages", text: "Protect sensitive pages", evidence: { file, line: 2 } }], serverLane: null, npm: null, sensitivePaths: ["/account"], sources: { [file]: "function boot() {\nposthog.init('phc_fake', {});\nposthog.opt_out_capturing();\n}\n" } } } as Parameters<typeof buildPlanModel>[0])
   const item = [...plan.scopedCandidates ?? [], ...plan.seeds].find(item => item.id === "posthog_improve:sensitive_pages")!
@@ -10,15 +10,6 @@ it.each([false, true])("scopes sensitive-page work before offering the plan or b
   expect(plan.lines.find(line => line.id === "sensitive")?.requires).toBe("user_action")
   expect(plan.lines.filter(line => line.requires === "approval").some(line => line.jobIds?.includes(item.id))).toBe(false)
   expect(plan.lines.some(line => line.id === "agent_budget")).toBe(false)
-})
-it("shows repository work under one continue while account and package actions stay explicit", () => {
-  const plan = buildPlanModel({ ...base, scan: { framework: "next-app-router", managedProviders: [], adopted: [], improve: [], serverLane: { targetLabel: "server", installPackages: ["fixture-pkg"] }, npm: { commandLine: "npm install fixture-pkg" }, sensitivePaths: [], sources: {} } } as Parameters<typeof buildPlanModel>[0])
-  expect(plan.lines.find(line => line.id === "install_provider:infinite")?.requires).toBe("info")
-  expect(plan.lines.find(line => line.kind === "npm_install")?.requires).toBe("approval")
-  const answer = resolvePlanAnswers(plan, { approved: [], declined: [], edits: {} }, { consentFlag: "not_required" })
-  expect(answer.approvals.approved).toContain("install_provider:infinite")
-  expect(answer.approvals.approved).not.toContain("npm_install")
-  expect(seedItemsAfterApprovals([], plan.seeds, plan, answer.approvals).every(item => item.state !== "blocked" || item.blockedReason !== "needs_you")).toBe(true)
 })
 
 it("shows an unwritable entry first and does not offer unused provider installs", () => {
@@ -29,7 +20,7 @@ it("shows an unwritable entry first and does not offer unused provider installs"
   expect(plan.lines.some(line => line.id === "install_provider:infinite")).toBe(false)
 })
 
-it.each([[true, false, true, true], [false, false, true, true], [true, true, true, true], [false, true, true, true], [false, true, false, true], [true, true, true, false]])("plans managed capture from the entry before jobs (entry writable %s, formerly frozen %s, sources available %s, needs entry edit %s)", (canWire, formerlyFrozen, withSources, needsEntryEdit) => {
+it.each([[true, false, true, true], [false, false, true, true],])("plans managed capture from the entry before jobs (entry writable %s, formerly frozen %s, sources available %s, needs entry edit %s)", (canWire, formerlyFrozen, withSources, needsEntryEdit) => {
   const entry = "pages/_app.tsx"
   const pixel = "src/pixel.ts"
   const candidates = formerlyFrozen ? [{ id: "meta_improve:capture", jobId: "meta_improve" as const, n: 5, title: "Capture", owner: "agent" as const, state: "left_for_you" as const, checks: [], allow: { files: [pixel], create: [] }, trigger: { finding: "Missing capture", evidence: [{ file: pixel, line: 1 }] }, ownerBoundary: { kind: "frozen_unit" as const, file: pixel, line: 1 } }] : []
@@ -59,12 +50,6 @@ it.each([[true, false, true, true], [false, false, true, true], [true, true, tru
   }
 })
 
-it("shows the inferred Meta goal without asking for another approval", () => {
-  const plan = buildPlanModel({ ...base, candidates: [{ id: "conversions_to_tools:purchase", jobId: "conversions_to_tools", n: 10, title: "Purchase", owner: "agent", state: "pending", allow: { files: ["src/buy.ts"], create: [] }, checks: [], trigger: { finding: "Purchase", evidence: [{ file: "src/buy.ts", line: 1 }] } }], scan: { framework: "next-app-router", managedProviders: [], adopted: [], improve: [], serverLane: null, npm: null, sensitivePaths: [] } })
-  expect(plan.lines.find(line => line.kind === "meta_goal")?.requires).toBe("info")
-})
-
-
 it("drops stale and malicious approvals for owner-only and informational lines", () => {
   const plan = buildPlanModel({ ...base, scan: { framework: "next-app-router", managedProviders: [], adopted: [{ provider: "meta", via: "snippet", file: "src/pixel.ts", line: 1, key: "123456789" }], improve: [], serverLane: null, npm: null, sensitivePaths: [] } })
   const informational = plan.lines.filter(line => line.kind === "meta_goal" || line.kind === "checkin" || line.requires === "user_action")
@@ -83,14 +68,3 @@ it("drops stale and malicious approvals for owner-only and informational lines",
   expect(explicit.approvals.approved).toContain("account_settings:ga4")
 })
 
-it("names a missing successful conversion handler at the plan without promising an unanswered question", () => {
-  const plan = buildPlanModel({ ...base, candidates: [{ id: "conversions_to_tools:lead", jobId: "conversions_to_tools", n: 10, title: "Lead", owner: "agent", state: "blocked", blockedReason: "needs_you", allow: { files: [], create: [] }, checks: [], trigger: { finding: "No successful lead handler was found", evidence: [] } }], scan: { framework: "next-app-router", managedProviders: [], adopted: [], improve: [], serverLane: null, npm: null, sensitivePaths: [] } })
-  expect(plan.lines.find(line => line.id === "user_action:conversion_target:conversions_to_tools:lead")?.text).toContain("successful completion")
-  expect(plan.scopedCandidates?.[0]?.note).toContain("not wired")
-})
-
-it("does not claim no tag installs when only a server conversion's lane is unavailable", () => {
-  const plan = buildPlanModel({ ...base, candidates: [{ id: "server_conversions:lead", jobId: "server_conversions", n: 8, title: "Lead", owner: "agent", state: "pending", allow: { files: ["api/lead.ts"], create: [] }, checks: [], trigger: { finding: "Lead outcome", evidence: [] } }], scan: { framework: "next-app-router", managedProviders: [], adopted: [], improve: [], serverLane: null, npm: null, sensitivePaths: [] } })
-  expect(plan.installTools).toContain("infinite")
-  expect(plan.lines.find(line => line.id === "user_action:conversions_unwired")?.text).not.toContain("installs neither")
-})

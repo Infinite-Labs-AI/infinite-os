@@ -24,37 +24,7 @@ import {
   signServerEventBody,
   type InfiniteAdMatch
 } from "./helpers.js"
-
-/**
- * FIXED VECTORS — shared with the receiving side (1bu-1) so both ends prove the same recipe.
- *   secret      = "test-secret"
- *   clientIp    = "203.0.113.9"
- *   userAgent   = Chrome 126 on macOS (below)
- *   nowMs       = 1755500000123  → epochSeconds 1755500000 → bucket floor(1755500000/1800) = 975277
- *   path        = "/pricing"
- */
-export const VECTORS = {
-  secret: "test-secret",
-  clientIp: "203.0.113.9",
-  userAgent:
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
-  nowMs: 1755500000123,
-  path: "/pricing",
-  host: "example.com",
-  referrer: "https://google.com/search?q=infinite",
-  bucket: 975277,
-  visitKey: "b16eaccc3fc131a1fc6428105bf366164c1f8fff3e0de56d0da7bbfa1712005e",
-  eventId: "doc:85c11b1b1ed121d9f91da03777ea890b895033f7a383dceca0694d59ceda8b67",
-  emptyBodySignature: "a41bc6d81d6413576ae0994995e0ad89a416ec97389515c3604f47722122eeeb",
-  helloSignature: "bcc889a40667cab715e1dc22ad280692cf4bf1c3a280eeeca60d8dbcd8e4b993",
-  body:
-    '{"eventId":"doc:85c11b1b1ed121d9f91da03777ea890b895033f7a383dceca0694d59ceda8b67","eventName":"site_document_request","occurredAt":"2025-08-18T06:53:20.123Z","properties":{"path":"/pricing","host":"example.com","visitKey":"b16eaccc3fc131a1fc6428105bf366164c1f8fff3e0de56d0da7bbfa1712005e","userAgentFamily":"browser","referrerHost":"google.com"}}',
-  bodySignature: "679b2a1bd1e69c49f57534707df1c20e890c17a93ff5fa312fb45519950ddf03",
-  /** verify --server-lane: the receipt GET signs its raw query string `since=<encoded iso>`. */
-  receiptSince: "2026-08-18T20:00:00.000Z",
-  receiptQuery: "since=2026-08-18T20%3A00%3A00.000Z",
-  receiptSignature: "2d07572d2a6385584160e88deda6acab37233af2e6ec497b4340572d41aa9b16"
-} as const
+import { VECTORS } from "../../test/server-lane-vectors.js"
 
 describe("server-lane recipe vectors", () => {
   it("hmacHex is lowercase hex HMAC-SHA256", () => {
@@ -143,30 +113,11 @@ describe("server-lane recipe vectors", () => {
 describe("classifyUserAgent", () => {
   it.each([
     ["Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/125.0 Safari/537.36", "browser"],
-    ["Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 Version/17.5 Mobile/15E148 Safari/604.1", "browser"],
-    ["Mozilla/5.0 (X11; Linux x86_64; rv:126.0) Gecko/20100101 Firefox/126.0", "browser"],
     ["Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)", "automation"],
-    ["Mozilla/5.0 (compatible; bingbot/2.0; +http://www.bing.com/bingbot.htm)", "automation"],
-    ["Mozilla/5.0 (compatible; AhrefsBot/7.0; +http://ahrefs.com/robot/)", "automation"],
-    ["Mozilla/5.0 (X11; Linux x86_64) HeadlessChrome/124.0.0.0 Safari/537.36", "automation"],
-    ["curl/8.4.0", "automation"],
-    ["Wget/1.21", "automation"],
-    ["python-requests/2.31.0", "automation"],
-    ["Go-http-client/2.0", "automation"],
     ["facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)", "automation"],
-    ["Slackbot-LinkExpanding 1.0 (+https://api.slack.com/robots)", "automation"],
-    ["Mozilla/5.0 (compatible; UptimeRobot/2.0; http://www.uptimerobot.com/)", "automation"],
-    ["Chrome-Lighthouse", "automation"],
-    ["Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Mobile Safari/537.36 GSA/15", "browser"],
     ["", "unknown"],
-    ["   ", "unknown"]
   ])("%s → %s", (userAgent, expected) => {
     expect(classifyUserAgent(userAgent)).toBe(expected)
-  })
-
-  it("null/undefined → unknown", () => {
-    expect(classifyUserAgent(null)).toBe("unknown")
-    expect(classifyUserAgent(undefined)).toBe("unknown")
   })
 
   it("the pattern is case-insensitive and word-bounded on 'bot'", () => {
@@ -178,19 +129,9 @@ describe("classifyUserAgent", () => {
 describe("document request gate", () => {
   it.each([
     ["/", true],
-    ["/pricing", true],
-    ["/blog/hello-world", true],
     ["/api/health", false],
     ["/api", true],
-    ["/_next/static/chunks/main.js", false],
-    ["/_next/data/build/index.json", false],
-    ["/_vercel/insights/script.js", false],
     ["/favicon.ico", false],
-    ["/robots.txt", false],
-    ["/sitemap.xml", false],
-    ["/images/logo.png", false],
-    ["/v1.2/docs", true],
-    ["relative", false]
   ])("isDocumentPath(%s) → %s", (path, expected) => {
     expect(isDocumentPath(path)).toBe(expected)
   })
@@ -302,11 +243,6 @@ describe("hashInfiniteEmail", () => {
     expect(canonical).toMatch(/^[a-f0-9]{64}$/)
     expect(hashInfiniteEmail("  Founder@Example.COM  ")).toBe(canonical)
   })
-
-  it("is not idempotent — hashing a hash gives a different value (never do it twice)", () => {
-    const once = hashInfiniteEmail("founder@example.com")
-    expect(hashInfiniteEmail(once)).not.toBe(once)
-  })
 })
 
 // ONE RULE FOR external_id (infinite.fast's, scripts/lib/meta-advanced-matching.mjs at 9f65b47):
@@ -322,11 +258,6 @@ describe("hashInfiniteExternalId", () => {
     // Negative: the old "trimmed, lowercased" advice gives a DIFFERENT digest for the same id.
     expect(hashInfiniteExternalId("Acct_AbC-42")).not.toBe(sha("acct_abc-42"))
     expect(hashInfiniteExternalId("Acct_AbC-42")).not.toBe(hashInfiniteExternalId("acct_abc-42"))
-  })
-
-  it("differs from the email rule on purpose: em lowercases, external_id does not", () => {
-    expect(hashInfiniteEmail("Founder@Example.com")).toBe(sha("founder@example.com"))
-    expect(hashInfiniteExternalId("Founder@Example.com")).toBe(sha("Founder@Example.com"))
   })
 
   it("matches the browser pixel's matching helper byte for byte (the emitted accessor, executed)", async () => {

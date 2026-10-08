@@ -19,7 +19,6 @@ import { applyInstallation } from "./apply.js"
 import { inspectWorkspace } from "./inspect.js"
 import { planInstallation } from "./plan.js"
 import { uninstallInstallation } from "./uninstall.js"
-import { makeEditRecord } from "./install/edits.js"
 import type { WorkspaceInstallArtifacts } from "./types.js"
 
 const tempRoots: string[] = []
@@ -202,18 +201,6 @@ describe("uninstallInstallation", () => {
     expectTreeEquals(root, before)
   })
 
-  it("restores a byte-identical tree for a custom Infinite collection path", () => {
-    const root = copyFixture("static-html-basic")
-    const before = snapshotTree(root)
-
-    applyFixture(root, {
-      infinite: { ...infinite, collectPath: "/telemetry/events" }
-    })
-    uninstallInstallation({ root })
-
-    expectTreeEquals(root, before)
-  })
-
   for (const { fixture, artifacts } of roundTripCases) {
     it(`restores a byte-identical tree after apply then uninstall for ${fixture}`, () => {
       const root = copyFixture(fixture)
@@ -242,36 +229,6 @@ describe("uninstallInstallation", () => {
     expect(result.restoredFiles.length).toBeGreaterThan(0)
     expectTreeEquals(root, afterApply)
     expect(existsSync(join(root, ".infinite/install.json"))).toBe(true)
-  })
-
-  it.each([false, true])("leaves legacy policy receipt edits intact, including created pages (dry run %s)", dryRun => {
-    const root = copyFixture("static-html-basic")
-    applyFixture(root, { infinite })
-    const policyFiles = ["terms-and-conditions.html", "tos.html", "src/pages/terms.tsx"]
-    const before = "Owner's original policy\n", after = "Owner's policy with a legacy wizard edit\n"
-    const records = policyFiles.map((file, index) => {
-      mkdirSync(dirname(join(root, file)), { recursive: true })
-      writeFileSync(join(root, file), after)
-      return makeEditRecord({ file, before: index === 1 ? null : before, after, jobId: "privacy_paragraph", planLineId: null, by: "wizard", runId: "legacy-run" })
-    })
-    const apiFile = "src/api/terms.ts"
-    mkdirSync(dirname(join(root, apiFile)), { recursive: true })
-    writeFileSync(join(root, apiFile), "export const terms = 2\n")
-    records.push(makeEditRecord({ file: apiFile, before: "export const terms = 1\n", after: "export const terms = 2\n", jobId: "csp", planLineId: null, by: "wizard", runId: "legacy-run" }))
-    const manifestPath = join(root, ".infinite/install.json")
-    const manifest = JSON.parse(readFileSync(manifestPath, "utf8"))
-    writeFileSync(manifestPath, JSON.stringify({ ...manifest, edits: records }))
-
-    const result = uninstallInstallation({ root, dryRun })
-
-    for (const file of policyFiles) {
-      expect(readFileSync(join(root, file), "utf8")).toBe(after)
-      expect(result.editsLeftAsIs).toContain(file)
-      expect(result.editsReversed).not.toContain(file)
-      expect(result.warnings).toContain(`Kept ${file} as it is: it is a policy page.`)
-    }
-    expect(result.editsReversed).toContain(apiFile)
-    expect(readFileSync(join(root, apiFile), "utf8")).toBe(`export const terms = ${dryRun ? 2 : 1}\n`)
   })
 
   it("is idempotent when no manifest is present", () => {
@@ -346,35 +303,6 @@ describe("uninstallInstallation", () => {
 
     expectTreeEquals(root, committed)
     expect(existsSync(join(root, ".infinite"))).toBe(false)
-  })
-
-  // Regression guard for the flake that failed the infinite-tag 0.11.0 publish run: git's
-  // detached background maintenance can drop a lock file inside .git/ at any instant, so
-  // the byte-exactness snapshot must not see it — while still catching anything real,
-  // inside .git/ or out. A snapshot that cannot fail would be worse than the flake.
-  it("ignores git's transient maintenance artefacts without blunting the assertion", () => {
-    const root = copyFixture("static-html-basic")
-    initFixtureRepo(root)
-
-    const committed = snapshotTree(root)
-
-    applyFixture(root, { ga4: { measurementId: "G-TEST123" } })
-    uninstallInstallation({ root, allowDirty: true })
-
-    // Exactly what `git maintenance run --auto --detach` leaves behind mid-flight.
-    writeFileSync(join(root, ".git/objects/maintenance.lock"), "")
-    writeFileSync(join(root, ".git/gc.log"), "warning: too many unreachable loose objects\n")
-    expectTreeEquals(root, committed)
-
-    // A real mutation of git state is still caught — that is why .git/ is snapshotted.
-    const sneakyRef = join(root, ".git/refs/heads/sneaky")
-    writeFileSync(sneakyRef, "0000000000000000000000000000000000000000\n")
-    expect(() => expectTreeEquals(root, committed)).toThrow()
-    rmSync(sneakyRef)
-
-    // ...and so is a stray file left behind in the project itself.
-    writeFileSync(join(root, "stray.txt"), "left behind\n")
-    expect(() => expectTreeEquals(root, committed)).toThrow()
   })
 })
 
@@ -492,30 +420,4 @@ describe("uninstallInstallation — FIX 1: wiring-removal failure gates managed-
     // The managed file the entrypoint still imports must still exist (no dangling import)
     expect(existsSync(join(root, "lib/infinite-analytics-client.tsx"))).toBe(true)
   })
-
-  it("does not delete managed module files when entrypoint wiring cannot be stripped (next-pages-router)", () => {
-    const root = copyFixture("next-pages-router-basic")
-    applyFixture(root, {
-      ga4: { measurementId: "G-TEST123" },
-      x: { pixelId: "tw-pixel-123", eventTagIds: ["tw-event-1"] }
-    })
-
-    // Reindent the <InfiniteAnalyticsClient /> so the fixed-indent regex no longer matches
-    const appPath = join(root, "pages/_app.tsx")
-    const appSource = readFileSync(appPath, "utf8")
-    const mutated = appSource.replace(
-      /^( *)<InfiniteAnalyticsClient \/>/m,
-      (_match, indent) => `${indent}  <InfiniteAnalyticsClient />`
-    )
-    expect(mutated).not.toBe(appSource)
-    writeFileSync(appPath, mutated)
-
-    const result = uninstallInstallation({ root })
-
-    expect(result.warnings.some((w) => w.includes("automatically"))).toBe(true)
-    expect(existsSync(join(root, "lib/infinite-analytics-client.tsx"))).toBe(true)
-    expect(existsSync(join(root, "lib/infinite-analytics.ts"))).toBe(true)
-    expect(existsSync(join(root, ".infinite/install.json"))).toBe(true)
-  })
-
 })

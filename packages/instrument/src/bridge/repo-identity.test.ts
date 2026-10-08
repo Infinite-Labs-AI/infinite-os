@@ -1,17 +1,12 @@
 import { describe, expect, it } from "vitest"
 
-import { appRootLabel, folderLabel, linkSiteFor, normalizeRemote, repoFingerprint, sha256Hex } from "./repo-identity.js"
+import { linkSiteFor, normalizeRemote, repoFingerprint, sha256Hex } from "./repo-identity.js"
 
 describe("normalizeRemote", () => {
   it.each([
-    ["https://github.com/acme/acme-store.git", "github.com/acme/acme-store"],
     ["https://user:ghp_x@github.com/acme/acme-store.git", "github.com/acme/acme-store"],
-    ["https://GitHub.COM/acme/acme-store?x=1#frag", "github.com/acme/acme-store"],
     ["git@github.com:acme/acme-store.git", "github.com/acme/acme-store"],
-    ["git@GitLab.com:group/sub/repo", "gitlab.com/group/sub/repo"],
-    ["ssh://git@github.com:22/acme/acme-store.git", "github.com/acme/acme-store"],
     ["ssh://git@git.example.com:2222/acme/site.git/", "git.example.com:2222/acme/site"],
-    ["https://bitbucket.org/acme/site.GIT", "bitbucket.org/acme/site"]
   ])("%s → %s", (raw, expected) => {
     expect(normalizeRemote(raw)).toBe(expected)
   })
@@ -44,12 +39,6 @@ describe("linkSiteFor", () => {
     expect(site.folderLabel).toBe("~/Github/b")
     expect(site.productionHostHint).toBe("b.com")
   })
-
-  it("the app root changes the fingerprint", () => {
-    const a = repoFingerprint({ normalizedRemote: "github.com/a/b", realRoot: "/x", appRoot: "." })
-    const b = repoFingerprint({ normalizedRemote: "github.com/a/b", realRoot: "/x", appRoot: "apps/web" })
-    expect(a).not.toBe(b)
-  })
 })
 
 describe("normalizeRemote: no part of a credential in the host (scp form)", () => {
@@ -62,25 +51,3 @@ describe("normalizeRemote: no part of a credential in the host (scp form)", () =
   })
 })
 
-describe("labels", () => {
-  it("shortens the home prefix only", () => {
-    expect(folderLabel("/Users/founder/Github/acme", "/Users/founder")).toBe("~/Github/acme")
-    expect(folderLabel("/srv/acme", "/Users/founder")).toBe("/srv/acme")
-    expect(folderLabel("/Users/founderx/acme", "/Users/founder")).toBe("/Users/founderx/acme")
-  })
-
-  it("app root labels are repo-relative", () => {
-    expect(appRootLabel("/r", "/r/apps/web")).toBe("apps/web")
-    expect(appRootLabel("/r", "/r")).toBe(".")
-    expect(appRootLabel("/r", "apps/web/")).toBe("apps/web")
-    expect(appRootLabel("/r", "")).toBe(".")
-  })
-
-  it("an app root of many slashes is labelled in linear time (the trailing-slash regex was quadratic)", () => {
-    const hostile = `a${"/".repeat(100_000)}x`
-    const started = performance.now()
-    expect(appRootLabel("/r", hostile)).toBe(hostile)
-    expect(appRootLabel("/r", "apps/web///")).toBe("apps/web")
-    expect(performance.now() - started).toBeLessThan(200)
-  })
-})

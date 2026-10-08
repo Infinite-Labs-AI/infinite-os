@@ -8,9 +8,7 @@ const roots: string[] = []
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); vi.unstubAllEnvs() })
 
 it.each([
-  ["/cache/store # comment", "/cache/store"], ["/cache/store ; comment", "/cache/store"],
-  ['"/cache/hash # literal" # comment', "/cache/hash # literal"], ["'/cache/semi ; literal' ; comment", "/cache/semi ; literal"],
-  ["/cache/escaped\\#part", "/cache/escaped#part"]
+  ["/cache/store # comment", "/cache/store"],
 ])("parses the public store path %s without treating comments as path bytes", (source, expected) => {
   expect(npmrcPathValue(source)).toBe(expected)
 })

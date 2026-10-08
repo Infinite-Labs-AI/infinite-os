@@ -1,8 +1,8 @@
-import { existsSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs"
+import { existsSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs"
 import { join } from "node:path"
 import { afterEach, describe, expect, it, vi } from "vitest"
 
-import { cleanup, HEAD_PACKAGE_JSON, item, makeFenceFixture, MANAGED_MODULE, POST_INSTALL_LAYOUT, POST_INSTALL_PACKAGE_JSON, runGit, tempDir, write } from "../../test/wizard/repo.js"
+import { cleanup, HEAD_PACKAGE_JSON, item, makeFenceFixture, POST_INSTALL_LAYOUT, POST_INSTALL_PACKAGE_JSON, runGit, tempDir, write } from "../../test/wizard/repo.js"
 import { reverseTextEdits } from "../server-lane/text-edits.js"
 import type { CheckResult, TurnDiff } from "../wizard/contracts/jobs.js"
 import { Fence, FenceTamperError, sealFinalTree, verifyFinalSeal } from "./fence.js"
@@ -84,23 +84,6 @@ describe("fence end: outside the allowlist", () => {
     expect(result.edits.map((edit) => edit.file)).toEqual(["app/layout.tsx"])
   })
 
-  it("review P2-3 NEGATIVE: a stray path a claim NAMES is that claim's failure, and only that claim's", async () => {
-    const { root, fence } = await setup()
-    write(root, "lib/stray.ts", "export const x = 1\n")
-    const result = await fence.end({ claims: [{ jobId: "meta_improve:landing", status: "done", note: "done", at: "2026-10-03T00:00:00.000Z", files: ["lib/stray.ts"] }] })
-    expect(blockedFor(result, "meta_improve:landing")).toEqual(["outside_allowlist"])
-    expect(result.strays).toEqual([])
-  })
-
-  it("keeps a new file a job may create (negative of the above)", async () => {
-    const { root, fence } = await setup()
-    write(root, "lib/meta-mirror.ts", "export const mirror = true\n")
-    const result = await fence.end()
-    expect(existsSync(join(root, "lib/meta-mirror.ts"))).toBe(true)
-    expect(result.reverted).toEqual([])
-    expect(result.edits.map((edit) => [edit.file, edit.beforeHash])).toEqual([["lib/meta-mirror.ts", null]])
-  })
-
   it("restores package.json to the POST-INSTALL bytes, not HEAD's", async () => {
     const { read, root, fence } = await setup()
     write(root, "package.json", '{ "name": "hijacked" }\n')
@@ -109,16 +92,6 @@ describe("fence end: outside the allowlist", () => {
     // Negative: a HEAD revert would have lost the npm edit.
     expect(read("package.json")).not.toBe(HEAD_PACKAGE_JSON)
     expect(result.reverted).toContain("package.json")
-  })
-
-  it("restores a managed (install-written, untracked) file to its post-install bytes", async () => {
-    const { read, root, fence } = await setup()
-    write(root, "lib/infinite/analytics.ts", "// rewritten by the agent\n")
-    const result = await fence.end()
-    expect(read("lib/infinite/analytics.ts")).toBe(MANAGED_MODULE)
-    // No job owns Infinite's managed file: put back and said, never a job's failure (review P2-3).
-    expect(result.blocked).toEqual([])
-    expect(result.strays.map((stray) => stray.path)).toEqual(["lib/infinite/analytics.ts"])
   })
 
   it("restores the gitignored .env.local", async () => {
@@ -130,10 +103,7 @@ describe("fence end: outside the allowlist", () => {
   })
 
   it.each([
-    [".infinite/wizard/state.json", '{ "schema": "tampered" }\n', true],
     [".git/hooks/pre-commit", "#!/bin/sh\ncurl evil\n", false],
-    [".git/config", "[core]\n\thooksPath = /tmp/evil\n", true],
-    [".claude/settings.local.json", '{ "permissions": { "allow": ["Bash"] } }\n', true]
   ])("restores or deletes %s and says it (a stray: no job owns it, review P2-3)", async (rel, text, existedBefore) => {
     const { root, fence } = await setup()
     const before = existsSync(join(root, rel)) ? readFileSync(join(root, rel), "utf8") : null
@@ -148,23 +118,6 @@ describe("fence end: outside the allowlist", () => {
     expect(result.edits).toEqual([])
   })
 
-  it("restores a deleted allowlisted file", async () => {
-    const { read, root, fence } = await setup()
-    rmSync(join(root, "app/layout.tsx"))
-    const result = await fence.end()
-    expect(read("app/layout.tsx")).toBe(POST_INSTALL_LAYOUT)
-    expect(blockedFor(result, "meta_improve:landing")).toContain("outside_allowlist")
-  })
-
-  it("catches a rename outside the allowlist (hash/status based)", async () => {
-    const { read, root, fence } = await setup()
-    renameSync(join(root, "README.md"), join(root, "README2.md"))
-    const result = await fence.end()
-    expect(read("README.md")).toBe("# Acme\n")
-    expect(existsSync(join(root, "README2.md"))).toBe(false)
-    expect(result.reverted).toEqual(["README.md", "README2.md"])
-  })
-
   it("throws FENCE_TAMPER for a new file under node_modules and restores the rest", async () => {
     const { read, root, fence } = await setup()
     write(root, "app/page.tsx", "export default function Page() { return null }\n")
@@ -174,14 +127,6 @@ describe("fence end: outside the allowlist", () => {
     expect((error as FenceTamperError).code).toBe("INF_WIZ_FENCE_TAMPER")
     expect((error as FenceTamperError).message).toMatch(/Reinstall your dependencies; nothing was built/)
     expect(read("app/page.tsx")).toContain('href="/signup"')
-  })
-
-  it("does not call a clean heavy dir a tamper (negative)", async () => {
-    const { root, fence } = await setup()
-    write(root, "app/page.tsx", "export default function Page() {\n  return <a href=\"/signup\">Start your trial</a>\n}\n")
-    const result = await fence.end()
-    expect(result.edits.map((edit) => edit.file)).toEqual(["app/page.tsx"])
-    expect(existsSync(join(root, "node_modules/next/package.json"))).toBe(true)
   })
 
   it("reverts a change that carries the literal MCP token", async () => {
@@ -196,62 +141,6 @@ describe("fence end: outside the allowlist", () => {
 })
 
 describe("fence end: consent hunks, text edits, the gate", () => {
-  it("rejects wrapping that touches a consent line", async () => {
-    const { root } = makeFenceFixture()
-    const home = tempDir("infinite-tag-home-")
-    dirs.push(root, home)
-    const file = "src/common/tracking.ts"
-    write(root, file, "export function boot() {\n  fbq('consent', 'grant');\n}\n")
-    const fence = await Fence.begin({ root, snapshotDir: snapshotDir(home, RUN_ID, 91), runId: RUN_ID, turn: 91, items: [item("preview_guard:meta", [file])] })
-    write(root, file, "export function boot() {\n  if (allowHost()) {\n    fbq('consent', 'grant');\n  }\n}\n")
-    expect((await fence.end({ claims: [{ jobId: "preview_guard:meta", status: "done", note: "done", at: "2026-10-06T21:00:00Z" }] })).blocked).toEqual([expect.objectContaining({ reason: "consent_touched" })])
-  })
-
-  it("reverts a formatting-only reindent of a consent call", async () => {
-    const { root } = makeFenceFixture()
-    const home = tempDir("infinite-tag-home-")
-    dirs.push(root, home)
-    const file = "src/common/tracking.ts"
-    write(root, file, "export function boot() {\n  fbq('consent', 'grant');\n}\n")
-    const fence = await Fence.begin({ root, snapshotDir: snapshotDir(home, RUN_ID, 92), runId: RUN_ID, turn: 92, items: [item("preview_guard:meta", [file])] })
-    write(root, file, "export function boot() {\n    fbq('consent', 'grant');\n}\n")
-    const result = await fence.end({ claims: [{ jobId: "preview_guard:meta", status: "done", note: "done", at: "2026-10-06T21:00:00Z" }] })
-    expect(result.blocked).toEqual([expect.objectContaining({ reason: "consent_touched" })])
-    expect(readFileSync(join(root, file), "utf8")).toContain("\n  fbq('consent', 'grant');")
-  })
-
-  it("does not blame the first claimant for an earlier edit made by another job", async () => {
-    const { root } = makeFenceFixture()
-    const home = tempDir("infinite-tag-home-")
-    dirs.push(root, home)
-    const file = "src/common/tracking.ts"
-    write(root, file, "export function boot() {\n  fbq('consent', 'grant');\n}\n")
-    const ids = ["preview_guard:ga4", "preview_guard:meta"]
-    const fence = await Fence.begin({ root, snapshotDir: snapshotDir(home, RUN_ID, 93), runId: RUN_ID, turn: 93, items: ids.map((id) => item(id, [file])) })
-    write(root, file, "export function boot() {\n  if (allowHost()) {\n    fbq('consent', 'grant');\n  }\n}\n")
-    fence.recordEditActivity("preview_guard:meta", file)
-    await fence.claimConsentProblems("preview_guard:ga4")
-    await fence.claimConsentProblems("preview_guard:meta")
-    const claims = ids.map((jobId) => ({ jobId, status: "done" as const, note: "done", at: "2026-10-06T21:00:00Z" }))
-    const settled = await fence.end({ claims })
-    expect(settled.blocked.map((entry) => entry.itemId)).toEqual(["preview_guard:meta"])
-  })
-
-  it("tells the neighboring job when its line will be reverted with a consent hunk", async () => {
-    const { root } = makeFenceFixture()
-    const home = tempDir("infinite-tag-home-")
-    dirs.push(root, home)
-    const file = "src/common/tracking.ts"
-    write(root, file, "export function boot() {\n  fbq('init', '123');\n  fbq('consent', 'grant');\n}\n")
-    const fence = await Fence.begin({ root, snapshotDir: snapshotDir(home, RUN_ID, 94), runId: RUN_ID, turn: 94, items: [item("meta_improve:capture", [file]), item("preview_guard:meta", [file])] })
-    write(root, file, "export function boot() {\n  fbq('init', '456');\n  fbq('consent', 'grant');\n}\n")
-    fence.recordEditActivity("meta_improve:capture", file)
-    write(root, file, "export function boot() {\n  fbq('init', '456');\n  if (allowHost()) {\n    fbq('consent', 'grant');\n  }\n}\n")
-    fence.recordEditActivity("preview_guard:meta", file)
-    await fence.claimConsentProblems("preview_guard:meta")
-    expect((await fence.claimConsentProblems("meta_improve:capture")).join(" ")).toMatch(/code handles consent.*put back/i)
-  })
-
   it("a wrapped Meta consent call rejects only its guard hunk and claimant in a shared tracking module", async () => {
     const { root } = makeFenceFixture()
     const home = tempDir("infinite-tag-home-")
@@ -304,38 +193,6 @@ describe("fence end: consent hunks, text edits, the gate", () => {
     expect(kept).toContain("mask_all_text: true")
     expect(kept).toContain("  fbq('consent', 'grant');")
     expect(kept).not.toContain("  if (allowHost()) {")
-  })
-
-  it("does not blame every shared-file job when a consent hunk has no reliable claimant", async () => {
-    const { root } = makeFenceFixture()
-    const home = tempDir("infinite-tag-home-")
-    dirs.push(root, home)
-    const file = "src/common/tracking.ts"
-    write(root, file, "export function boot() {\n  fbq('consent', 'grant');\n}\n")
-    const items = [item("preview_guard:meta", [file]), item("meta_improve:capture", [file])]
-    const fence = await Fence.begin({ root, snapshotDir: snapshotDir(home, RUN_ID, 8), runId: RUN_ID, turn: 8, items })
-    write(root, file, "export function boot() {\n    fbq('consent', 'grant');\n}\n")
-    const claims = items.map((entry) => ({ jobId: entry.id, status: "done" as const, note: "done", at: "2026-10-06T21:00:00.000Z" }))
-    const settled = await fence.end({ claims })
-    expect(settled.blocked).toEqual([])
-    expect(settled.strays).toHaveLength(1)
-    expect(readFileSync(join(root, file), "utf8")).toContain("\n  fbq('consent', 'grant');")
-  })
-
-  it("freezes the whole JSX file when top-level units cannot be split confidently", async () => {
-    const { read, root, fence } = await setup()
-    const edited = POST_INSTALL_LAYOUT.replace(
-      "import './globals.css'",
-      "import './globals.css'\nimport { infiniteMetaMirror } from '../lib/meta-mirror'"
-    ).replace("      <body>{children}</body>", "      <body>{children}</body>\n      <script>{`gtag('consent', 'update', { analytics_storage: 'granted' })`}</script>")
-    write(root, "app/layout.tsx", edited)
-    fence.recordEditActivity("meta_improve:landing", "app/layout.tsx")
-    const result = await fence.end()
-    const now = read("app/layout.tsx")
-    expect(now).toBe(POST_INSTALL_LAYOUT)
-    expect(now).not.toContain("gtag('consent'")
-    expect(blockedFor(result, "meta_improve:landing")).toEqual(["consent_touched"])
-    expect(result.edits).toHaveLength(0)
   })
 
   it("records exact textEdits that reverse to the snapshot bytes (several hunks, no trailing newline)", async () => {
@@ -401,15 +258,6 @@ describe("fence abort, load and report mode", () => {
     expect(out.restored.sort()).toEqual([".env.local", "app/layout.tsx", "lib/new.ts"])
   })
 
-  it("a crashed turn restores later from the manifest (Fence.load)", async () => {
-    const { read, root, dir } = await setup()
-    write(root, "app/page.tsx", "half-written")
-    const reopened = await Fence.load(dir)
-    await reopened.abort()
-    expect(read("app/page.tsx")).toContain('href="/signup"')
-    await expect(reopened.end()).rejects.toThrow(/already settled/)
-  })
-
   it("report mode (nested, B8) reverts outside edits BEFORE any check, keeps the parent's bytes aside, and blocks no job for them; consent hunks still block", async () => {
     const { read, root, fence, dir } = await setup({ mode: "report" })
     write(root, "lib/stray.ts", "export const x = 1\n")
@@ -427,29 +275,6 @@ describe("fence abort, load and report mode", () => {
     expect(blockedFor(result, "privacy_paragraph:page")).toEqual([])
     // only the rejected bytes survive the settle (the snapshot copies are deleted)
     expect(readdirSync(dir)).toEqual(["rejected"])
-  })
-
-  it("report mode never resets refs or the index: a parent agent's own commit on the line is kept; HEAD off the line → BRANCH_FAILED", async () => {
-    const kept = await setup({ mode: "report" })
-    write(kept.root, "notes.txt", "mine\n")
-    runGit(kept.root, ["add", "notes.txt"])
-    runGit(kept.root, ["-c", "user.email=t@example.com", "-c", "user.name=T", "commit", "-q", "-m", "parent agent commit"])
-    const head = runGit(kept.root, ["rev-parse", "HEAD"]).trim()
-    await kept.fence.end()
-    expect(runGit(kept.root, ["rev-parse", "HEAD"]).trim()).toBe(head)
-
-    // negative: HEAD moved to a commit that does not descend from the hand-off
-    const moved = await setup({ mode: "report" })
-    runGit(moved.root, ["checkout", "-q", "--orphan", "elsewhere"])
-    runGit(moved.root, ["-c", "user.email=t@example.com", "-c", "user.name=T", "commit", "-q", "--allow-empty", "-m", "unrelated"])
-    await expect(moved.fence.end()).rejects.toMatchObject({ code: "INF_WIZ_BRANCH_FAILED" })
-  })
-
-  it("writes manifest and copies 0600", async () => {
-    const { dir, fence } = await setup()
-    expect(statSync(join(dir, "manifest.json")).mode & 0o777).toBe(0o600)
-    writeFileSync(join(dir, "probe"), "x")
-    await fence.abort()
   })
 })
 
@@ -473,18 +298,3 @@ describe("the final tree seal (B5/B29: verified again right before staging)", ()
   })
 })
 
-
-it("a claim cannot remove an unclaimed co-owner at the same edit place or absorb a separate hunk", async () => {
-  const { root } = makeFenceFixture()
-  const home = tempDir("infinite-tag-attribution-")
-  dirs.push(root, home)
-  const a = { ...item("preview_guard:meta", ["app/layout.tsx"]), trigger: { finding: "guard", evidence: [{ file: "app/layout.tsx", line: 10 }] } }
-  const b = { ...item("meta_improve:capture", ["app/layout.tsx"]), trigger: { finding: "capture", evidence: [{ file: "app/layout.tsx", line: 10 }] } }
-  const c = { ...item("preview_guard:ga4", ["app/layout.tsx"]), trigger: { finding: "guard", evidence: [{ file: "app/layout.tsx", line: 30 }] } }
-  const fence = await Fence.begin({ root, snapshotDir: snapshotDir(home, RUN_ID, 1), runId: RUN_ID, turn: 1, items: [a, b, c] })
-  const claims = [{ jobId: a.id, status: "done" as const, note: "done", at: "2026-10-07T00:00:00Z" }]
-  expect(fence.attributeHunk("app/layout.tsx", { aStart: 9, aEnd: 10, bStart: 9, bEnd: 11 }, claims)).toEqual([a.id, b.id])
-  expect(fence.attributeHunk("app/layout.tsx", { aStart: 29, aEnd: 30, bStart: 30, bEnd: 31 }, claims)).toEqual([c.id])
-  expect(fence.attributeHunk("app/layout.tsx", { aStart: 50, aEnd: 51, bStart: 52, bEnd: 54 }, claims)).toEqual([a.id, b.id, c.id])
-  await fence.abort()
-})

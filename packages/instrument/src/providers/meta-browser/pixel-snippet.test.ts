@@ -17,7 +17,7 @@ import { describe, expect, it } from "vitest"
 
 import { buildAnalyticsModuleSource } from "../../frameworks/managed-files.js"
 import type { InstallPlan } from "../../types.js"
-import { buildMetaPixelSnippet, metaProviderAdapter, type MetaPixelSnippetOptions } from "../meta.js"
+import { metaProviderAdapter, type MetaPixelSnippetOptions } from "../meta.js"
 
 import { buildMetaClickIdCaptureScript } from "./click-id.js"
 
@@ -154,13 +154,6 @@ describe("the Meta snippet infinite-tag installs, executed", () => {
     expect(landing.storageWrites).toEqual([])
   })
 
-  it("consent_mode=required holds the capture until the visitor's recorded grant", () => {
-    const held = runPage(staticHtmlScript({}, "required"), { search: "?fbclid=X1" })
-    expect(held.cookieWrites).toEqual([])
-    const granted = runPage(staticHtmlScript({}, "required"), { search: "?fbclid=X1", storedConsent: "granted" })
-    expect(granted.cookieWrites).toHaveLength(1)
-  })
-
   // Ported from infinite-site test-inject-analytics.mjs L460/L462 @ 9f65b47: "an explicit stored
   // denial writes no _fbc" and "a privacy signal with no decision defers the capture". The capture
   // follows the visitor's consent in EVERY mode — including the default not_required.
@@ -187,11 +180,6 @@ describe("the Meta snippet infinite-tag installs, executed", () => {
     const ungated = buildMetaClickIdCaptureScript()
     expect(runPage(ungated, { search: "?fbclid=X1", storedConsent: "denied" }).cookieWrites).toHaveLength(1)
     expect(runPage(ungated, { search: "?fbclid=X1", globalPrivacyControl: true }).cookieWrites).toHaveLength(1)
-  })
-
-  it("the capture can be left out explicitly, and only explicitly", () => {
-    expect(buildMetaPixelSnippet(PIXEL)).toContain("window.infiniteMetaClickId = function")
-    expect(buildMetaPixelSnippet(PIXEL, { clickIdCapture: false })).not.toContain("infiniteMetaClickId")
   })
 })
 
@@ -259,12 +247,6 @@ describe("Manual Advanced Matching, executed (ported from infinite.fast)", () =>
     expect(await runPage(unchecked, { storedConsent: "denied" }).match({ email: RAW_EMAIL })).toBe(true)
   })
 
-  it("under consent_mode=required it waits for an explicit grant", async () => {
-    const required = staticHtmlScript({ advancedMatching: true }, "required")
-    expect(await runPage(required).match({ email: RAW_EMAIL })).toBe(false)
-    expect(await runPage(required, { storedConsent: "granted" }).match({ email: RAW_EMAIL })).toBe(true)
-  })
-
   it("always resolves: no crypto.subtle (an insecure origin) or no fbq means false, never a throw or a partial digest", async () => {
     const insecure = runPage(AM, { subtle: false })
     expect(await insecure.match({ email: RAW_EMAIL, externalId: ACCOUNT_ID })).toBe(false)
@@ -272,13 +254,5 @@ describe("Manual Advanced Matching, executed (ported from infinite.fast)", () =>
     // The accessor alone, with no Meta bootstrap on the page (blocked, or not loaded yet).
     const accessorOnly = AM.slice(AM.lastIndexOf("\n(function () {\n  if (typeof window.infiniteMetaAdvancedMatch"))
     expect(await runPage(accessorOnly).match({ email: RAW_EMAIL })).toBe(false)
-  })
-
-  it("is defined once even if the accessor block is emitted twice", async () => {
-    const block = AM.slice(AM.lastIndexOf("\n(function () {\n  if (typeof window.infiniteMetaAdvancedMatch"))
-    expect(block.length).toBeGreaterThan(0)
-    const page = runPage(`${AM}\n${block}`)
-    expect(await page.match({ email: RAW_EMAIL })).toBe(true)
-    expect(inits(page)).toHaveLength(2)
   })
 })

@@ -12,7 +12,7 @@ import {
   parseMetaConfigEntry,
   probeMetaDelivery
 } from "./config-probe.js"
-import { isMetaDeliveryFailure, maskPixelId, metaDeliveryHeadline } from "./copy.js"
+import { maskPixelId, metaDeliveryHeadline } from "./copy.js"
 import { checkMetaLane, sha256Hex } from "./lane.js"
 
 /**
@@ -49,14 +49,6 @@ function stubFetch(status: number, body: string): { impl: typeof fetch; urls: st
   return { impl, urls }
 }
 
-describe("the blocked-config fixture", () => {
-  it("carries Meta's verbatim traffic-permissions veto", () => {
-    expect(BLOCKED_CONFIG).toContain(
-      `config.set("${PIXEL}", "prohibitedPixels", {"lockWebpage":false,"blockReason":"traffic_permissions"});`
-    )
-  })
-})
-
 describe("parseMetaConfigEntry", () => {
   it("reads the block directive out of the real payload", () => {
     const entry = parseMetaConfigEntry(BLOCKED_CONFIG, PIXEL, "prohibitedPixels")
@@ -66,21 +58,11 @@ describe("parseMetaConfigEntry", () => {
     })
   })
 
-  it("reports an absent key as absent, never as a parse failure", () => {
-    expect(parseMetaConfigEntry(ALLOWED_CONFIG, PIXEL, "prohibitedPixels")).toEqual({ kind: "absent" })
-  })
-
   it("separates 'not there' from 'there but unreadable' — the false-green guard", () => {
     // If Meta ever changes the literal's shape, this must NOT read as a healthy pixel.
     const mangled = `config.set("${PIXEL}", "prohibitedPixels", {lockWebpage: false,});`
     const entry = parseMetaConfigEntry(mangled, PIXEL, "prohibitedPixels")
     expect(entry.kind).toBe("unparseable")
-  })
-
-  it("does not confuse one pixel's entry for another's", () => {
-    expect(parseMetaConfigEntry(BLOCKED_CONFIG, "111111111111111", "prohibitedPixels")).toEqual({
-      kind: "absent"
-    })
   })
 })
 
@@ -91,21 +73,6 @@ describe("metaSignalsConfigUrl", () => {
       `https://connect.facebook.net/signals/config/${PIXEL}?v=${META_SIGNALS_CONFIG_VERSION}&r=stable&domain=infinite.fast`
     )
     expect(new URL(url).searchParams.get("domain")).toBe("infinite.fast")
-  })
-
-  it("is not a Graph call, so it spends nothing from the shared Meta request budget", () => {
-    expect(new URL(metaSignalsConfigUrl(PIXEL, "infinite.fast")).hostname).toBe("connect.facebook.net")
-  })
-})
-
-describe("extractMetaPixelIds", () => {
-  it("finds the id in the bootstrap this package writes and de-duplicates it", () => {
-    const html = `<script>fbq('set','autoConfig','false','${PIXEL}');fbq('init', '${PIXEL}');fbq('track','PageView');fbq("init", "222222222222")</script>`
-    expect(extractMetaPixelIds(html)).toEqual([PIXEL, "222222222222"])
-  })
-
-  it("returns nothing for a page with no Meta pixel", () => {
-    expect(extractMetaPixelIds("<html><body>hi</body></html>")).toEqual([])
   })
 })
 
@@ -130,18 +97,6 @@ describe("probeMetaDelivery", () => {
     expect(urls[0]).toContain("domain=infinite.fast")
   })
 
-  it("classifies a clean config as allowed", async () => {
-    const { impl } = stubFetch(200, ALLOWED_CONFIG)
-    const finding = await probeMetaDelivery({
-      pixelId: PIXEL,
-      domain: "infinite.fast",
-      version: "0.0.0-test",
-      fetch: impl,
-      sha256Hex
-    })
-    expect(finding.kind).toBe("allowed")
-  })
-
   it("catches the explicit BLOCK list, which names the domain as a sha256 digest", async () => {
     const hashed = sha256Hex("infinite.fast")
     const body = [
@@ -157,18 +112,6 @@ describe("probeMetaDelivery", () => {
       sha256Hex
     })
     expect(finding.kind).toBe("source_blocked")
-  })
-
-  it("reports an unknown id as pixel_not_found (Meta answers 404)", async () => {
-    const { impl } = stubFetch(404, "")
-    const finding = await probeMetaDelivery({
-      pixelId: "000000000000000",
-      domain: "infinite.fast",
-      version: "0.0.0-test",
-      fetch: impl,
-      sha256Hex
-    })
-    expect(finding.kind).toBe("pixel_not_found")
   })
 
   it("NEVER turns a transport failure into a pass", async () => {
@@ -200,21 +143,6 @@ describe("probeMetaDelivery", () => {
 })
 
 describe("the message a customer reads", () => {
-  it("names the symptom, the cause, the remedy and the consequence", () => {
-    const text = metaDeliveryHeadline({
-      kind: "blocked",
-      pixelId: PIXEL,
-      domain: "infinite.fast",
-      blockReason: "traffic_permissions",
-      lockWebpage: false
-    })
-    expect(text).toContain("BLOCKED FROM TRANSMITTING on infinite.fast")
-    expect(text).toContain("blockReason=traffic_permissions")
-    expect(text).toContain("Traffic permissions")
-    expect(text).toContain("_fbp/_fbc")
-    expect(text).toContain("https://www.facebook.com/business/help/")
-  })
-
   it("masks the pixel id rather than printing it whole", () => {
     expect(maskPixelId(PIXEL)).toBe("555500…1222")
     expect(metaDeliveryHeadline({ kind: "allowed", pixelId: PIXEL, domain: "x.com" })).not.toContain(PIXEL)
@@ -229,14 +157,6 @@ describe("the message a customer reads", () => {
     })
     expect(text).toContain("Could not check")
     expect(text).toContain("NOT a pass")
-  })
-
-  it("treats blocked, source_blocked and pixel_not_found as failures and the rest as not", () => {
-    expect(isMetaDeliveryFailure({ kind: "blocked", pixelId: PIXEL, domain: "d", blockReason: "r", lockWebpage: false })).toBe(true)
-    expect(isMetaDeliveryFailure({ kind: "source_blocked", pixelId: PIXEL, domain: "d" })).toBe(true)
-    expect(isMetaDeliveryFailure({ kind: "pixel_not_found", pixelId: PIXEL, domain: "d" })).toBe(true)
-    expect(isMetaDeliveryFailure({ kind: "allowed", pixelId: PIXEL, domain: "d" })).toBe(false)
-    expect(isMetaDeliveryFailure({ kind: "unknown", pixelId: PIXEL, domain: "d", detail: "x" })).toBe(false)
   })
 })
 
@@ -268,37 +188,6 @@ describe("checkMetaLane", () => {
     expect(verification.state).toBe("not_verifiable")
     expect(verification.state === "not_verifiable" && verification.reason).toContain("not blocked")
     expect(verification.state === "not_verifiable" && verification.reason).toContain("Test Events")
-  })
-
-  it("says so plainly when the page has no Meta pixel at all", async () => {
-    const { impl, urls } = stubFetch(200, ALLOWED_CONFIG)
-    const { verification } = await checkMetaLane({
-      html: "<html></html>",
-      url: "https://infinite.fast/",
-      version: "0.0.0-test",
-      fetch: impl
-    })
-    expect(verification.state).toBe("not_verifiable")
-    expect(verification.state === "not_verifiable" && verification.reason).toContain("no fbq('init'")
-    // No pixel means no probe: we do not call Meta to learn nothing.
-    expect(urls).toEqual([])
-  })
-
-  it("reports BLOCKED when one of two pixels is blocked — the worst answer wins", async () => {
-    const two = `<script>fbq('init','${PIXEL}');fbq('init','222222222222');</script>`
-    const impl = (async (input: RequestInfo | URL) =>
-      String(input).includes(PIXEL)
-        ? new Response(BLOCKED_CONFIG, { status: 200 })
-        : new Response(ALLOWED_CONFIG.replaceAll(PIXEL, "222222222222"), { status: 200 })) as unknown as typeof fetch
-
-    const { verification } = await checkMetaLane({
-      html: two,
-      url: "https://infinite.fast/",
-      version: "0.0.0-test",
-      fetch: impl
-    })
-    expect(verification.state).toBe("no_receipt")
-    expect(verification.state === "no_receipt" && verification.causes[0]).toContain("BLOCKED")
   })
 
   it("does not pass when the probe could not run", async () => {

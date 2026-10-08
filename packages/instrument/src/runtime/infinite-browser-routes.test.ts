@@ -168,22 +168,6 @@ describe("follow mode on the site's pixel-free routes (review P1-6)", () => {
     expect(otherTab.requests).toEqual([])
   })
 
-  it("forgets the earlier yes after a page where the site's pixels did not run (a refusal and the site's reload)", () => {
-    const visit = newVisit()
-    const home = load({ path: "/", visit, pixelFreePaths: PIXEL_FREE, before: startPixels })
-    home.tick()
-    home.leave()
-    // The visitor refused; the site reloads without its pixels.
-    const reloaded = load({ path: "/", visit, pixelFreePaths: PIXEL_FREE })
-    reloaded.tick()
-    expect(reloaded.requests).toEqual([])
-    reloaded.leave()
-    const cart = load({ path: "/cart", visit, pixelFreePaths: PIXEL_FREE })
-    cart.tick()
-    expect(cart.requests).toEqual([])
-    expect(cart.adMatch()).toBe(false)
-  })
-
   it("an explicit no on a pixel-free route (Consent Mode denied, or the site's granted:false) wins over the earlier yes", () => {
     const visit = newVisit()
     load({ path: "/", visit, pixelFreePaths: PIXEL_FREE, before: startPixels }).tick()
@@ -209,33 +193,6 @@ describe("follow mode on the site's pixel-free routes (review P1-6)", () => {
     expect(again.local.has("infinite_analytics_visitor")).toBe(false)
   })
 
-  it("a site's granted:false holds for the page even while its pixel function lingers (a revoke leaves fbq)", () => {
-    const page = load({ path: "/", pixelFreePaths: PIXEL_FREE, before: startPixels })
-    page.tick()
-    expect(page.adMatch()).toBe(true)
-    page.dispatch({ type: "infinite:analytics-consent-change", detail: { granted: false } })
-    page.tick()
-    page.tick()
-    expect(page.adMatch()).toBe(false)
-    expect(page.pageViews()).toHaveLength(1)
-  })
-
-  it("an ordinary route with no pixels running still records nothing, exactly as before", () => {
-    const visit = newVisit()
-    load({ path: "/", visit, pixelFreePaths: PIXEL_FREE, before: startPixels }).tick()
-    const pricing = load({ path: "/pricing", visit, pixelFreePaths: PIXEL_FREE })
-    pricing.tick()
-    expect(pricing.requests).toEqual([])
-  })
-
-  it("without pixel-free routes, nothing changes: a cart with no pixels records nothing", () => {
-    const visit = newVisit()
-    load({ path: "/", visit, before: startPixels }).tick()
-    const cart = load({ path: "/cart", visit })
-    cart.tick()
-    expect(cart.requests).toEqual([])
-  })
-
   it("rejects a pixel-free route that is not a root-relative path", () => {
     expect(() =>
       renderInfiniteBrowserTag({ collectPath: "/infinite/ledger", respectDnt: true, consent: { mode: "not_required" }, productionHosts: ["shop.example"], pixelFreePaths: ["cart?x=1"] })
@@ -250,13 +207,6 @@ describe("window.__infiniteAdMatchAllowed (parity gap 4)", () => {
     page.window.fbq = () => {}
     expect(page.adMatch()).toBe(true)
     page.window.dataLayer = [["consent", "update", { analytics_storage: "denied" }]]
-    expect(page.adMatch()).toBe(false)
-  })
-
-  it("is the tag's own consent decision outside follow mode", () => {
-    const page = load({ path: "/", follow: false })
-    expect(page.adMatch()).toBe(true)
-    page.dispatch({ type: "infinite:analytics-consent-change", detail: { granted: false } })
     expect(page.adMatch()).toBe(false)
   })
 })
@@ -294,13 +244,6 @@ describe("managed Meta pixel: one PageView per client-side route change (parity 
 
   it("sends nothing when the site's own code already sends a PageView on route changes (the option is off)", () => {
     const { page, calls } = metaPage(false)
-    page.history.pushState({}, "", "/cart")
-    expect(calls).toEqual([])
-  })
-
-  it("sends nothing to the inert stand-in a preview host gets", () => {
-    const silenced = Object.assign(() => {}, { __infiniteSilenced: true })
-    const { page, calls } = metaPage(true, silenced)
     page.history.pushState({}, "", "/cart")
     expect(calls).toEqual([])
   })

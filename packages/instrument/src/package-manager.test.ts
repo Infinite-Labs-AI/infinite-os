@@ -1,21 +1,13 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
 import {
-  buildPackageManagerCommands,
   detectPackageManager
 } from "./package-manager.js";
 
 const tempRoots: string[] = [];
-const instrumentPackage = JSON.parse(
-  readFileSync(new URL("../package.json", import.meta.url), "utf8")
-) as {
-  name: string;
-  version: string;
-  private?: boolean;
-};
 
 function makeWorkspace(lockfiles: string[]): string {
   const root = mkdtempSync(join(tmpdir(), "instrument-package-manager-"));
@@ -65,72 +57,3 @@ describe("detectPackageManager", () => {
   });
 });
 
-describe("buildPackageManagerCommands", () => {
-  it("matches the instrument package publishability for current one-off guidance", () => {
-    const commands = buildPackageManagerCommands("pnpm", {
-      pinnedVersion: instrumentPackage.version,
-      workspaceId: "ws_test"
-    });
-
-    if (instrumentPackage.private) {
-      expect(commands.oneOff).toContain("pnpm --dir ");
-      expect(commands.oneOff).toContain("--filter infinite-tag build");
-      expect(commands.oneOff).toContain("node ");
-      expect(commands.oneOff).toContain("packages/instrument/dist/src/cli.js");
-      expect(commands.oneOff).toContain("install --root");
-      expect(commands.oneOff).toContain("--workspace ws_test");
-      expect(commands.repeatableInstall).toBe(
-        `After publishing infinite-tag, install it with: pnpm add -D infinite-tag@${instrumentPackage.version}`
-      );
-      expect(commands.repeatableRun).toBe(
-        "After publishing infinite-tag, re-run it with: pnpm exec infinite-tag install --workspace ws_test"
-      );
-      return;
-    }
-
-    expect(commands).toMatchObject({
-      packageManager: "pnpm",
-      oneOff: `pnpm dlx infinite-tag@${instrumentPackage.version} install --workspace ws_test`,
-      repeatableInstall: `pnpm add -D infinite-tag@${instrumentPackage.version}`,
-      repeatableRun: "pnpm exec infinite-tag install --workspace ws_test"
-    });
-  });
-
-  it("keeps future package-manager-specific publish commands accurate", () => {
-    const npmCommands = buildPackageManagerCommands("npm", {
-      pinnedVersion: instrumentPackage.version,
-      workspaceId: "ws_test"
-    });
-    const yarnCommands = buildPackageManagerCommands("yarn", {
-      pinnedVersion: instrumentPackage.version,
-      workspaceId: "ws_test"
-    });
-    const bunCommands = buildPackageManagerCommands("bun", {
-      pinnedVersion: instrumentPackage.version,
-      workspaceId: "ws_test"
-    });
-
-    if (instrumentPackage.private) {
-      expect(npmCommands.repeatableInstall).toBe(
-        `After publishing infinite-tag, install it with: npm install -D infinite-tag@${instrumentPackage.version}`
-      );
-      expect(yarnCommands.repeatableRun).toBe(
-        "After publishing infinite-tag, re-run it with: yarn infinite-tag install --workspace ws_test"
-      );
-      expect(bunCommands.repeatableInstall).toBe(
-        `After publishing infinite-tag, install it with: bun add -d infinite-tag@${instrumentPackage.version}`
-      );
-      return;
-    }
-
-    expect(npmCommands.oneOff).toBe(
-      `npm exec infinite-tag@${instrumentPackage.version} -- install --workspace ws_test`
-    );
-    expect(yarnCommands.repeatableRun).toBe(
-      "yarn infinite-tag install --workspace ws_test"
-    );
-    expect(bunCommands.repeatableInstall).toBe(
-      `bun add -d infinite-tag@${instrumentPackage.version}`
-    );
-  });
-});

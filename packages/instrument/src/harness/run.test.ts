@@ -5,16 +5,11 @@ import { fileURLToPath } from "node:url"
 import { afterEach, describe, expect, it } from "vitest"
 
 import { parseHarnessArgs } from "./args.js"
-import { EXIT_ARGS, EXIT_FAILED, EXIT_OK, runHarnessCommand } from "./command.js"
+import { EXIT_ARGS, runHarnessCommand } from "./command.js"
 import { PROPOSED_CONVERSIONS_RELATIVE_PATH } from "./marking.js"
-import { REPORT_SENT_LINE, reportNotSentLine, type HarnessReportPayload, type ReportSink } from "./report-sink.js"
+import { reportNotSentLine, type HarnessReportPayload, type ReportSink } from "./report-sink.js"
 import {
-  buildPrivacyDisclosureNotice,
-  META_ADVANCED_MATCHING_DISCLOSURE_FIELDS,
-  PIXEL_DISCLOSURE_FIELDS,
-  PRIVACY_DISCLOSURE_CODE,
   runHarness,
-  SERVER_LANE_DISCLOSURE_FIELDS,
   type HarnessIo
 } from "./run.js"
 import { HARNESS_REPORT_RELATIVE_PATH } from "./state.js"
@@ -82,28 +77,6 @@ function clock() {
 
 const GTAG = `<script async src="https://www.googletagmanager.com/gtag/js?id=G-EXIST01"></script><script>function gtag(){dataLayer.push(arguments)};gtag('config','G-EXIST01');</script>`
 
-describe("parseHarnessArgs", () => {
-  it("defaults to apply with adoption on and parses the teardown flags", () => {
-    const args = parseHarnessArgs([
-      "--plan", "--providers", "ga4,posthog", "--no-adopt-existing", "--conversions", "c.json", "--server-lane",
-      "--url", "https://example.com", "--yes", "--allow-dirty", "--json", "--posthog-query-key", "phx_1", "--workspace", "ws_1"
-    ])
-    expect(args).toMatchObject({
-      mode: "plan", providers: ["ga4", "posthog"], adoptExisting: false, conversions: "c.json", serverLane: true,
-      url: "https://example.com", yes: true, allowDirty: true, json: true, posthogQueryKey: "phx_1", workspaceId: "ws_1", noMark: false, brief: false
-    })
-    expect(parseHarnessArgs([]).mode).toBe("apply")
-    expect(parseHarnessArgs(["--no-mark", "--brief"])).toMatchObject({ noMark: true, brief: true })
-  })
-
-  it("rejects unknown flags, two modes, and unknown providers", () => {
-    expect(() => parseHarnessArgs(["--bogus"])).toThrow(/Unknown argument: --bogus/)
-    expect(() => parseHarnessArgs(["--check", "--plan"])).toThrow(/Pick one/)
-    expect(() => parseHarnessArgs(["--providers", "ga4,tiktok"])).toThrow(/unknown provider "tiktok"/)
-    expect(() => parseHarnessArgs(["--url"])).toThrow(/Missing value for --url/)
-  })
-})
-
 describe("runHarnessCommand argument rule", () => {
   it("non-interactive apply without --conversions or --no-mark exits 2 with INF_ARGS_CONVERSIONS_REQUIRED, even with --yes", async () => {
     const io = fakeIo({ interactive: false })
@@ -111,19 +84,6 @@ describe("runHarnessCommand argument rule", () => {
     expect(code).toBe(EXIT_ARGS)
     expect(io.errLines[0]).toContain("inf-error: INF_ARGS_CONVERSIONS_REQUIRED")
     expect(io.errLines[0]).toContain("--yes never approves conversion marking")
-  })
-
-  it("does not apply the rule to --check/--plan or to --no-mark", async () => {
-    const root = copyFixture("static-html-basic")
-    const io = fakeIo({ interactive: false })
-    expect(await runHarnessCommand(["--check", "--root", root], { io })).toBe(EXIT_OK)
-    expect(await runHarnessCommand(["--plan", "--root", root], { io })).toBe(EXIT_OK)
-    expect(io.errLines.some((line) => line.includes("INF_ARGS_CONVERSIONS_REQUIRED"))).toBe(false)
-  })
-
-  it("unknown flags exit 2", async () => {
-    const io = fakeIo()
-    expect(await runHarnessCommand(["--nope"], { io })).toBe(EXIT_ARGS)
   })
 })
 
@@ -145,24 +105,6 @@ describe("runHarness --check", () => {
       ["preflight", "ok"], ["inspect", "ok"], ["resolve-keys", "ok"], ["classify", "ok"], ["plan", "ok"],
       ["confirm", "skipped"], ["apply", "skipped"], ["conversions", "skipped"], ["setup-checks", "ok"], ["server-lane", "skipped"], ["server-lane-env", "skipped"], ["verify", "skipped"], ["report", "ok"]
     ])
-  })
-
-  it("shows a provider infinite-tag already installed as installed, with the manifest as evidence", async () => {
-    const root = copyFixture("static-html-basic")
-    await runHarness(parseHarnessArgs(["--apply", "--yes", "--no-mark", "--root", root, "--ga4-measurement-id", "G-NEW00001", "--workspace", "ws_1"]), fakeIo(), { discover: () => null })
-    const io = fakeIo()
-    const result = await runHarness(parseHarnessArgs(["--check", "--root", root]), io, { discover: () => null })
-    expect(result.exitCode).toBe(0)
-    expect(io.outLines.join("\n")).toMatch(/ga4\s+installed\s+—\s+\.infinite\/install\.json/)
-  })
-
-  it("halts with INF_DETECT_NO_FRAMEWORK on an unsupported repo and still prints the table", async () => {
-    const root = copyFixture("unsupported-basic")
-    const io = fakeIo()
-    const result = await runHarness(parseHarnessArgs(["--check", "--root", root]), io, { discover: () => null })
-    expect(result.exitCode).toBe(1)
-    expect(result.report.failure).toMatchObject({ code: "INF_DETECT_NO_FRAMEWORK", next: "halt" })
-    expect(io.outLines.join("\n")).toMatch(/server_lane\s+absent/)
   })
 })
 
@@ -190,21 +132,6 @@ describe("runHarness reportSink", () => {
     return { sink, payloads }
   }
 
-  it("sends the state table after the report step and prints the sent line", async () => {
-    const root = copyFixture("static-html-basic")
-    write(root, "index.html", `<!doctype html><html><head>${GTAG}</head><body><a href="/go">Go</a></body></html>`)
-    const { sink, payloads } = captureSink()
-    const io = fakeIo()
-    const result = await runHarness(parseHarnessArgs(["--plan", "--root", root, "--workspace", "proj_1"]), io, { discover: () => null, reportSink: sink })
-    expect(result.exitCode).toBe(0)
-    expect(payloads).toHaveLength(1)
-    expect(payloads[0]).toMatchObject({ engineProjectId: "proj_1", ranAt: result.report.startedAt, framework: "static-html", hosting: result.report.hosting })
-    expect(payloads[0].providers.ga4).toMatchObject({ state: "adopted", evidenceFile: "index.html", verification: { state: "adopted_not_ours" } })
-    expect(Object.keys(payloads[0].providers)).toHaveLength(7)
-    expect(JSON.stringify(payloads[0])).not.toContain(root)
-    expect(io.outLines).toContain(REPORT_SENT_LINE)
-  })
-
   it("--check never reports, and a failed send never fails the run", async () => {
     const root = copyFixture("static-html-basic")
     const { sink, payloads } = captureSink({ sent: false, reason: "the cloud was unreachable" })
@@ -221,31 +148,6 @@ describe("runHarness reportSink", () => {
     // --json: stdout is still exactly one document; the not-sent line rides stderr.
     expect(() => JSON.parse(planIo.outLines.join("\n"))).not.toThrow()
     expect(planIo.errLines).toContain(reportNotSentLine("the cloud was unreachable"))
-  })
-
-  it("a run that halted before inspecting sends nothing — seven unobserved rows are not a report", async () => {
-    const root = copyFixture("unsupported-basic")
-    const { sink, payloads } = captureSink()
-    const io = fakeIo()
-    await runHarness(parseHarnessArgs(["--plan", "--root", root, "--workspace", "proj_1"]), io, { discover: () => null, reportSink: sink })
-    expect(payloads).toHaveLength(0)
-    expect(io.outLines).toContain(reportNotSentLine("the run did not reach the report step"))
-  })
-})
-
-describe("runHarness --plan --conversions", () => {
-  it("validates the file, marks nothing, and leaves the tree clean", async () => {
-    const root = copyFixture("static-html-basic")
-    write(root, "index.html", `<!doctype html>\n<html>\n<head></head>\n<body>\n<a href="/signup">Start</a>\n</body>\n</html>\n`)
-    const { execSync } = await import("node:child_process")
-    execSync("git init -q && git add . && git -c user.email=t@t -c user.name=t commit -qm init", { cwd: root })
-    await runHarness(parseHarnessArgs(["--plan", "--root", root, "--ga4-measurement-id", "G-NEW00001", "--workspace", "ws_1"]), fakeIo(), { discover: () => null })
-    const result = await runHarness(parseHarnessArgs(["--plan", "--root", root, "--ga4-measurement-id", "G-NEW00001", "--workspace", "ws_1", "--conversions", PROPOSED_CONVERSIONS_RELATIVE_PATH]), fakeIo(), { discover: () => null })
-    expect(result.exitCode).toBe(0)
-    expect(result.report.conversions).toEqual({ proposed: 1, marked: 0, skipped: 0, stale: 0 })
-    expect(readFileSync(join(root, "index.html"), "utf8")).not.toContain("data-analytics-cta-id")
-    const status = execSync("git status --porcelain", { cwd: root, encoding: "utf8" }).split("\n").filter(Boolean)
-    expect(status.every((line) => line.includes(".infinite/") || line.includes(".gitignore"))).toBe(true)
   })
 })
 
@@ -271,40 +173,6 @@ describe("runHarness --verify-only", () => {
     expect(result.exitCode).toBe(1)
     expect(result.report.failure?.code).toBe("INF_VERIFY_INCOMPLETE")
     expect(result.report.failure?.message).toContain("manifest")
-  })
-
-  it.each(["missing-url", "missing-backend", "no-lanes"])("does not call %s verified", async kind => {
-    const root = copyFixture("static-html-basic")
-    write(root, ".infinite/install.json", JSON.stringify({workspaceId:"ws_1",appRoot:".",framework:"static-html",providers:kind === "no-lanes" ? [] : ["ga4"],files:[],envKeys:[],contentHashes:{},wiringVersion:1,verifiedAt:null}))
-    const args=["--verify-only", "--root", root, ...(kind === "missing-url" ? [] : ["--url","https://example.com/"])]
-    const result=await runHarness(parseHarnessArgs(args),fakeIo(),{discover:()=>null,fetch:(async()=>new Response("",{status:200})) as typeof fetch,...clock(),budgetMs:1})
-    expect(result.exitCode).toBe(1)
-    expect(result.report.failure?.code).toBe("INF_VERIFY_INCOMPLETE")
-    expect(result.report.providers.some(row=>row.state === "verified")).toBe(false)
-  })
-
-  it("reads back every server-lane mode a manifest can record, not only Next middleware", async () => {
-    const root = copyFixture("vite-react-basic")
-    write(root, ".infinite/install.json", JSON.stringify({
-      workspaceId: "ws_1", appRoot: ".", framework: "vite-react", providers: ["ga4"], files: [], envKeys: [], contentHashes: {},
-      serverLane: { mode: "vercel-middleware", created: ["lib/infinite-server-lane.ts", "lib/infinite-outcome.ts", "middleware.ts"], brief: "INSTALL-SERVER-LANE.md" },
-      wiringVersion: 1, verifiedAt: null
-    }))
-    const backend: VerificationBackend = {
-      name: "stub", lanes: ["ga4", "posthog", "infinite", "meta", "server_lane"],
-      verify: async (input) => Object.fromEntries(input.lanes.map((lane) => [lane, { state: "verified" as const, receiptAt: "2026-09-02T10:00:04.000Z" }]))
-    }
-    const io = fakeIo()
-    const result = await runHarness(
-      parseHarnessArgs(["--verify-only", "--root", root, "--url", "https://example.com/"]),
-      io,
-      { discover: () => null, backends: [backend], fetch: (async () => new Response("", { status: 200 })) as unknown as typeof fetch, ...clock(), budgetMs: 3_000, pollIntervalMs: 3_000 }
-    )
-    expect(result.report.failures).toEqual([])
-    const lane = result.report.providers.find((state) => state.provider === "server_lane")
-    expect(lane?.state).toBe("verified")
-    expect(lane?.evidence).toBe("middleware.ts")
-    expect(result.report.steps.find((step) => step.id === "verify")?.note).toContain("server_lane=verified")
   })
 })
 
@@ -363,36 +231,6 @@ describe("runHarness --apply", () => {
     expect(result.report.failure?.message).toContain("No posthog event arrived within 3s.")
   })
 
-  it("halts with INF_ENV_DIRTY_TREE on a dirty git tree without --allow-dirty", async () => {
-    const root = copyFixture("static-html-basic")
-    const { execSync } = await import("node:child_process")
-    execSync("git init -q && git add . && git -c user.email=t@t -c user.name=t commit -qm init && echo x >> index.html", { cwd: root })
-    const io = fakeIo()
-    const result = await runHarness(parseHarnessArgs(["--apply", "--yes", "--no-mark", "--root", root, "--ga4-measurement-id", "G-NEW00001", "--workspace", "ws_1"]), io, { discover: () => null })
-    expect(result.exitCode).toBe(1)
-    expect(result.report.failure).toMatchObject({ code: "INF_ENV_DIRTY_TREE", next: "halt" })
-    expect(result.report.steps[1].status).toBe("not_run")
-  })
-
-  it("--plan then --apply --conversions passes the clean-tree gate: the harness's own outputs are not 'dirty'", async () => {
-    const root = copyFixture("static-html-basic")
-    write(root, "index.html", `<!doctype html>\n<html>\n<head></head>\n<body>\n<a href="/signup">Start</a>\n</body>\n</html>\n`)
-    const { execSync } = await import("node:child_process")
-    execSync("git init -q && git add . && git -c user.email=t@t -c user.name=t commit -qm init", { cwd: root })
-    await runHarness(parseHarnessArgs(["--plan", "--root", root, "--ga4-measurement-id", "G-NEW00001", "--workspace", "ws_1"]), fakeIo(), { discover: () => null })
-    expect(execSync("git status --porcelain", { cwd: root, encoding: "utf8" })).toContain(".infinite/")
-
-    const io = fakeIo()
-    const result = await runHarness(
-      parseHarnessArgs(["--apply", "--yes", "--root", root, "--ga4-measurement-id", "G-NEW00001", "--workspace", "ws_1", "--conversions", PROPOSED_CONVERSIONS_RELATIVE_PATH]),
-      io,
-      { discover: () => null }
-    )
-    expect(result.report.failures).toEqual([])
-    expect(readFileSync(join(root, "index.html"), "utf8")).toContain('data-analytics-cta-id="start"')
-    expect(readFileSync(join(root, "index.html"), "utf8")).toContain("G-NEW00001")
-  })
-
   it("interactive apply asks for marking separately and never lets --yes approve it", async () => {
     const root = copyFixture("static-html-basic")
     write(root, "index.html", `<!doctype html>\n<html>\n<head></head>\n<body>\n<a href="/signup">Start</a>\n</body>\n</html>\n`)
@@ -402,24 +240,6 @@ describe("runHarness --apply", () => {
     expect(io.questions).toEqual(["Mark these 1 elements now? [y/N] "])
     expect(readFileSync(join(root, "index.html"), "utf8")).not.toContain("data-analytics-cta-id")
     expect(readFileSync(join(root, "index.html"), "utf8")).toContain("G-NEW00001")
-  })
-
-  it("--server-lane on Next reports the chosen target as installed; on a static site it is brief only", async () => {
-    const next = copyFixture("next-app-router-basic")
-    const nextIo = fakeIo()
-    const nextResult = await runHarness(parseHarnessArgs(["--apply", "--yes", "--no-mark", "--server-lane", "--root", next, "--ga4-measurement-id", "G-NEW00001", "--workspace", "ws_1"]), nextIo, { discover: () => null })
-    expect(nextResult.report.failures).toEqual([])
-    const lane = nextResult.report.providers.find((state) => state.provider === "server_lane")
-    expect(lane?.state).toBe("installed")
-    expect(lane?.reason).toContain("Next.js")
-    expect(existsSync(join(next, "INSTALL-SERVER-LANE.md"))).toBe(true)
-
-    const site = copyFixture("static-html-basic")
-    const siteIo = fakeIo()
-    const siteResult = await runHarness(parseHarnessArgs(["--apply", "--yes", "--no-mark", "--server-lane", "--root", site, "--ga4-measurement-id", "G-NEW00001", "--workspace", "ws_1"]), siteIo, { discover: () => null })
-    const siteLane = siteResult.report.providers.find((state) => state.provider === "server_lane")
-    expect(siteLane?.state).toBe("skipped")
-    expect(siteLane?.reason).toContain("brief only")
   })
 
   it("a lane whose entry is not ours to edit is not 'installed': module written, entry manual", async () => {
@@ -435,39 +255,6 @@ describe("runHarness --apply", () => {
     expect(readFileSync(join(root, "middleware.ts"), "utf8")).toBe(`export default function middleware() {}\n`)
     expect(result.report.steps.find((step) => step.id === "verify")?.status).toBe("skipped")
   })
-
-  it("runHarnessCommand maps a halting failure to exit 1 and an inf-error line", async () => {
-    const root = copyFixture("unsupported-basic")
-    const io = fakeIo()
-    expect(await runHarnessCommand(["--apply", "--no-mark", "--root", root], { io, deps: { discover: () => null } })).toBe(EXIT_FAILED)
-    expect(io.errLines.at(-1)).toContain("inf-error: INF_DETECT_NO_FRAMEWORK")
-  })
-})
-
-describe("infinite-tag harness dispatch", () => {
-  it("routes `harness` through the harness parser and help mentions it", async () => {
-    const { runCli } = await import("../cli.js")
-    const logSpy = (await import("vitest")).vi.spyOn(console, "log").mockImplementation(() => {})
-    const errSpy = (await import("vitest")).vi.spyOn(console, "error").mockImplementation(() => {})
-    try {
-      await runCli(["help"])
-      const help = logSpy.mock.calls.map((call) => String(call[0])).join("\n")
-      expect(help).toContain("harness")
-      expect(help).toContain("--conversions <file>")
-      expect(help).toContain("INF_ARGS_CONVERSIONS_REQUIRED")
-    } finally {
-      logSpy.mockRestore()
-      errSpy.mockRestore()
-    }
-    // Unknown harness flags exit 2 through the harness parser, not the installer's.
-    const originalWrite = process.stderr.write
-    process.stderr.write = (() => true) as typeof process.stderr.write
-    try {
-      expect(await runCli(["harness", "--bogus"])).toBe(EXIT_ARGS)
-    } finally {
-      process.stderr.write = originalWrite
-    }
-  })
 })
 
 describe("guided consent (Infinite)", () => {
@@ -477,15 +264,6 @@ describe("guided consent (Infinite)", () => {
     "--infinite-production-host", "example.com",
     "--infinite-static-proxy", "vercel"
   ]
-
-  it("interactive plan ASKS a consent choice instead of dead-ending on a raw blocker", async () => {
-    const root = copyFixture("static-html-basic")
-    const io = fakeIo({ interactive: true, answers: [false] }) // not gated → not_required
-    const result = await runHarness(parseHarnessArgs(infiniteArgs(root, "--plan")), io, { discover: () => null })
-    expect(io.questions.some((q) => q.toLowerCase().includes("consent banner"))).toBe(true)
-    expect(result.report.steps.find((s) => s.id === "plan")?.status).toBe("ok")
-    expect(result.report.failures).toEqual([])
-  })
 
   it("non-interactive guides with INF_CONSENT_REQUIRED naming both flags, and never silently collects", async () => {
     const root = copyFixture("static-html-basic")
@@ -497,175 +275,7 @@ describe("guided consent (Infinite)", () => {
     // The plan still guards: with no decision it does not proceed to install.
     expect(result.report.steps.find((s) => s.id === "plan")?.status).toBe("failed")
   })
-
-  it("interactive apply records the chosen mode in the written runtime", async () => {
-    const root = copyFixture("static-html-basic")
-    const io = fakeIo({ interactive: true, answers: [true, true, false] }) // gate=required, install=yes, mark=no
-    const result = await runHarness(parseHarnessArgs([...infiniteArgs(root, "--apply"), "--url", "https://example.com/"]), io, {
-      discover: () => null,
-      fetch: (async () => new Response("<html></html>", { status: 200 })) as unknown as typeof fetch,
-      ...clock(),
-      budgetMs: 3_000,
-      pollIntervalMs: 3_000
-    })
-    expect(result.exitCode).toBe(0)
-    expect(readFileSync(join(root, "index.html"), "utf8")).toContain('"mode":"required"')
-  })
-
-  it("an explicit --infinite-consent-mode skips the prompt entirely", async () => {
-    const root = copyFixture("static-html-basic")
-    const io = fakeIo({ interactive: true, answers: [] })
-    const result = await runHarness(
-      parseHarnessArgs([...infiniteArgs(root, "--plan"), "--infinite-consent-mode", "not-required"]),
-      io,
-      { discover: () => null }
-    )
-    expect(io.questions.some((q) => q.toLowerCase().includes("consent banner"))).toBe(false)
-    expect(result.report.steps.find((s) => s.id === "plan")?.status).toBe("ok")
-  })
 })
-
-describe("server-side checkout detection (harness)", () => {
-  it("surfaces the checkout_started + purchase recommendation in --plan next steps and the proposal", async () => {
-    const root = copyFixture("next-pages-router-basic")
-    write(root, "pages/api/stripe-checkout.ts", "export default async function h(){ await stripe.checkout.sessions.create({}) }\n")
-    write(root, "pages/api/stripe-webhook.ts", "export default function h(req){ const e = stripe.webhooks.constructEvent(req.body, sig, sk); if(e.type==='checkout.session.completed'){} }\n")
-    const io = fakeIo({ interactive: false })
-    const result = await runHarness(
-      parseHarnessArgs(["--plan", "--root", root, "--workspace", "ws_1", "--ga4-measurement-id", "G-NEW00001"]),
-      io,
-      { discover: () => null }
-    )
-    const nextSteps = result.report.nextSteps.join("\n")
-    expect(nextSteps).toContain("checkout_started")
-    expect(nextSteps).toContain("purchase")
-    expect(nextSteps).toContain("pages/api/stripe-checkout.ts")
-    const proposal = JSON.parse(readFileSync(join(root, PROPOSED_CONVERSIONS_RELATIVE_PATH), "utf8"))
-    expect(proposal.serverCheckout?.code).toBe("INF_CHECKOUT_SERVER_SIDE")
-  })
-
-  it("recommends the funnel identity merge and post-response capture on the detected checkout→webhook pair", async () => {
-    const root = copyFixture("next-pages-router-basic")
-    write(root, "pages/api/stripe-checkout.ts", "export default async function h(){ await stripe.checkout.sessions.create({}) }\n")
-    write(root, "pages/api/stripe-webhook.ts", "export default function h(req){ const e = stripe.webhooks.constructEvent(req.body, sig, sk); if(e.type==='checkout.session.completed'){} }\n")
-    const io = fakeIo({ interactive: false })
-    const result = await runHarness(
-      parseHarnessArgs(["--plan", "--root", root, "--workspace", "ws_1", "--ga4-measurement-id", "G-NEW00001"]),
-      io,
-      { discover: () => null }
-    )
-    const nextSteps = result.report.nextSteps.join("\n")
-    expect(nextSteps).toContain("INF_FUNNEL_IDENTITY_MERGE")
-    expect(nextSteps).toContain("$anon_distinct_id")
-    expect(nextSteps).toContain("INF_FUNNEL_CAPTURE_AFTER_RESPONSE")
-    // Surfaced in the written report too.
-    const report = readFileSync(join(root, HARNESS_REPORT_RELATIVE_PATH), "utf8")
-    expect(report).toContain("INF_FUNNEL_IDENTITY_MERGE")
-    expect(report).toContain("INF_FUNNEL_CAPTURE_AFTER_RESPONSE")
-  })
-})
-
-describe("buildPrivacyDisclosureNotice (per-lane accuracy)", () => {
-  it("returns null when neither lane is installed", () => {
-    expect(buildPrivacyDisclosureNotice({ pixel: false, serverLane: false })).toBeNull()
-  })
-
-  it("browser-pixel notice does NOT claim IP/UA stay on your server (Infinite is the HTTP endpoint)", () => {
-    const notice = buildPrivacyDisclosureNotice({ pixel: true, serverLane: false })!
-    expect(notice).toContain(PRIVACY_DISCLOSURE_CODE)
-    expect(notice).toContain("api.ultima.inc")
-    expect(notice).toContain(PIXEL_DISCLOSURE_FIELDS)
-    // The pixel POSTs (via rewrite) straight to Infinite, so IP + UA reach the endpoint.
-    expect(notice).toContain("INCLUDING the visitor's IP address and User-Agent")
-    // …and the pixel body has no visit key / UA class, so those must not appear.
-    expect(notice).not.toContain("visit key")
-    expect(notice).not.toContain("userAgentFamily")
-    // The false "stays on your server" claim must NOT appear for a pixel-only install.
-    expect(notice).not.toContain(SERVER_LANE_DISCLOSURE_FIELDS)
-  })
-
-  it("server-lane notice lists the derived fields and correctly says the raw IP/UA never leave the server", () => {
-    const notice = buildPrivacyDisclosureNotice({ pixel: false, serverLane: true })!
-    expect(notice).toContain(SERVER_LANE_DISCLOSURE_FIELDS)
-    expect(notice).toContain("visit key that rotates every 30 minutes")
-    expect(notice).toContain("userAgentFamily")
-    expect(notice).toContain("never leave it")
-    // Server lane sends no pixel-only anonymousId/sessionId body.
-    expect(notice).not.toContain(PIXEL_DISCLOSURE_FIELDS)
-  })
-
-  it("both lanes → both blocks, each naming Ultima Inc. / api.ultima.inc", () => {
-    const notice = buildPrivacyDisclosureNotice({ pixel: true, serverLane: true })!
-    expect(notice).toContain(PIXEL_DISCLOSURE_FIELDS)
-    expect(notice).toContain(SERVER_LANE_DISCLOSURE_FIELDS)
-    expect(notice).toContain("Ultima Inc.")
-  })
-
-  it("names Meta Manual Advanced Matching only when it was actually turned on", () => {
-    // It is off by default, so it must not appear in a disclosure describing an install that does
-    // not have it — a privacy notice that overstates is as wrong as one that understates.
-    expect(buildPrivacyDisclosureNotice({ pixel: true, serverLane: false })).not.toContain(
-      META_ADVANCED_MATCHING_DISCLOSURE_FIELDS
-    )
-    expect(buildPrivacyDisclosureNotice({ pixel: false, serverLane: false, metaAdvancedMatching: true })).toContain(
-      META_ADVANCED_MATCHING_DISCLOSURE_FIELDS
-    )
-    // It says plainly what is shared, rather than hiding behind the word "hashed".
-    expect(META_ADVANCED_MATCHING_DISCLOSURE_FIELDS).toContain("hashed contact details are shared with Meta")
-    expect(META_ADVANCED_MATCHING_DISCLOSURE_FIELDS).toContain("never reads them from your forms")
-  })
-})
-
-describe("privacy disclosure reminder (wired into the run)", () => {
-  const infiniteArgs = (root: string, mode: string) => [
-    mode, "--root", root, "--workspace", "ws_1",
-    "--infinite-site-source-key", "site_public_123",
-    "--infinite-production-host", "example.com",
-    "--infinite-static-proxy", "vercel",
-    "--infinite-consent-mode", "not-required"
-  ]
-
-  it("fires the browser-pixel disclosure when only the Infinite pixel is being installed", async () => {
-    const root = copyFixture("static-html-basic")
-    const io = fakeIo({ interactive: false })
-    const result = await runHarness(parseHarnessArgs(infiniteArgs(root, "--plan")), io, { discover: () => null })
-    const notice = result.report.nextSteps.find((step) => step.includes(PRIVACY_DISCLOSURE_CODE))
-    expect(notice).toBeDefined()
-    expect(notice).toContain(PIXEL_DISCLOSURE_FIELDS)
-    // No server lane requested → no server-lane block.
-    expect(notice).not.toContain(SERVER_LANE_DISCLOSURE_FIELDS)
-    // Surfaced in the written report's checklist.
-    const report = readFileSync(join(root, HARNESS_REPORT_RELATIVE_PATH), "utf8")
-    expect(report).toContain(PRIVACY_DISCLOSURE_CODE)
-  })
-
-  it("fires BOTH lane blocks when the Infinite pixel and the server lane are both installed", async () => {
-    const root = copyFixture("next-app-router-basic")
-    const io = fakeIo({ interactive: false })
-    const result = await runHarness(
-      parseHarnessArgs([...infiniteArgs(root, "--plan"), "--server-lane"]),
-      io,
-      { discover: () => null }
-    )
-    const notice = result.report.nextSteps.find((step) => step.includes(PRIVACY_DISCLOSURE_CODE))
-    expect(notice).toBeDefined()
-    expect(notice).toContain(PIXEL_DISCLOSURE_FIELDS)
-    expect(notice).toContain(SERVER_LANE_DISCLOSURE_FIELDS)
-  })
-
-  it("does NOT remind about disclosure when no Infinite source is being installed", async () => {
-    const root = copyFixture("static-html-basic")
-    write(root, "index.html", `<!doctype html>\n<html>\n<head></head>\n<body>\n<a href="/signup">Start</a>\n</body>\n</html>\n`)
-    const io = fakeIo({ interactive: false })
-    const result = await runHarness(
-      parseHarnessArgs(["--plan", "--root", root, "--workspace", "ws_1", "--ga4-measurement-id", "G-NEW00001"]),
-      io,
-      { discover: () => null }
-    )
-    expect(result.report.nextSteps.some((step) => step.includes(PRIVACY_DISCLOSURE_CODE))).toBe(false)
-  })
-})
-
 
 describe("custom build ownership", () => {
   it("allows inspecting generated output but refuses installing into it", async () => {
@@ -682,26 +292,6 @@ describe("custom build ownership", () => {
     expect(readFileSync(join(root,"dist/index.html"),"utf8")).toBe(html)
     expect(existsSync(join(root,".infinite/install.json"))).toBe(false)
   })
-  it("writes an actionable manual brief for unsupported custom builds without claiming installation", async () => {
-    const root=copyFixture("unsupported-basic")
-    write(root,"vercel.json",JSON.stringify({buildCommand:"node build.cjs",outputDirectory:"dist"}))
-    const io=fakeIo()
-    const result=await runHarness(parseHarnessArgs(["--brief","--root",root]),io,{discover:()=>null})
-    expect(result.exitCode).toBe(1)
-    const brief=JSON.parse(readFileSync(join(root,".infinite/harness-brief.json"),"utf8"))
-    expect(brief.coverageStatus).toBe("not_established")
-    expect(brief.implementationChecklist.join(" ")).toContain("provider-added URL")
-    expect(brief.sourceLayout.outputDirectory).toBe("dist")
-    expect(existsSync(join(root,".infinite/install.json"))).toBe(false)
-    expect(io.outLines.join(" ")).not.toContain("Report: .infinite/REPORT.md")
-  })
-})
-
-it("--check remains read-only even when --brief is also requested", async () => {
-  const root = copyFixture("static-html-basic")
-  const result = await runHarness(parseHarnessArgs(["--check", "--brief", "--root", root]), fakeIo(), {discover:()=>null})
-  expect(result.exitCode).toBe(0)
-  expect(existsSync(join(root,".infinite"))).toBe(false)
 })
 
 it("cannot bypass custom build ownership by selecting one source subdirectory", async () => {

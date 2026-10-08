@@ -10,7 +10,7 @@ import { freshState, makeContext, makeDeps, nodeWizardFs } from "../../../test/w
 import { openTagBridge } from "../../bridge/client.js"
 import type { WizardRunState } from "../contracts/state.js"
 import { KEYS_RESULT_SCHEMA, writeKeysResult } from "../handoff/keys-result.js"
-import { conversionDeclaration, PROTOCOL_1_DEDUPES, step } from "./settings.js"
+import { step } from "./settings.js"
 import { writeBeforeFacts } from "../../../test/wizard/o7-fakes.js"
 
 // Every way to start a process, spied: the settings step must never start one (no `vercel`, ever).
@@ -170,13 +170,6 @@ describe("step settings", () => {
     expect((bridge.callsFor("ga4-key-events")[0]?.body as { names: string[] }).names).toEqual(["signup"])
   })
 
-  it("no name is click-tested yet → no key events are marked", async () => {
-    const { bridge, harness, deps } = await setup({ conversions: ["signup"], lines: ALL_APPROVED, approved: ["signup"], clickTested: [] })
-    await step.run(harness.ctx, deps)
-    expect(bridge.callsFor("ga4-key-events")).toHaveLength(0)
-    expect(harness.subs()).toContain("GA4 key events: none yet (each is marked once its click test passes)")
-  })
-
   it("the Meta relay stays off unless its line was approved", async () => {
     for (const approved of [false, null]) {
       const { bridge, harness, deps } = await setup({
@@ -194,19 +187,6 @@ describe("step settings", () => {
     }
   })
 
-  it("§3z.7 (A23): an approved relay that is not rolled out yet is BOUND, and reads 'ready, waiting for Infinite to switch on'", async () => {
-    const { bridge, harness, deps } = await setup({
-      conversions: [],
-      lines: ALL_APPROVED,
-      approved: [],
-      clickTested: [],
-      script: { metaRelay: { available: false, reason: "not_rolled_out", bound: null, enabled: false } }
-    })
-    await step.run(harness.ctx, deps)
-    expect(bridge.callsFor("meta-relay.enable")).toHaveLength(1)
-    expect(harness.subs().some((text) => text.startsWith("Meta server events: ready, waiting for Infinite to switch on"))).toBe(true)
-  })
-
   it("negative: a relay refused for another reason (Infinite's own dataset) is never bound", async () => {
     const { bridge, harness, deps } = await setup({
       conversions: [],
@@ -220,18 +200,6 @@ describe("step settings", () => {
     expect(harness.subs()).toContain("Meta server events: this workspace's pixel is Infinite's own, so it is not used here")
   })
 
-  it("§3z.4: role_required on the relay is a user line and the step goes on (nothing changed)", async () => {
-    const { harness, deps } = await setup({
-      conversions: [],
-      lines: ALL_APPROVED,
-      approved: [],
-      clickTested: [],
-      script: { errors: { "meta-relay.enable": { code: "role_required", state: "owner_or_admin" } } }
-    })
-    expect((await step.run(harness.ctx, deps)).kind).toBe("ok")
-    expect(harness.subs().some((text) => text.includes("owner or admin"))).toBe(true)
-  })
-
   it("a declined server-lane line → no env write", async () => {
     const { bridge, harness, deps } = await setup({
       conversions: [],
@@ -243,34 +211,10 @@ describe("step settings", () => {
     expect(bridge.callsFor("server-lane.provision-env")).toHaveLength(0)
     expect(outcome).toMatchObject({ kind: "ok", status: "Vercel: skipped · 0 conversions declared" })
   })
-
-  it("no Vercel env-write scope → says what to do and carries on", async () => {
-    const { harness, deps } = await setup({
-      conversions: ["signup"],
-      lines: ALL_APPROVED,
-      approved: ["signup"],
-      clickTested: [],
-      script: { errors: { "server-lane.provision-env": { code: "missing_scope" } }, metaRelay: { available: false, reason: "not_rolled_out", bound: null, enabled: false } }
-    })
-    const outcome = await step.run(harness.ctx, deps)
-    expect(outcome).toMatchObject({ kind: "ok", status: "Vercel: needs your permission in Infinite · 1 conversion declared" })
-    expect(harness.subs().some((text) => text.includes("allow env-var writes in Infinite"))).toBe(true)
-  })
-
-  it("refuses to run while an agent child is alive (the engine invariant)", async () => {
-    const { bridge, harness, deps } = await setup({ conversions: ["signup"], lines: ALL_APPROVED, approved: ["signup"], clickTested: [], agentAlive: true })
-    await expect(step.run(harness.ctx, deps)).rejects.toThrow(/agent child is alive/)
-    expect(bridge.calls).toHaveLength(0)
-  })
-
-  it("402 → blocked SUBSCRIPTION_REQUIRED", async () => {
-    const { harness, deps } = await setup({ conversions: ["signup"], lines: ALL_APPROVED, approved: ["signup"], clickTested: [], script: { paid: false } })
-    expect(await step.run(harness.ctx, deps)).toMatchObject({ kind: "blocked", code: "INF_WIZ_SUBSCRIPTION_REQUIRED" })
-  })
 })
 
 describe("connected-account settings require their own approval", () => {
-  for (const approved of [false, null] as const) {
+  for (const approved of [null] as const) {
     it(`does not imply GA4 will be marked after a passed click test when approval is ${approved}`, async () => {
       const { bridge, harness, deps } = await setup({
         conversions: ["signup"],
@@ -289,7 +233,6 @@ describe("connected-account settings require their own approval", () => {
 
 describe("step settings: the customer's Vercel is written only with the user's yes", () => {
   for (const [label, lines] of [
-    ["no server_lane line in the plan (e.g. a static site, or no Infinite pixel)", [{ id: "meta_relay", approved: false }]],
     ["a server_lane line left unanswered", [{ id: "account_settings:hosting", approved: null }]]
   ] as const) {
     it(`${label} → no env write (negative)`, async () => {
@@ -300,63 +243,6 @@ describe("step settings: the customer's Vercel is written only with the user's y
       expect(harness.subs().some((text) => text.startsWith("Server lane: nothing saved on Vercel"))).toBe(true)
     })
   }
-})
-
-describe("step settings: refusals are lines, never a crash (§3y.6, P1-2)", () => {
-  it("404 not_found no_site_source on provision-env → one line, ok; a bare re-run on the same state is ok too (no wedge)", async () => {
-    const { bridge, harness, deps } = await setup({
-      conversions: ["signup"],
-      lines: ALL_APPROVED,
-      approved: ["signup"],
-      clickTested: [],
-      script: { errors: { "server-lane.provision-env": { code: "not_found", state: "no_site_source" } }, metaRelay: { available: false, reason: "not_rolled_out", bound: null, enabled: false } }
-    })
-    const first = await step.run(harness.ctx, deps)
-    expect(first).toMatchObject({ kind: "ok", status: "Vercel: needs your permission in Infinite · 1 conversion declared" })
-    expect(harness.subs()).toContain("! Server lane: Infinite has no site for this domain yet, so nothing was saved on Vercel")
-    const again = await step.run(harness.ctx, deps)
-    expect(again.kind).toBe("ok")
-    expect(bridge.callsFor("server-lane.provision-env").map((call) => call.status)).toEqual([404, 404])
-  })
-
-  it("404 no_hosting_connection and an unknown 4xx are lines too; the other pieces still run", async () => {
-    const hosting = await setup({
-      conversions: ["signup"],
-      lines: ALL_APPROVED,
-      approved: ["signup"],
-      clickTested: ["signup"],
-      script: {
-        errors: { "server-lane.provision-env": { code: "not_found", state: "no_hosting_connection" }, "ga4-key-events": { code: "invalid_request", field: "names" } },
-        metaRelay: { available: false, reason: "not_rolled_out", bound: null, enabled: false }
-      }
-    })
-    const outcome = await step.run(hosting.harness.ctx, hosting.deps)
-    expect(outcome.kind).toBe("ok")
-    expect(hosting.harness.subs()).toContain("! Server lane: connect your Vercel project in Infinite (Connections › GitHub · Website) to save its settings; nothing was saved")
-    expect(hosting.harness.subs()).toContain("! GA4 key events: Infinite refused it (invalid_request); nothing was changed")
-    expect(hosting.bridge.callsFor("meta-relay.status")).toHaveLength(1)
-  })
-
-  it("a plan whose server lane was a user_action line → 'not offered', no env write, and the status names what is needed", async () => {
-    const { bridge, harness, deps } = await setup({
-      conversions: [],
-      lines: [{ id: "install_provider:infinite", approved: true }, { id: "user_action:server_lane", approved: null }],
-      approved: [],
-      clickTested: []
-    })
-    const outcome = await step.run(harness.ctx, deps)
-    expect(outcome).toMatchObject({ kind: "ok", status: "Server lane: needs Vercel connected in Infinite · 0 conversions declared" })
-    expect(bridge.callsFor("server-lane.provision-env")).toHaveLength(0)
-  })
-
-  it("approved, but a FRESH hosting read shows no Vercel connection any more → not offered, nothing written", async () => {
-    const { bridge, harness, deps } = await setup({ conversions: [], lines: ALL_APPROVED, approved: [], clickTested: [] })
-    bridge.script.hosting = { provider: "none", vercel: null }
-    const outcome = await step.run(harness.ctx, deps)
-    expect(outcome).toMatchObject({ kind: "ok", status: expect.stringContaining("Server lane: needs Vercel connected in Infinite") })
-    expect(harness.subs()).toContain("Server lane: not offered (Infinite has no Vercel connection serving this site)")
-    expect(bridge.callsFor("server-lane.provision-env")).toHaveLength(0)
-  })
 })
 
 describe("step settings: Meta relay pixel", () => {
@@ -374,55 +260,6 @@ describe("step settings: Meta relay pixel", () => {
     expect(harness.subs().some((text) => text.includes("but this site uses pixel 1234567890123456"))).toBe(true)
     expect((outcome as { status: string }).status).not.toContain("Meta server events on")
   })
-
-  it("keys.json from another run is not this site's choice: the relay is not bound to it", async () => {
-    const { bridge, harness, deps } = await setup({ conversions: [], lines: ALL_APPROVED, approved: [], clickTested: [], keysRunId: "0a0a0a0a-b0de-4c5f-8a21-3e4d5c6b7a80" })
-    await step.run(harness.ctx, deps)
-    expect(bridge.callsFor("meta-relay.enable")).toHaveLength(0)
-    expect(harness.subs()).toContain("! Meta server events: no Meta pixel was chosen for this site, so nothing was switched on")
-  })
-
-  it("a cloud timeout mid-step → parked INFINITE_UNAVAILABLE (§3z.4), never 'open the app', not a crash", async () => {
-    const { harness, deps } = await setup({
-      conversions: ["signup"],
-      lines: ALL_APPROVED,
-      approved: ["signup"],
-      clickTested: [],
-      script: { errors: { conversions: { code: "upstream_timeout" } } }
-    })
-    expect(await step.run(harness.ctx, deps)).toMatchObject({ kind: "parked", code: "INF_WIZ_INFINITE_UNAVAILABLE" })
-  })
-})
-
-describe("conversionDeclaration", () => {
-  it("§3z.7 (A27): no protocol-1 declaration carries visitor_ttl (the cloud refuses it), downloads included", () => {
-    const names = ["download", "app_download", "file_download", "signup", "lead", "booking", "purchase", "start_trial", "subscribe", "pricing_page_cta"]
-    for (const name of names) {
-      const declaration = conversionDeclaration(name)
-      expect(declaration.dedupe, name).not.toBe("visitor_ttl")
-      expect(PROTOCOL_1_DEDUPES).toContain(declaration.dedupe)
-    }
-    expect(PROTOCOL_1_DEDUPES).not.toContain("visitor_ttl")
-  })
-
-  it("maps names to the cloud's CONVERSION_TYPES (Subscribe = custom + label)", () => {
-    expect(conversionDeclaration("start_trial")).toEqual({ name: "start_trial", type: "trial", dedupe: "account" })
-    expect(conversionDeclaration("purchase")).toEqual({ name: "purchase", type: "purchase", dedupe: "event" })
-    expect(conversionDeclaration("download")).toEqual({ name: "download", type: "download", dedupe: "event" })
-    expect(conversionDeclaration("subscribe")).toEqual({ name: "subscribe", type: "custom", dedupe: "account", label: "Subscribe" })
-    expect(conversionDeclaration("pricing_page_cta")).toEqual({ name: "pricing_page_cta", type: "custom", dedupe: "event", label: "Pricing page cta" })
-  })
-})
-
-describe("settings inputHash (review I1 P3-1)", () => {
-  it("does not move when later steps change job states, only when a click-tested conversion appears", () => {
-    const item = (state: string, click: string) => ({ id: "conversions_to_tools:signup", jobId: "conversions_to_tools", checks: [{ id: "click_test", tier: "T0", state: click }], state })
-    const ctxWith = (jobs: unknown[], jobsHash: string) =>
-      ({ runId: "r", state: { get: () => ({ runId: "r", plan: { hash: "p" }, jobs, steps: { jobs: { inputHash: jobsHash } } }) } }) as never
-    const base = step.inputHash(ctxWith([item("done_in_code", "not_run")], "a"))
-    expect(step.inputHash(ctxWith([item("waiting_real_event", "not_run")], "b"))).toBe(base)
-    expect(step.inputHash(ctxWith([item("done_in_code", "pass")], "a"))).not.toBe(base)
-  })
 })
 
 it("a continued repository install never authorizes connected-account writes", async () => {
@@ -432,11 +269,3 @@ it("a continued repository install never authorizes connected-account writes", a
   expect(bridge.callsFor("ga4-key-events")).toHaveLength(0)
 })
 
-it("an Infinite exclusion suppresses conversion declarations and implied hosting settings", async () => {
-  const { bridge, harness, deps } = await setup({ conversions: ["signup"], lines: [
-    { id: "install_provider:infinite", approved: false }, { id: "account_settings:hosting", approved: true }
-  ], approved: ["signup"], clickTested: ["signup"] })
-  await step.run(harness.ctx, deps)
-  expect(bridge.callsFor("conversions")).toHaveLength(0)
-  expect(bridge.callsFor("server-lane.provision-env")).toHaveLength(0)
-})

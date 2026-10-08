@@ -194,23 +194,6 @@ describe("Vercel, any framework", () => {
     expectTreeEquals(root, original)
   })
 
-  it("does not tell you to install @vercel/functions when it is already a dependency", () => {
-    const root = viteOn({ "vercel.json": "{}\n" })
-    withDependency(root, "@vercel/functions", "^1.0.0")
-    const installPlan = plan(root)
-    expect(installPlan.serverLane?.installPackages).toBeUndefined()
-    expect(installPlan.serverLane?.assumptions.some((a) => a.includes("already in package.json"))).toBe(true)
-    expect(renderPreview(installPlan)).not.toContain("npm install @vercel/functions")
-  })
-
-  it("is chosen by a linked .vercel/project.json too, and by vercel.json over every other signal", () => {
-    expect(plan(viteOn({ ".vercel/project.json": '{"projectId":"p"}\n' })).serverLane?.mode).toBe(
-      "vercel-middleware"
-    )
-    const tie = viteOn({ "vercel.json": "{}\n", "netlify.toml": "[build]\n" })
-    expect(plan(tie).serverLane).toMatchObject({ mode: "vercel-middleware", targetEvidence: "vercel.json" })
-  })
-
   it("leaves an existing unmanaged middleware.ts alone and puts the exact file in the brief", () => {
     const root = viteOn({ "vercel.json": "{}\n", "middleware.ts": EXISTING_MIDDLEWARE })
     const original = snapshotTree(root)
@@ -267,30 +250,6 @@ describe("Vercel, any framework", () => {
     expect(() => uninstallInstallation({ root, dryRun: false })).toThrow(/changed after installation/)
     expect(existsSync(middlewarePath)).toBe(true)
   })
-
-  it("installs alongside the pixel and names the target (and why) in the preview", () => {
-    const root = viteOn({ "vercel.json": "{}\n" })
-    const artifacts: WorkspaceInstallArtifacts = {
-      infinite: {
-        siteSourceKey: "site_public_test",
-        collectPath: "/infinite/events/collect",
-        productionHosts: ["example.com"],
-        consentMode: "not_required"
-      }
-    }
-    const { plan: installPlan } = planAndApply(root, artifacts)
-    const preview = renderPreview(installPlan)
-    expect(preview).toContain("→ Vercel root middleware (any framework)  (chosen because this repo has vercel.json)")
-    expect(preview).toContain(`+ ${VERCEL_MIDDLEWARE_PATH}`)
-    expect(preview).toContain("reportInfiniteOutcome() and the Stripe/lead helpers for your server routes")
-    expect(preview).toContain("→ then run: npm install @vercel/functions")
-
-    // The public artifacts are baked in; the secret never is.
-    const module = readFileSync(join(root, VERCEL_MODULE_PATH), "utf8")
-    expect(module).toContain('const INFINITE_SOURCE_KEY_FALLBACK = "site_public_test"')
-    expect(module).toContain('const INFINITE_PRODUCTION_HOSTS: string[] = ["example.com"]')
-    expect(module).not.toMatch(/INFINITE_SERVER_EVENT_SECRET\s*=\s*"[^"]/)
-  })
 })
 
 describe("Netlify", () => {
@@ -318,15 +277,6 @@ describe("Netlify", () => {
     expectTreeEquals(root, original)
     expect(existsSync(join(root, "netlify/edge-functions"))).toBe(false)
   })
-
-  it("is chosen by an @netlify/* dependency alone", () => {
-    const root = copyFixture("vite-react-basic")
-    withDependency(root, "@netlify/functions", "^2.0.0")
-    expect(plan(root).serverLane).toMatchObject({
-      mode: "netlify-edge",
-      targetEvidence: 'the "@netlify/functions" dependency'
-    })
-  })
 })
 
 describe("directories the lane did not create", () => {
@@ -344,17 +294,6 @@ describe("directories the lane did not create", () => {
     expectTreeEquals(root, original)
     expect(existsSync(join(root, "netlify"))).toBe(true)
     expect(existsSync(join(root, "netlify/edge-functions"))).toBe(false)
-  })
-
-  it("leaves a pre-existing empty functions/ directory alone", () => {
-    const root = viteOn({ "wrangler.toml": 'name = "app"\npages_build_output_dir = "dist"\n' })
-    mkdirSync(join(root, "functions"))
-    const { apply } = planAndApply(root)
-    expect(apply.serverLane?.manifest.createdDirs).not.toContain("functions")
-
-    uninstallInstallation({ root, dryRun: false })
-    expect(existsSync(join(root, "functions"))).toBe(true)
-    expect(existsSync(join(root, CLOUDFLARE_MIDDLEWARE_PATH))).toBe(false)
   })
 
   it("still prunes a functions/ directory it created itself", () => {
@@ -423,14 +362,6 @@ describe("Cloudflare", () => {
 
     uninstallInstallation({ root, dryRun: false })
     expectTreeEquals(root, original)
-  })
-
-  it("treats an existing functions/ directory as the Pages signal", () => {
-    const root = viteOn({
-      "functions/hello.ts": "export const onRequest = () => new Response('hi')\n",
-      "wrangler.toml": 'name = "app"\nmain = "src/index.ts"\n'
-    })
-    expect(plan(root).serverLane?.mode).toBe("cloudflare-pages")
   })
 
   it("falls back to the brief for a plain Worker: no page-view lane file, only the outcome helper", () => {

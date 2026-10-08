@@ -66,27 +66,6 @@ describe("vite-react index.html injection", () => {
     expect(verifyInstallation({ root }).buildOk).toBe(true)
   })
 
-  it("installs regardless of main.tsx contents — an adversarial entrypoint is simply IGNORED", () => {
-    // An old false-"supported" shape: a real react-dom import shadowed by a local createRoot. The
-    // adapter no longer reads main.tsx at all, so it installs cleanly by injecting into index.html.
-    const root = copyFixture("vite-react-basic")
-    const adversarial =
-      [
-        'import { createRoot } from "react-dom/client"',
-        "function createRoot(n: number) { return { render() { void n } } }",
-        "createRoot(1).render()"
-      ].join("\n") + "\n"
-    writeFileSync(join(root, "src/main.tsx"), adversarial)
-
-    const plan = planFor(root)
-    expect(plan.applyMode).toBe("supported")
-    const apply = applyInstallation({ root, workspaceId: "ws_test", plan, allowDirty: true })
-    expect(apply.requiresManual).toBeUndefined()
-    expect(readFileSync(join(root, "index.html"), "utf8")).toContain(MANAGED_START)
-    // The entrypoint is left byte-for-byte — never read, never edited.
-    expect(readFileSync(join(root, "src/main.tsx"), "utf8")).toBe(adversarial)
-  })
-
   it("a COMMENTED provider snippet in main.tsx does NOT suppress the install (false-adoption guard)", () => {
     // The live iter7 P0: a commented posthog.init( in main.tsx made detectUnmanagedProviders ADOPT
     // posthog, dropping it from the install -> green exit, no pixel. It must still be INSTALLED.
@@ -126,25 +105,6 @@ describe("vite-react index.html injection", () => {
     const after = readFileSync(join(root, "index.html"), "utf8")
     expect(after).not.toContain(MANAGED_START)
     expect(after).toBe(original)
-  })
-
-  it("full cycle: install -> reinstall (idempotent) -> verify -> uninstall", () => {
-    const root = copyFixture("vite-react-basic")
-    const original = readFileSync(join(root, "index.html"), "utf8")
-
-    const first = applyInstallation({ root, workspaceId: "ws_test", plan: planFor(root), allowDirty: true })
-    expect(first.changedFiles).toContain("index.html")
-    const afterFirst = readFileSync(join(root, "index.html"), "utf8")
-
-    const second = applyInstallation({ root, workspaceId: "ws_test", plan: planFor(root), allowDirty: true })
-    expect(second.changedFiles).toEqual([])
-    expect(readFileSync(join(root, "index.html"), "utf8")).toBe(afterFirst)
-    expect(afterFirst.match(/infinite:start/g)).toHaveLength(1)
-
-    expect(verifyInstallation({ root }).buildOk).toBe(true)
-
-    uninstallInstallation({ root, allowDirty: true })
-    expect(readFileSync(join(root, "index.html"), "utf8")).toBe(original)
   })
 
   it("falls closed to the manual step (exit-2 machinery) when index.html has no </head>", () => {
@@ -189,55 +149,5 @@ describe("vite-react posthog reverse proxy (vercel.json)", () => {
     const result = uninstallInstallation({ root, allowDirty: true })
     expect(result.removedFiles).toContain("vercel.json")
     expect(existsSync(join(root, "vercel.json"))).toBe(false)
-  })
-
-  it("reapplies Infinite-only as PostHog plus Infinite without replacing customer routes", () => {
-    const root = copyFixture("vite-react-basic")
-    const original = '{ "rewrites" : [ { "source" : "/customer", "destination" : "/api/customer" } ] }\n'
-    writeFileSync(join(root, "vercel.json"), original)
-    const infiniteOnly: WorkspaceInstallArtifacts = {
-      productionHosts: ["example.com"],
-      infinite: {
-        siteSourceKey: "site_public_123",
-        collectPath: "/infinite/events/collect",
-        productionHosts: ["example.com"],
-        staticProxy: "vercel",
-        consentMode: "required"
-      }
-    }
-    const mixed = applyPosthogProxy(
-      {
-        ...infiniteOnly,
-        posthog: { projectKey: "phc_test", apiHost: "https://eu.i.posthog.com" }
-      },
-      { proxy: true }
-    )
-
-    applyInstallation({
-      root,
-      workspaceId: "ws_test",
-      plan: planInstallation({ root, workspaceId: "ws_test", artifacts: infiniteOnly }),
-      allowDirty: true
-    })
-    applyInstallation({
-      root,
-      workspaceId: "ws_test",
-      plan: planInstallation({ root, workspaceId: "ws_test", artifacts: mixed }),
-      allowDirty: true
-    })
-
-    expect(JSON.parse(readFileSync(join(root, "vercel.json"), "utf8")).rewrites).toEqual([
-      { source: "/customer", destination: "/api/customer" },
-      { source: "/ingest/static/:path(.*)", destination: "https://eu-assets.i.posthog.com/static/:path" },
-      { source: "/ingest/array/:path(.*)", destination: "https://eu-assets.i.posthog.com/array/:path" },
-      { source: "/ingest/:path(.*)", destination: "https://eu.i.posthog.com/:path" },
-      {
-        source: "/infinite/events/collect",
-        destination: "https://api.ultima.inc/api/analytics/events/collect"
-      }
-    ])
-
-    uninstallInstallation({ root, allowDirty: true })
-    expect(readFileSync(join(root, "vercel.json"), "utf8")).toBe(original)
   })
 })

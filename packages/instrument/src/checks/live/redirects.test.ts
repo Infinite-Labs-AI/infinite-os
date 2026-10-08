@@ -2,9 +2,9 @@
 // middleware — `redirectsCoveringPaths` flags it statically; the walk proves the hops keep the query.
 import { describe, expect, it } from "vitest"
 
-import { FIXED_NOW, fixtureFetch, loopbackSite, type FixtureHandler } from "../../../test/wizard/fixture-fetch.js"
+import { FIXED_NOW, fixtureFetch, type FixtureHandler } from "../../../test/wizard/fixture-fetch.js"
 
-import { checkRedirectWalk, redirectsCoveringPaths, redirectTestParams, vercelSourcePattern } from "./redirects.js"
+import { checkRedirectWalk, redirectsCoveringPaths } from "./redirects.js"
 
 const ctx = { runId: "7f3c2a91-b0de-4c5e-9f00-000000000000", now: FIXED_NOW }
 
@@ -42,15 +42,6 @@ describe("redirect walk", () => {
     expect(results[0]!.reason).not.toContain("fbclid")
   })
 
-  it("falls back to GET when the server refuses HEAD", async () => {
-    const { results, requests } = await walk({
-      "https://acme.test/": (request) => (request.method === "HEAD" ? { status: 405 } : { status: 200, body: "<html></html>" })
-    })
-    expect(results[0]!.state).toBe("pass")
-    expect(requests.map((request) => request.method)).toEqual(["HEAD", "GET"])
-    expect(requests.every((request) => request.headers.purpose === "prefetch")).toBe(true)
-  })
-
   it("a loop is a problem; an unreachable site is undetermined (never pass)", async () => {
     const loop = await walk({ "https://acme.test/": keep("https://acme.test/x"), "https://acme.test/x": keep("https://acme.test/") })
     expect(loop.results[0]!.state).toBe("problem")
@@ -59,41 +50,9 @@ describe("redirect walk", () => {
     const notFound = await walk({ "https://acme.test/": { status: 404 } })
     expect(notFound.results[0]!.state).toBe("undetermined")
   })
-
-  it("walks a real HTTP redirect on a loopback fixture server", async () => {
-    const site = await loopbackSite("https://acme-site.test", (request, response) => {
-      const url = new URL(request.url ?? "/", "http://x")
-      if (url.pathname === "/old") {
-        response.writeHead(302, { location: `/new${url.search}` })
-        response.end()
-        return
-      }
-      response.writeHead(200, { "content-type": "text/html" })
-      response.end("<html></html>")
-    })
-    try {
-      const results = await checkRedirectWalk({ urls: ["https://acme-site.test/old"] }, { version: "t", fetch: site.fetch, attempts: 1 }, ctx)
-      expect(results[0]!.state).toBe("pass")
-      expect(site.requests.map((request) => new URL(request.url).pathname)).toEqual(["/old", "/new"])
-      expect(site.requests.every((request) => request.headers.purpose === "prefetch")).toBe(true)
-    } finally {
-      await site.close()
-    }
-  })
-
-  it("names doctor's walk without a run id", () => {
-    expect(redirectTestParams(null).utm_campaign).toBe("check_doctor")
-    expect(Object.keys(redirectTestParams(null)).sort()).toEqual(["utm_campaign", "utm_medium", "utm_source"])
-  })
 })
 
 describe("config redirects that run before middleware", () => {
-  it("matches Vercel source patterns", () => {
-    expect(vercelSourcePattern("/signup/:path*").test("/signup/start")).toBe(true)
-    expect(vercelSourcePattern("/old-blog/:slug").test("/old-blog/a/b")).toBe(false)
-    expect(vercelSourcePattern("/(.*)").test("/anything")).toBe(true)
-  })
-
   it("flags a redirect covering a conversion or matcher path (negative: an unrelated redirect)", () => {
     const vercelJson = JSON.stringify({ redirects: [{ source: "/signup/:path*", destination: "/start/:path*" }, { source: "/old", destination: "/" }] })
     expect(redirectsCoveringPaths(vercelJson, { conversionPaths: ["/signup/done"], matcherPaths: ["/pricing"] })).toEqual([

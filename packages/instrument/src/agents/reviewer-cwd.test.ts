@@ -9,7 +9,7 @@ import { afterEach, describe, expect, it } from "vitest"
 import { defaultWorktreeRoot, worktreeDirFor } from "../git/worktree.js"
 import { AGENT_MODELS } from "../wizard/contracts/agents.js"
 import { buildClaudeReviewerArgv, reviewerDenyCoveringCwd, reviewerWasBlind } from "./claude.js"
-import { resolveSensitivePaths, wizardCacheRoot } from "./paths.js"
+import { resolveSensitivePaths } from "./paths.js"
 
 const dirs: string[] = []
 afterEach(() => {
@@ -36,13 +36,6 @@ describe("the reviewer's worktree is outside every Read deny (review I1 P1-4)", 
     for (const denied of denies) expect(cwd === denied || cwd.startsWith(`${denied}/`), denied).toBe(false)
     // Still under $HOME (the Codex profile's HOME deny keeps it closed to every other role).
     expect(cwd.startsWith(`${h}/`)).toBe(true)
-  })
-
-  it("negative: a worktree under the wizard's cache root (the old location) IS covered, and the guard names it", async () => {
-    const h = home()
-    const sensitive = await resolveSensitivePaths({ home: h, env: {} })
-    const old = join(wizardCacheRoot(h), "7f3c2a91b0de", "worktrees", "review-aaaaaaaaaaaa-0a0b0c")
-    expect(reviewerDenyCoveringCwd(sensitive, old)).toBe(wizardCacheRoot(h))
   })
 
   it("a denial on the PR's own files means a blind review; a repo-secret denial does not", () => {

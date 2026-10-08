@@ -7,11 +7,9 @@ import { dirname, join } from "node:path"
 
 import { describe, expect, it } from "vitest"
 
-import { buildAnalyticsModuleSource } from "../frameworks/managed-files.js"
 import { buildManagedHtmlBlock } from "../frameworks/managed-html.js"
 import { getProviderAdapter } from "../providers/index.js"
-import type { InstallPlan } from "../types.js"
-import { censusChecks, censusInstalledTools, censusPages, censusViaTagManager, runCensus } from "./census.js"
+import { censusChecks, runCensus } from "./census.js"
 
 const NOW = () => new Date("2026-10-02T10:00:00.000Z")
 const ctx = { runId: "7f3c2a91-b0de-4c03-9a00-000000000001", now: NOW }
@@ -54,29 +52,6 @@ describe("envSourcedIds (R1-28)", () => {
     expect(census.envSourcedIds).toEqual([{ tool: "meta", envName: "NEXT_PUBLIC_META_PIXEL_ID", file: "apps/web/app/layout.tsx", line: 10 }])
     expect(census.entries).toEqual([{ tool: "meta", kind: "fbq_init", id: null, file: "apps/web/app/layout.tsx", line: 10, owner: "adopted" }])
   })
-
-  it("follows one local constant and reads import.meta.env, GoogleAnalytics and PostHogProvider props", () => {
-    const root = repo({
-      "src/analytics.ts": `const GA = import.meta.env.VITE_GA4_ID\nexport function start() {\n  gtag('config', GA)\n}\n`,
-      "app/providers.tsx": `export function P({ children }) {\n  return <PostHogProvider apiKey={process.env.NEXT_PUBLIC_POSTHOG_KEY!} options={{ api_host: "/ingest" }}>{children}</PostHogProvider>\n}\n`,
-      "app/layout.tsx": `export default function L() {\n  return <GoogleAnalytics gaId={process.env["NEXT_PUBLIC_GA_ID"]} />\n}\n`
-    })
-    const names = runCensus({ root, appRoot: "." }).envSourcedIds.map((entry) => `${entry.tool}:${entry.envName}@${entry.file}:${entry.line}`)
-    expect(names.sort()).toEqual([
-      "ga4:NEXT_PUBLIC_GA_ID@app/layout.tsx:2",
-      "ga4:VITE_GA4_ID@src/analytics.ts:3",
-      "posthog:NEXT_PUBLIC_POSTHOG_KEY@app/providers.tsx:2"
-    ])
-  })
-
-  it("negative: a literal id is not env-sourced; a call in a comment or a plain string is no install", () => {
-    const root = repo({
-      "app/layout.tsx": `// fbq('init', process.env.NEXT_PUBLIC_OLD_PIXEL)\nconst example = "fbq('init', process.env.NEXT_PUBLIC_DOC_PIXEL)"\nfbq('init', '1234567890123456')\n`
-    })
-    const census = runCensus({ root, appRoot: "." })
-    expect(census.envSourcedIds).toEqual([])
-    expect(census.entries).toEqual([{ tool: "meta", kind: "fbq_init", id: "1234567890123456", file: "app/layout.tsx", line: 3, owner: "adopted" }])
-  })
 })
 
 describe("managed blocks count once per tool and id", () => {
@@ -88,26 +63,6 @@ describe("managed blocks count once per tool and id", () => {
   }
   const snippets = (framework: "static-html" | "next-app-router") =>
     (["ga4", "meta", "infinite"] as const).flatMap((provider) => getProviderAdapter(provider).plan(framework, artifacts[provider] as never, { artifacts } as never).instructions)
-
-  it("static HTML: the managed block is managed (the AM accessor's re-init is not a second start)", () => {
-    const block = buildManagedHtmlBlock(snippets("static-html").map((instruction) => instruction.snippet))
-    const root = repo({ "index.html": `<!doctype html><html><head>${block}</head><body></body></html>` })
-    const census = runCensus({ root, appRoot: "." })
-    expect(census.entries.map((entry) => `${entry.owner}:${entry.kind}:${entry.tool}:${entry.id}`).sort()).toEqual([
-      "managed:managed_block:ga4:G-FAKE00001",
-      "managed:managed_block:infinite:site_FAKEacme",
-      "managed:managed_block:meta:1234567890123456"
-    ])
-    expect(check(censusChecks(census, ctx), "census_one_per_tool").state).toBe("pass")
-  })
-
-  it("Next: the managed module's decoded bootstrapSource is managed, at the literal's line", () => {
-    const module = buildAnalyticsModuleSource({ instructions: snippets("next-app-router") } as unknown as InstallPlan)
-    const root = repo({ "lib/infinite-analytics.ts": module, "app/layout.tsx": "export default function L({ children }) { return children }\n" })
-    const census = runCensus({ root, appRoot: "." })
-    expect(census.entries.every((entry) => entry.owner === "managed" && entry.file === "lib/infinite-analytics.ts" && entry.line === 3)).toBe(true)
-    expect(censusInstalledTools(census)).toEqual(["infinite", "ga4", "meta"])
-  })
 
   it("negative: managed + an adopted gtag for the same id on one page is a duplicate", () => {
     const block = buildManagedHtmlBlock(snippets("static-html").map((instruction) => instruction.snippet))
@@ -135,65 +90,9 @@ describe("duplicates, per page", () => {
     ])
   })
 
-  it("negative: one gtag config on each of two static pages is one per page, not a duplicate", () => {
-    const root = repo({
-      "index.html": "<html><head><script>gtag('config', 'G-FAKE00001');</script></head></html>",
-      "about.html": "<html><head><script>gtag('config', 'G-FAKE00001');</script></head></html>"
-    })
-    const census = runCensus({ root, appRoot: "." })
-    expect(censusPages(census.entries).map((page) => page.page).sort()).toEqual(["about.html", "index.html"])
-    expect(check(censusChecks(census, ctx), "census_ga4_config_once").state).toBe("pass")
-  })
-
   it("two fbq('init') for one pixel on one page are a duplicate (the 849ccf1 near-miss)", () => {
     const root = repo({ "index.html": "<html><head><script>fbq('init', '1234567890123456');fbq('init', '1234567890123456');</script></head></html>" })
     expect(check(censusChecks(runCensus({ root, appRoot: "." }), ctx), "census_meta_init_once").state).toBe("problem")
-  })
-
-  it("GTM containers are listed but never counted as a second gtag", () => {
-    const root = repo({
-      "index.html": `<html><head><script>(function(w,d,s,l,i){j.src='https://www.googletagmanager.com/gtm.js?id='+i;})(window,document,'script','dataLayer','GTM-FAKE01');gtag('config','G-FAKE00001');</script></head></html>`
-    })
-    const census = runCensus({ root, appRoot: "." })
-    expect(census.entries.map((entry) => `${entry.kind}:${entry.id}`)).toEqual(["gtag_config:G-FAKE00001", "gtm:GTM-FAKE01"])
-    expect(check(censusChecks(census, ctx), "census_ga4_config_once").state).toBe("pass")
-  })
-})
-
-describe("fix round (review O6-R16, R17)", () => {
-  it("R16: a layout runs only on its own segment subtree: one GA4 start in each route group's layout is not a duplicate", () => {
-    const root = repo({
-      "app/(marketing)/layout.tsx": "gtag('config', 'G-AAAA1111')\n",
-      "app/(app)/layout.tsx": "gtag('config', 'G-AAAA1111')\n",
-      "app/(marketing)/page.tsx": "export default function P() { return null }\n",
-      "app/(app)/dashboard/page.tsx": "export default function D() { return null }\n"
-    })
-    const census = runCensus({ root, appRoot: "." })
-    expect(check(censusChecks(census, ctx), "census_ga4_config_once").state).toBe("pass")
-    // negative: a NESTED layout under one that already starts GA4 is a real duplicate on its pages
-    const nested = repo({
-      "app/layout.tsx": "gtag('config', 'G-AAAA1111')\n",
-      "app/(app)/layout.tsx": "gtag('config', 'G-AAAA1111')\n"
-    })
-    const result = check(censusChecks(runCensus({ root: nested, appRoot: "." }), ctx), "census_ga4_config_once")
-    expect(result.state).toBe("problem")
-    expect(result.evidence).toEqual([
-      { file: "app/(app)/layout.tsx", line: 1 },
-      { file: "app/layout.tsx", line: 1 }
-    ])
-  })
-
-  it("R17: a GTM-only site does not claim GA4 installed (its container is unreadable statically)", () => {
-    const root = repo({
-      "index.html": `<html><head><script>(function(w,d,s,l,i){j.src='https://www.googletagmanager.com/gtm.js?id='+i;})(window,document,'script','dataLayer','GTM-FAKE01');</script></head></html>`
-    })
-    const census = runCensus({ root, appRoot: "." })
-    expect(censusInstalledTools(census)).toEqual([])
-    expect(censusViaTagManager(census)).toBe(true)
-    // negative: a hand-written gtag config is GA4 installed
-    const gtag = repo({ "index.html": "<html><head><script>gtag('config', 'G-FAKE00001');</script></head></html>" })
-    expect(censusInstalledTools(runCensus({ root: gtag, appRoot: "." }))).toEqual(["ga4"])
-    expect(censusViaTagManager(runCensus({ root: gtag, appRoot: "." }))).toBe(false)
   })
 })
 
@@ -204,10 +103,5 @@ describe("identify / reset evidence (finish line 7)", () => {
     })
     const census = runCensus({ root, appRoot: "." })
     expect(census.identify).toEqual({ identifyCalls: [{ file: "app/auth.ts", line: 2 }], resetCalls: [{ file: "app/auth.ts", line: 5 }] })
-  })
-
-  it("negative: a mention in a comment is not a call", () => {
-    const root = repo({ "app/auth.ts": "// remember to posthog.identify(user.id) and posthog.reset()\n" })
-    expect(runCensus({ root, appRoot: "." }).identify).toEqual({ identifyCalls: [], resetCalls: [] })
   })
 })

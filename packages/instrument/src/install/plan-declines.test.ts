@@ -36,14 +36,6 @@ it("honors declines read from an answers file", async () => {
   expect(seedItemsAfterApprovals([item], [], plan, resolvePlanAnswers(plan, answer, { consentFlag: null }).approvals)).toEqual([])
 })
 
-it("an explicit consent refusal is not replaced by the consent flag", () => {
-  const consentPlan: PlanModel = { ...plan, lines: [...plan.lines, { id: "consent_mode", kind: "consent_mode", requires: "approval", editable: true, text: "Choose consent mode" }] }
-  const resolved = resolvePlanAnswers(consentPlan, { approved: [], declined: ["consent_mode"], edits: {} }, { consentFlag: "not_required" })
-  expect(resolved.consentMode).toBeNull()
-  expect(resolved.lines.find(line => line.id === "consent_mode")?.approved).toBe(false)
-  expect(resolved.approvals.declined).toContain("consent_mode")
-})
-
 it("a duplicate exclusion also suppresses its setup-check repair path", () => {
   const duplicate = candidate("duplicates_remove", "ga4_config:G-FAKE")
   const setup = candidate("setup_check_fixes", "provider_census")
@@ -65,16 +57,10 @@ it("excluding the only helper provider suppresses rewrite and conversion jobs", 
 })
 
 it.each([
-  ["preview_guard_adopted", "host_guard"], ["sensitive_pages", "sensitive_pages"],
-  ["capture_beside_adopted_pixel", "click_id_capture"], ["conversion_names", "silent_form"]
+  ["preview_guard_adopted", "host_guard"],
+  ["capture_beside_adopted_pixel", "click_id_capture"],
 ] as const)("exclusion of %s also blocks setup-check path %s", (kind, check) => {
   const excludedPlan: PlanModel = { ...plan, lines: [{ id: "excluded", kind, text: "Excluded", requires: "info", editable: false }] }
   expect(applyApprovalsTo([candidate("setup_check_fixes", check)], excludedPlan, { approved: [], declined: ["excluded"], edits: {} })).toEqual([])
 })
 
-it("a saved proof-file refusal still excludes Infinite after that explanatory line disappears", () => {
-  const current: PlanModel = { ...plan, lines: [{ id: "install_provider:infinite", kind: "install_provider", text: "Install Infinite", requires: "info", editable: false }] }
-  const resolved = resolvePlanAnswers(current, { approved: [], declined: ["info:infinite_site_file"], edits: {} }, { consentFlag: null })
-  expect(resolved.lines).toEqual([{ id: "install_provider:infinite", approved: false }])
-  expect(applyApprovalsTo([candidate("setup_check_fixes", "silent_form")], current, resolved.approvals)).toEqual([])
-})

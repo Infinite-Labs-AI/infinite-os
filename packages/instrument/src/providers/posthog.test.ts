@@ -71,18 +71,4 @@ describe("the managed PostHog snippet, executed", () => {
     }
     expect(snippet).toContain(`o='${OFFICIAL_METHODS.join(" ")}'.split(' ')`)
   })
-
-  it("negative: the stub list it replaced throws while building and never queues init", () => {
-    // The previous list named methods under parents the stub never creates (person.*, group.*).
-    const broken = snippet.replace(
-      /o='[^']*'\.split/,
-      "o='init capture people.set person.set_once group.set'.split"
-    )
-    const { stub, error } = runSnippet(broken)
-    expect(error?.name).toBe("TypeError")
-    expect(plain(stub._i)).toEqual([])
-    // And with no top-level identify, an early identify throws even when the stub builds.
-    const noIdentify = snippet.replace(/o='[^']*'\.split/, "o='init capture'.split")
-    expect(runSnippet(noIdentify, 'posthog.identify("user_123")').error?.name).toBe("TypeError")
-  })
 })

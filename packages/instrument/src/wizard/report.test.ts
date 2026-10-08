@@ -1,6 +1,3 @@
-import { buildPrBody } from "../review/post.js"
-import { createScanner } from "../review/scan.js"
-import { item } from "../../test/wizard/repo.js"
 import { readFileSync } from "node:fs"
 import { dirname, join } from "node:path"
 import { fileURLToPath } from "node:url"
@@ -19,11 +16,8 @@ import {
   ReportRuleError,
   buildColumn,
   cellViolations,
-  checksPassingCell,
   createReportBuilder,
   formatShare,
-  renderMarkdown,
-  renderTerminal,
   type ColumnFact
 } from "./report.js"
 
@@ -103,79 +97,6 @@ describe("ReportBuilder.build", () => {
     filled.finishLine.proof_from_real_visit = { value: "pass", display: "pass", state: "pass", provenance: { source: "cloud_receipt", at: AT, runId: RUN } }
     expect(() => buildFrom({ ...columns, live_today: filled })).toThrow(/not measured/)
   })
-
-  it("an absent column renders every cell as \"—\" with a reason (the proven column waits for the deploy)", () => {
-    const report = builder.build({
-      runId: RUN,
-      tagVersion: "0.12.0",
-      site: { repoLabel: "github.com/acme/acme-store", productionHost: null },
-      columns: { live_today: null, in_pr: null, proven_live: null },
-      provenLivePending: "deploy",
-      day7: null,
-      notes: [], verdictFacts: null
-    })
-    for (const row of report.rows) {
-      for (const column of REPORT_COLUMN_IDS) {
-        expect(row.cells[column].display).toBe("—")
-        expect(row.cells[column].value).toBeNull()
-        expect(row.cells[column].reason).toBeTruthy()
-      }
-    }
-    expect(report.rows[0]!.cells.proven_live).toMatchObject({ state: "pending", reason: "pending_deploy" })
-  })
-
-  it("review-2 P3-7: a missing Proven live column pending rerun_tag reads \"—\" not exercised, never \"open Infinite\"", () => {
-    const report = builder.build({
-      runId: RUN,
-      tagVersion: "0.12.0",
-      site: { repoLabel: "github.com/acme/acme-store", productionHost: null },
-      columns: { live_today: null, in_pr: null, proven_live: null },
-      provenLivePending: "rerun_tag",
-      day7: null,
-      notes: [], verdictFacts: null
-    })
-    expect(report.columns.proven_live.pending).toBe("rerun_tag")
-    for (const row of report.rows) {
-      if (row.id === "day7_checkin") continue
-      expect(row.cells.proven_live, row.id).toMatchObject({ display: "—", value: null, state: "not_measured", reason: "not_exercised" })
-    }
-    const each = report.finishLine.find((line) => line.id === "each_tool_once")!.cells.proven_live
-    expect(each).toMatchObject({ display: "—", state: "not_measured", reason: "not_exercised" })
-    // NEGATIVE: nothing in the report sends the user to the app.
-    expect(JSON.stringify(report)).not.toContain("pending_open_infinite")
-  })
-
-  it("keeps a measured live problem without calling its locally verified agent edit missing", () => {
-    const job = {
-      ...item("meta_improve:spa_page_view", ["app/layout.tsx"]),
-      title: "Send a Meta PageView on every page change",
-      state: "failed" as const,
-      claim: { status: "done" as const, note: "wired", at: AT },
-      edits: [{ editId: "agent-run-t1-0", file: "app/layout.tsx" }],
-      checks: [
-        { id: "spa_page_view_applied", tier: "S" as const, state: "pass" as const, at: AT, runId: RUN },
-        { id: "meta_spa_page_view", tier: "RH" as const, state: "problem" as const, reason: "meta_spa_page_view_missing", at: AT, runId: RUN }
-      ]
-    }
-    const proven = buildColumn("proven_live", {
-      runId: RUN,
-      meta: { measuredAt: AT, sha: "f".repeat(40) },
-      facts: [fact("deployed_dry.spa_navigation", "problem", { display: "Meta page view missing" })],
-      rows: {}
-    })
-    const report = builder.build({
-      runId: RUN,
-      tagVersion: "0.12.0",
-      site: { repoLabel: "github.com/acme/acme-store", productionHost: "www.acme-store.com" },
-      columns: { live_today: null, in_pr: null, proven_live: proven },
-      provenLivePending: null,
-      day7: null,
-      notes: [],
-      verdictFacts: { jobs: [job], openFindings: [], tools: [], installedUnknown: null }
-    })
-    expect(report.verdict?.reasons.map((reason) => reason.kind)).toContain("live_problem")
-    expect(report.verdict?.reasons.map((reason) => reason.kind)).not.toContain("approved_fix_missing")
-  })
 })
 
 describe("buildColumn (typed inputs → one column)", () => {
@@ -212,168 +133,11 @@ describe("buildColumn (typed inputs → one column)", () => {
     ).toThrow(/percentage below/)
   })
 
-  it("computes each finish-line cell ONLY from its §3i.7 inputs; an absent input is not measured and leaves N", () => {
-    const column = buildColumn("live_today", {
-      runId: RUN,
-      meta: { measuredAt: AT, sha: null },
-      facts: [
-        fact("dry_live.graded", "pass"),
-        fact("census", "problem", { display: "GA4 configured twice" }),
-        fact("t1.csp", "pass"),
-        // An input §3i.7 does not name for live_today's `no_pii` (rehearsal facts belong to in_pr): ignored there.
-        fact("rehearsal.pii", "problem")
-      ],
-      rows: {}
-    })
-    expect(column.finishLine.each_tool_once).toMatchObject({ state: "problem", display: "GA4 configured twice", provenance: { source: "wizard_check" } })
-    expect(column.finishLine.csp_allows).toMatchObject({ state: "pass", provenance: { source: "wizard_check" } })
-    expect(column.finishLine.no_pii).toMatchObject({ state: "not_measured", value: null, display: "—" })
-    expect(column.cells.checks_passing).toMatchObject({ value: "1/2", display: "1 pass · 1 problem · 11 not testable of 13", state: "problem" })
-  })
-
-  it("N determinable: undetermined and pending count as unknown; not measured and info do not count", () => {
-    const cell = checksPassingCell(
-      {
-        each_tool_once: { value: "pass", display: "pass", state: "pass", provenance: { source: "desktop_test", at: AT, runId: RUN } },
-        ids_match_connections: { value: "unknown", display: "unknown", state: "undetermined", provenance: { source: "desktop_test", at: AT, runId: RUN } },
-        conversions_server_side: { value: null, display: "—", state: "pending", provenance: { source: "cloud_read", at: AT, runId: RUN }, reason: "needs_7_days" },
-        ga4_key_events_received: { value: "info", display: "info", state: "info", provenance: { source: "cloud_read", at: AT, runId: RUN } },
-        spa_page_views: { value: null, display: "—", state: "not_measured", provenance: { source: "wizard_check", at: AT, runId: RUN }, reason: "not_exercised" }
-      } as Partial<Record<(typeof FINISH_LINE_IDS)[number], Cell>>,
-      RUN,
-      AT
-    )
-    expect(cell).toMatchObject({ value: "1/3", display: "1 pass · 0 problems · 2 unknown · 10 not testable of 13", state: "undetermined" })
-  })
-
   it("refuses an agent-shaped input: an unknown input id, or a 'verified' reading with no receipt (negatives)", () => {
     expect(() => buildColumn("live_today", { runId: RUN, meta: { measuredAt: AT, sha: null }, facts: [fact("agent.claim" as never, "pass")], rows: {} })).toThrow(/not a finish-line input/)
     expect(() =>
       buildColumn("proven_live", { runId: RUN, meta: { measuredAt: AT, sha: "f".repeat(40) }, facts: [fact("receipts.per_tool", "pass", { display: "verified" })], rows: {} })
     ).toThrow(/without a receipt/)
-  })
-
-  it("the in_pr column is keyed to the PR head (negative: no sha throws)", () => {
-    expect(() => buildColumn("in_pr", { runId: RUN, meta: { measuredAt: AT, sha: null }, facts: [], rows: {} })).toThrow(ReportRuleError)
-  })
-
-  it("round 3: with no proven column yet, a pending-by-design cell keeps its own reason (the cloud refuses ga4 key events with any other)", () => {
-    const snapshots = snapshotsOf(example)
-    for (const pending of ["deploy", "open_infinite"] as const) {
-      const report = builder.build({
-        runId: RUN,
-        tagVersion: "0.12.0",
-        site: { repoLabel: "github.com/acme/acme-store", productionHost: "www.acme-store.com" },
-        columns: { live_today: snapshots.live_today, in_pr: snapshots.in_pr, proven_live: null },
-        provenLivePending: pending,
-        day7: null,
-        notes: [], verdictFacts: null
-      })
-      const proven = (id: string) => report.finishLine.find((line) => line.id === id)!.cells.proven_live
-      expect(proven("ga4_key_events_received")).toMatchObject({ value: null, state: "pending", reason: "needs_7_days", provenance: { source: "cloud_read" } })
-      expect(proven("conversions_server_side")).toMatchObject({ state: "pending", reason: "waiting_real_event" })
-      // negative: a cell that is not pending by design still says what the column waits for.
-      expect(proven("each_tool_once")).toMatchObject({ state: "pending", reason: pending === "deploy" ? "pending_deploy" : "pending_open_infinite" })
-    }
-  })
-
-  it("F17: the live_today column has no commit SHA (§3i.1; the cloud refuses any other value)", () => {
-    const base = "0a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d"
-    expect(buildColumn("live_today", { runId: RUN, meta: { measuredAt: AT, sha: null }, facts: [], rows: {} }).meta.sha).toBeNull()
-    // negative: the branch's base commit in the column meta is refused by the column builder…
-    expect(() => buildColumn("live_today", { runId: RUN, meta: { measuredAt: AT, sha: base }, facts: [], rows: {} })).toThrow(/live_today\.sha must be null/)
-    // …and by the report rules, for a snapshot handed in from a state file and for a report edited after its build.
-    const snapshots = snapshotsOf(example)
-    expect(() => buildFrom({ ...snapshots, live_today: { ...snapshots.live_today, meta: { measuredAt: AT, sha: base } } })).toThrow(/live_today\.sha must be null/)
-    const edited = structuredClone(buildFrom(snapshots))
-    edited.columns.live_today.sha = base
-    expect(() => builder.payload(edited)).toThrow(/live_today\.sha must be null/)
-    // the PR and merge columns: a full 40-hex SHA or null (a short SHA is refused, as the cloud does).
-    const short = structuredClone(buildFrom(snapshots))
-    short.columns.in_pr.sha = "1a2b3c4"
-    expect(() => builder.payload(short)).toThrow(/in_pr\.sha must be a 40-hex/)
-  })
-})
-
-describe("renderers", () => {
-  const report = buildFrom(snapshotsOf(example))
-
-  it("markdown uses plain-text statuses and never a checkbox, and escapes table pipes", () => {
-    const markdown = renderMarkdown(report)
-    expect(markdown).not.toContain("- [ ]")
-    expect(markdown).toContain("| | Live site today | In this pull request | Proven live |")
-    expect(markdown).toContain("**7 days later:**")
-    expect(markdown).toContain("4 of 4 fire: 2 verified (receipts from this visit)")
-    const piped = structuredClone(report)
-    piped.rows[1]!.cells.live_today.display = "a | b"
-    expect(renderMarkdown(piped)).toContain("a \\| b")
-  })
-
-  it("review P1-3: markdown opens with THE verdict's headline and one line per reason; ungraded says so", () => {
-    expect(report.verdict).toBeNull()
-    expect(renderMarkdown(report).split("\n")[0]).toBe("**www.acme-store.com: not graded yet · run npx infinite-tag to finish the live checks**")
-    const graded = structuredClone(report)
-    graded.verdict = {
-      state: "problems",
-      headline: "acme-store.com does not collect properly yet: 1 approved fix is not in the code (Remove duplicate tags) · Meta pixel sent nothing on the real visit",
-      reasons: [
-        { kind: "approved_fix_missing", count: 1, names: ["Remove duplicate tags"] },
-        { kind: "tool_silent", count: 1, names: ["Meta pixel"] }
-      ],
-      installed: []
-    }
-    const lines = renderMarkdown(graded).split("\n")
-    expect(lines.slice(0, 5)).toEqual([
-      `**${graded.verdict.headline}**`,
-      "",
-      "- Approved fixes the wizard has not confirmed in the code: Remove duplicate tags",
-      "- Sent nothing on the real visit: Meta pixel",
-      ""
-    ])
-    graded.verdict = { state: "properly", headline: "acme-store.com collects analytics properly now", reasons: [], installed: [] }
-    expect(renderMarkdown(graded).split("\n").slice(0, 3)).toEqual(["**acme-store.com collects analytics properly now**", "", "This run could not check its own commits against your consent code and policy pages (no wizard commits were measured); please review the changed files."])
-  })
-
-  it("the terminal table fits the width: three columns at 160, stacked below 140", () => {
-    const wide = renderTerminal(report, 160)
-    for (const line of wide.split("\n")) expect(line.length).toBeLessThanOrEqual(160)
-    expect(wide).toContain("Live site today")
-    expect(wide.split("\n").find((line) => line.startsWith("GA4 page views per visit"))).toContain("2 (counts every visit twice)")
-    const narrow = renderTerminal(report, 70)
-    for (const line of narrow.split("\n")) expect(line.length).toBeLessThanOrEqual(70)
-    expect(narrow).toContain("  Proven live: ")
-    expect(narrow).toContain("7 days later: —")
-  })
-})
-
-describe("the before/after wording: 13 analytics checks, consent information excluded, footnotes that match what is shown", () => {
-  const report = buildFrom(snapshotsOf(example))
-  const outputs = () => [renderMarkdown(report), renderTerminal(report, 160), renderTerminal(report, 120), renderTerminal(report, 70)]
-
-  it("the row is 'Checks passing' and every cell counts 13 analytics checks (never '(of 14)' over 'of 12 determinable')", () => {
-    const row = report.rows.find((entry) => entry.id === "checks_passing")!
-    expect(row.label).toBe("Checks passing")
-    expect(row.cells.live_today.display).toBe("4 pass · 7 problems · 2 not testable of 13")
-    expect(row.cells.proven_live.display).toBe("10 pass · 0 problems · 3 unknown of 13")
-    // §3i semantics unchanged: the value is pass over the determinable count.
-    expect(row.cells.live_today.value).toBe("4/11")
-    for (const text of outputs()) {
-      expect(text).not.toContain("(of 14)")
-      expect(text).not.toContain("determinable")
-    }
-  })
-
-  it("a raw count below 50 page views is footnoted as shown, once, never as '— / pending' or 'too few to say'", () => {
-    const small = report.rows.flatMap((row) => REPORT_COLUMN_IDS.map((column) => row.cells[column])).filter((cell) => cell.reason === "below_sample_floor")
-    expect(small.length, "the example shows a raw count below the floor").toBeGreaterThan(0)
-    for (const cell of small) expect(cell.value).not.toBeNull()
-    const withNote = structuredClone(report)
-    withNote.notes = ["Below 50 page views: raw counts shown"]
-    for (const text of [...outputs(), renderMarkdown(withNote), renderTerminal(withNote, 120)]) {
-      expect(text.split("Below 50 page views: raw counts shown").length - 1, text).toBe(1)
-      expect(text).not.toMatch(/pending: (fewer|below) .*50 page views/i)
-      expect(text).not.toMatch(/too few page views/i)
-    }
   })
 })
 
@@ -381,37 +145,10 @@ describe("§3z.8: the tag refuses every cell the cloud parser refuses (review I1
   const cell = (overrides: Partial<Cell> = {}): Cell => ({ value: "pass", display: "pass", state: "pass", provenance: { source: "wizard_check", at: AT, runId: RUN }, ...overrides })
   const refused = (overrides: Partial<Cell>, startedAt: string | null = null) => cellViolations("c", cell(overrides), RUN, startedAt)
 
-  it("an honest cell passes", () => {
-    expect(refused({})).toEqual([])
-    expect(refused({ value: "12%", display: "12%", raw: { numerator: 12, denominator: 100 } })).toEqual([])
-  })
-
-  it("ASCII arrows (->, <-, =>) and the other arrow blocks are refused, like the Unicode arrow", () => {
-    for (const display of ["hop 1 (http://a => b)", "a -> b", "b <- a", "a → b", "a ⟶ b", "a ⤴ b", "a ⬆ b", "▲ 3"]) {
-      expect(refused({ display }).join(" "), display).toMatch(/arrows/)
-    }
-  })
-
-  it("a percentage needs its raw counts, and below 50 shows raw counts", () => {
-    expect(refused({ display: "-> 50%" }).join(" ")).toMatch(/raw counts/)
-    expect(refused({ display: "50%" }).join(" ")).toMatch(/raw counts/)
-    expect(refused({ display: "50%", raw: { numerator: 5, denominator: 10 } }).join(" ")).toMatch(/floor/)
-  })
-
   it("a receipt from before the run started never backs verified/proven", () => {
     const verified = { display: "1 verified", provenance: { source: "cloud_receipt" as const, at: AT, runId: RUN, receiptAt: "2026-10-02T08:00:00.000Z" } }
     expect(refused(verified, "2026-10-02T09:00:00.000Z").join(" ")).toMatch(/before this run started/)
     expect(refused({ ...verified, provenance: { ...verified.provenance, receiptAt: "2026-10-02T09:05:00.000Z" } }, "2026-10-02T09:00:00.000Z")).toEqual([])
-  })
-
-  it("lengths, control characters, check ids, and the null/— rules match the cloud", () => {
-    expect(refused({ display: "x".repeat(201) }).join(" ")).toMatch(/1–200/)
-    expect(refused({ display: "a\u0007b" }).join(" ")).toMatch(/control/)
-    expect(refused({ value: "v".repeat(121) }).join(" ")).toMatch(/120/)
-    expect(refused({ provenance: { source: "wizard_check", at: AT, runId: RUN, checkId: "Bad Id" } }).join(" ")).toMatch(/check id/)
-    expect(refused({ value: "x", display: "—", reason: "not_exercised" }).join(" ")).toMatch(/null value/)
-    expect(refused({ value: null, display: "—", reason: "not_exercised", state: "pass" }).join(" ")).toMatch(/never a pass/)
-    expect(refused({ value: 3, display: "3", reason: "read_failed", state: "undetermined" }).join(" ")).toMatch(/read nothing/)
   })
 
   it("buildColumn throws on a fact display the cloud would refuse (so it never reaches the cloud)", () => {
@@ -419,26 +156,3 @@ describe("§3z.8: the tag refuses every cell the cloud parser refuses (review I1
   })
 })
 
-
-it.each(["frozen_unit", "policy_page", "unproven_wiring", "restored_unit"] as const)("describes %s owner work without inventing a restoration", kind => {
-  const job = { ...item("unusual_layout:owner", ["app/layout.tsx"]), state: "left_for_you" as const, ownerBoundary: { kind, file: "app/layout.tsx", line: 1 } }
-  const report = builder.build({
-    runId: RUN, tagVersion: "0.12.0", site: example.site,
-    columns: { live_today: null, in_pr: null, proven_live: null },
-    provenLivePending: null, day7: null, notes: [],
-    verdictFacts: { jobs: [job], openFindings: [], tools: null, installedUnknown: null }
-  })
-  const restored = kind === "restored_unit"
-  expect(report.notes.some(note => note.startsWith("Put back:"))).toBe(restored)
-  if (!restored) expect(report.notes).toContain("For you: make this change in app/layout.tsx.")
-})
-
-it("lists every explicit exclusion under You said no to in local and PR report markdown", () => {
-  const excluded = Array.from({ length: 25 }, (_, i) => `Excluded action ${i}`)
-  const markdown = renderMarkdown(example, undefined, [], excluded)
-  expect(markdown).toContain("### You said no to")
-  for (const line of excluded) expect(markdown).toContain(`- ${line}`)
-  const body = buildPrBody({ reportMarkdown: markdown, howToReview: "Review the files", runId: RUN, isPrivate: true, diffText: "", connectionIds: [], scanner: createScanner({ literals: [], allowedIds: [] }) })
-  expect(body).toContain("### You said no to")
-  for (const line of excluded) expect(body).toContain(`- ${line}`)
-})

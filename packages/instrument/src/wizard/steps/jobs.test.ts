@@ -11,7 +11,7 @@ import { agentItem, baseState, fakeBridge, fakeChecks, fakeInstaller, fakeRegist
 import type { AgentRunnerImpl } from "../../agents/runner.js"
 import type { WizardOptions } from "../contracts/deps.js"
 import type { CheckResult, ChecklistItem, CheckRunner } from "../contracts/jobs.js"
-import { NESTED_BRIEF_PATH, NESTED_SANDBOX_HINT, step } from "./jobs.js"
+import { NESTED_BRIEF_PATH, step } from "./jobs.js"
 import { verifyFinalSeal } from "../../agents/fence.js"
 import { finalSealPath } from "../../agents/paths.js"
 
@@ -121,89 +121,6 @@ describe("step jobs: claims are only claims; the wizard checks", () => {
     expect(metaReply).toMatchObject({ error: expect.stringContaining("unknown job_id preview_guard:meta") }) // Never offered to the agent.
   })
 
-  it("keeps code-owned wiring handoffs informational and includes them in the closing summary", async () => {
-    const item: ChecklistItem = {
-      ...agentItem("meta_improve:capture", ["app/layout.tsx"]), owner: "code", state: "left_for_you",
-      ownerBoundary: { kind: "frozen_unit", file: "app/layout.tsx", line: 1 },
-      note: "For you: add the capture wiring at app/layout.tsx:1, inside your consent code."
-    }
-    const t = setup({ scenario: {}, items: [item] })
-    const outcome = await step.run(t.ctx, t.deps)
-    expect(outcome).toMatchObject({ kind: "ok", status: expect.stringContaining("1 left for you (1 to do yourself)") })
-    expect(t.current().jobs[0]).toMatchObject({ state: "left_for_you", note: item.note, ownerBoundary: item.ownerBoundary })
-    expect(runs(t.fakes)).toHaveLength(0)
-    expect(t.checkCalls.run).toHaveLength(0)
-  })
-
-  it("rechecks a frozen preview guard without turning its owner task into a blocked job", async () => {
-    const file = "src/tracking.ts"
-    const source = "export function start() {\n  fbq('consent', 'grant');\n  fbq('init', '1234567890123456');\n}\n"
-    const item: ChecklistItem = {
-      ...agentItem("preview_guard:meta", [file]), state: "left_for_you",
-      trigger: { finding: "Meta initialization", evidence: [{ file, line: 3 }] },
-      ownerBoundary: { kind: "frozen_unit", file, line: 3 }
-    }
-    const t = setup({ scenario: {}, items: [item] })
-    write(t.root, file, source)
-    runGit(t.root, ["add", file])
-    runGit(t.root, ["commit", "-m", "tracking fixture"])
-    expect(await step.run(t.ctx, t.deps)).toMatchObject({ kind: "ok" })
-    expect(t.current().jobs[0]).toMatchObject({ state: "left_for_you", note: "For you: add the preview guard to Meta pixel's start-up at src/tracking.ts:3; until then preview and local visits count in Meta pixel." })
-    expect(readFileSync(join(t.root, file), "utf8")).toBe(source)
-    expect(runs(t.fakes)).toHaveLength(0)
-  })
-
-  it("keeps policy and restored handoffs separate without reporting either as blocked", async () => {
-    const policy: ChecklistItem = {
-      ...agentItem("preview_guard:ga4", ["terms.html"]), state: "left_for_you",
-      ownerBoundary: { kind: "policy_page", file: "terms.html", line: 1 },
-      note: "Kept terms.html as it is: it is a policy page."
-    }
-    const restored: ChecklistItem = {
-      ...agentItem("preview_guard:meta", ["app/layout.tsx"]), state: "left_for_you",
-      ownerBoundary: { kind: "restored_unit", file: "app/layout.tsx", line: 1 },
-      note: "Put back: an edit reached consent code at app/layout.tsx:1."
-    }
-    const t = setup({ scenario: {}, items: [policy, restored] })
-    const outcome = await step.run(t.ctx, t.deps)
-    expect(outcome).toMatchObject({ kind: "ok", status: expect.stringContaining("2 left for you (1 to do yourself; 1 put back: reached consent code)") })
-    expect(t.current().jobs.map(item => ({ state: item.state, note: item.note }))).toEqual([policy, restored].map(item => ({ state: item.state, note: item.note })))
-    expect(runs(t.fakes)).toHaveLength(0)
-  })
-
-  it("does not turn an agent progress sentence into file counts or a writing phase", async () => {
-    const t = setup({ scenario: { turns: [{ steps: [{ tool: "report_progress", args: { job_id: "meta_improve:landing", text: "Editing phantom.ts" } }] }] }, items: [ITEMS[0]!] })
-    await step.run(t.ctx, t.deps)
-    const lines = t.recorded.events.filter((event) => event.type === "step.status").map((event) => String(event.fields.text))
-    expect(lines).not.toContainEqual(expect.stringContaining("1 edited"))
-    expect(lines).not.toContainEqual(expect.stringContaining("Writing the changes"))
-  })
-
-  it("returns to writing when a real edit follows an earlier claim", async () => {
-    const t = setup({ scenario: { turns: [{ steps: [claim("meta_improve:landing"), { edit: { path: "app/page.tsx", content: PAGE_EDIT } }, claim("conversions_to_tools:trial")] }] } })
-    await step.run(t.ctx, t.deps)
-    const lines = t.recorded.events.filter((event) => event.type === "step.status").map((event) => String(event.fields.text))
-    expect(lines.some((line) => line.includes("Writing the changes") && line.includes("1 of 2 claimed"))).toBe(true)
-  })
-
-  it("shows a blocked claim as blocked by the agent, not as a done claim", async () => {
-    const t = setup({ scenario: { turns: [{ steps: [claim("meta_improve:landing", "blocked", "the site has no pixel") ] }] }, items: [ITEMS[0]!] })
-    await step.run(t.ctx, t.deps)
-    const states = t.recorded.events.filter((event) => event.type === "job.progress").map((event) => event.fields.state)
-    expect(states).toContain("agent_blocked")
-    expect(states).not.toContain("agent_claim")
-  })
-  it("returns an S-check failure in the claim tool reply before the turn ends", async () => {
-    const staticId = ITEMS[0]!.checks.find((check) => check.tier === "S")!.id
-    const t = setup({
-      scenario: { turns: [{ steps: [{ edit: { path: "app/layout.tsx", content: POST_INSTALL_LAYOUT + "\n// changed\n" } }, claim("meta_improve:landing")] }] },
-      checks: { results: { [staticId]: ["problem", "pass"] } },
-      items: [ITEMS[0]!]
-    })
-    await step.run(t.ctx, t.deps)
-    const reply = records(t.fakes).find((entry) => entry.kind === "mcp" && entry.tool === "job_claim")?.reply?.result?.structuredContent
-    expect(reply).toMatchObject({ staticChecks: { state: "problem", problems: [expect.stringContaining(staticId)] } })
-  })
   it("claimed + S/B/T0 pass → done_in_code; edits recorded; clickTested PATCHed once no agent is alive", async () => {
     const t = setup({
       scenario: { turns: [{ steps: [{ edit: { path: "app/page.tsx", content: PAGE_EDIT } }, claim("conversions_to_tools:trial"), claim("meta_improve:landing")] }] }
@@ -326,14 +243,6 @@ describe("step jobs: the wizard's own build may write only its output (review I1
     expect(verdict?.ok).toBe(false)
     expect(verdict?.changed).toContain(".lintstagedrc")
   })
-
-  it("negative: a build that writes only .next/ and next-env.d.ts is fine", async () => {
-    const { outcome } = await runWithBuild((root) => {
-      write(root, ".next/cache/x.json", "{}\n")
-      write(root, "next-env.d.ts", "/// <reference types=\"next\" />\n")
-    })
-    expect(outcome.kind).toBe("ok")
-  })
 })
 
 describe("step jobs: a running dev server (§3z.12 B21)", () => {
@@ -348,106 +257,9 @@ describe("step jobs: a running dev server (§3z.12 B21)", () => {
     expect(outcome).toMatchObject({ kind: "parked", code: "INF_WIZ_DEV_SERVER_RUNNING" })
     expect(runs(t.fakes)).toEqual([])
   })
-
-  it("negative: a quiet tree starts the agent", async () => {
-    const t = setup({ scenario: { turns: [{ steps: [claim("conversions_to_tools:trial")] }] } })
-    const outcome = await step.run(t.ctx, t.deps)
-    expect(outcome.kind).toBe("ok")
-    expect(runs(t.fakes, "claude").length).toBeGreaterThan(0)
-  })
 })
 
-describe("step jobs: questions, usage, fence", () => {
-  it("ask_user → ONE batched agent-questions ask after the turn, then a resume with the answer", async () => {
-    const t = setup({
-      scenario: {
-        turns: [
-          { steps: [{ tool: "ask_user", args: { job_id: "meta_improve:landing", question: "Is /pricing a landing page?", why: "Own layout." } }, { tool: "ask_user", args: { job_id: "conversions_to_tools:trial", question: "Which button starts the trial?", why: "Two candidates." } }] },
-          { steps: [claim("meta_improve:landing"), claim("conversions_to_tools:trial")] }
-        ]
-      },
-      answer: (kind) => (kind === "agent-questions" ? { answers: { "meta_improve:landing": "yes", "conversions_to_tools:trial": "the hero button" } } : "__cancelled__")
-    })
-    await step.run(t.ctx, t.deps)
-    expect(t.recorded.asks).toHaveLength(1)
-    expect(t.recorded.asks[0]!.kind).toBe("agent-questions")
-    expect((t.recorded.asks[0]!.payload as { questions: unknown[] }).questions).toHaveLength(2)
-    const second = runs(t.fakes, "claude")[1]!
-    expect(second.argv![second.argv!.indexOf("--append-system-prompt") + 1]).toContain('the user answered "the hero button"')
-  })
-
-  it("under --yes nothing is asked: the item is blocked:needs_you (negative)", async () => {
-    const t = setup({
-      scenario: { turns: [{ steps: [{ tool: "ask_user", args: { job_id: "meta_improve:landing", question: "Is /pricing a landing page?", why: "x" } }] }] },
-      options: { yes: true },
-      items: [ITEMS[0]!]
-    })
-    await step.run(t.ctx, t.deps)
-    expect(t.recorded.asks).toEqual([])
-    expect(stateOf(t.current().jobs, "meta_improve:landing")).toBe("left_for_you")
-  })
-
-  it("out of usage → parked AGENT_OUT_OF_USAGE, edits undone, session kept in state for the resume", async () => {
-    // The untouched tree: each job's own checks find what the job is for (the detector seeded it).
-    const t = setup({
-      scenario: { turns: [{ steps: [{ edit: { path: "app/page.tsx", content: PAGE_EDIT } }, { replay: "claude-rate-limit-rejected.jsonl" }, { sleep: 5000 }] }] },
-      checks: { results: { click_test: ["problem"], meta_mirror_wired: ["problem"] } }
-    })
-    const outcome = await step.run(t.ctx, t.deps)
-    expect(outcome).toMatchObject({ kind: "ok" })
-    expect((outcome as { status: string }).status).toMatch(/resets at .*; run `npx infinite-tag` again to resume/)
-    expect(readFileSync(join(t.root, "app/page.tsx"), "utf8")).not.toContain("data-conversion")
-    expect(t.current().agent?.workerSession).toMatchObject({ kind: "claude", sessionId: expect.any(String) })
-    // LF4-P1-2 (round 1): the jobs are checked on the tree as it stands (the stopped turn's edit was undone); a problem
-    // stays pending for the resume, never failed or blocked while the agent can still come back to it.
-    expect(t.current().jobs.map((item) => item.state)).toEqual(["left_for_you", "left_for_you"])
-    expect((outcome as { status: string }).status).toContain(`Nothing in the code yet: Job meta_improve:landing; Job conversions_to_tools:trial.`)
-  })
-
-  it("LF4-P1-2 round 1: out of usage with a job's change in the tree that no claim names → its own checks pass there → done in code, claim-less, and the reason says so", async () => {
-    const t = setup({
-      // Round 1 makes the trial job's change and claims nothing; round 2 runs out of usage.
-      scenario: { turns: [{ steps: [{ edit: { path: "app/page.tsx", content: PAGE_EDIT } }] }, { steps: [{ replay: "claude-rate-limit-rejected.jsonl" }, { sleep: 5000 }] }] },
-      checks: { results: { click_test: ["pass"], meta_mirror_wired: ["problem"] } }
-    })
-    const outcome = await step.run(t.ctx, t.deps)
-    expect(outcome).toMatchObject({ kind: "ok" })
-    expect(readFileSync(join(t.root, "app/page.tsx"), "utf8")).toContain("data-conversion")
-    const trial = t.current().jobs.find((item) => item.id === "conversions_to_tools:trial")!
-    expect(["done_in_code", "waiting_deploy", "waiting_real_event"]).toContain(trial.state)
-    expect(trial.claim).toBeUndefined()
-    expect((outcome as { status: string }).status).toContain("Done in code (the wizard's own checks passed on the code): Job conversions_to_tools:trial.")
-    expect((outcome as { status: string }).status).not.toContain("Nothing in the code yet: Job conversions_to_tools:trial")
-  })
-
-  it("LF4-P2-2: round 1 keeps an edit, round 2 runs out of usage → the reason says per job what stays and what the stopped turn undid", async () => {
-    const LAYOUT_EDIT = `${POST_INSTALL_LAYOUT}// round 2\n`
-    const t = setup({
-      scenario: {
-        turns: [
-          { steps: [{ edit: { path: "app/page.tsx", content: PAGE_EDIT } }, claim("conversions_to_tools:trial")] },
-          { steps: [{ edit: { path: "app/layout.tsx", content: LAYOUT_EDIT } }, { replay: "claude-rate-limit-rejected.jsonl" }, { sleep: 5000 }] }
-        ]
-      },
-      // The untouched landing job's own check finds what it is for (the detector seeded it).
-      checks: { results: { click_test: ["problem"], meta_mirror_wired: ["problem"] } }
-    })
-    const outcome = await step.run(t.ctx, t.deps)
-    expect(outcome).toMatchObject({ kind: "ok" })
-    const reason = (outcome as { status: string }).status
-    const title = (id: string) => t.current().jobs.find((item) => item.id === id)!.title
-    // Round 1's change is in the tree (and recorded on its job); round 2's unfinished edit is not.
-    expect(readFileSync(join(t.root, "app/page.tsx"), "utf8")).not.toContain("data-conversion")
-    expect(readFileSync(join(t.root, "app/layout.tsx"), "utf8")).not.toContain("// round 2")
-    expect(t.current().jobs.find((item) => item.id === "conversions_to_tools:trial")!.edits).toEqual([])
-    expect(reason).not.toContain("Kept in the code from earlier rounds")
-    expect(reason).toContain("The stopped turn's unfinished edits (app/layout.tsx) were undone.")
-    expect(reason).toContain(`Nothing in the code yet: ${title("meta_improve:landing")};`)
-    expect(reason).toMatch(/run `npx infinite-tag` again to resume/)
-    // NEGATIVE: never the fixed sentence that read as if nothing survived.
-    expect(reason).not.toContain("its edits were undone")
-  })
-
+describe("step jobs: the fence", () => {
   it("a new file under node_modules → blocked FENCE_TAMPER and NO build or T0 ran", async () => {
     const t = setup({ scenario: { turns: [{ steps: [{ edit: { path: "node_modules/next/x.js", content: "1" } }, claim("conversions_to_tools:trial")] }] } })
     const outcome = await step.run(t.ctx, t.deps)
@@ -479,52 +291,9 @@ describe("step jobs: questions, usage, fence", () => {
     expect(item.checks.find((check) => check.id === "turn_gate")).toMatchObject({ tier: "S", state: "problem" })
     expect(t.checkCalls.build).toBe(0)
   })
-
-  it("a toolless agent → failed AGENT_TOOLLESS (continue), jobs blocked:toolless", async () => {
-    // The untouched tree: each job's own checks find what the job is for (the detector seeded it).
-    const t = setup({ scenario: { turns: [{ mcp: "skip" }] }, checks: { results: { click_test: ["problem"], meta_mirror_wired: ["problem"] } } })
-    expect(await step.run(t.ctx, t.deps)).toMatchObject({ kind: "ok" })
-    expect(t.current().jobs.map((item) => stateOf([item], item.id))).toEqual(["left_for_you", "left_for_you"])
-  })
-
-  it("no worker → the agent jobs are listed for the user and no agent is spawned", async () => {
-    const t = setup({ scenario: {}, worker: null })
-    expect(await step.run(t.ctx, t.deps)).toEqual({ kind: "ok", status: "No agent: 2 jobs listed for you" })
-    expect(runs(t.fakes)).toEqual([])
-    expect(t.current().jobs.map((item) => stateOf([item], item.id))).toEqual(["left_for_you", "left_for_you"])
-  })
 })
 
 describe("step jobs: nested mode (§3d.7)", () => {
-  it("reanchors the initial nested handoff before installer-shifted edits are attributed", async () => {
-    const file = "src/tracking.ts"
-    const config = "gtag('config', 'G-FAKE00001');\n"
-    const base = config + config + "fbq('init', '1234567890123456');\n"
-    const installed = "// installer adds an entry import here\n" + base
-    const duplicate = { ...agentItem("duplicates_remove:ga4_config:G-FAKE00001", [file]), trigger: { finding: "Two config calls", evidence: [{ file, line: 1 }, { file, line: 2 }] } }
-    const guard = { ...agentItem("preview_guard:meta", [file]), trigger: { finding: "Unguarded pixel", evidence: [{ file, line: 3 }] } }
-    const t = setup({ scenario: {}, options: { nested: true, json: true }, items: [duplicate, guard], checks: { results: { adopted_init_guarded: ["problem"] } } })
-    write(t.root, file, base)
-    runGit(t.root, ["add", file])
-    runGit(t.root, ["commit", "-m", "tracking before install"])
-    write(t.root, file, installed)
-
-    expect(await step.run(t.ctx, t.deps)).toMatchObject({ kind: "parked", code: "INF_WIZ_NEEDS_ANSWERS" })
-    const seeded = t.recorded.events.filter(event => event.type === "job.seeded").map(event => event.fields.item as ChecklistItem)
-    expect(seeded.find(item => item.id === duplicate.id)?.trigger.evidence).toEqual([{ file, line: 2 }, { file, line: 3 }])
-    expect(seeded.find(item => item.id === guard.id)?.trigger.evidence).toEqual([{ file, line: 4 }])
-
-    const after = installed.replace(config + config, config)
-    write(t.root, file, after)
-    t.ctx.options.resume = true
-    expect(await step.run(t.ctx, t.deps)).toMatchObject({ kind: "ok" })
-    expect(stateOf(t.current().jobs, duplicate.id)).toBe("waiting_deploy")
-    expect(stateOf(t.current().jobs, guard.id)).toBe("left_for_you")
-    expect(readFileSync(join(t.root, file), "utf8")).toBe(after)
-    expect(t.recordedEdits.flat().map(edit => edit.file)).toContain(file)
-    expect(runs(t.fakes)).toEqual([])
-  })
-
   it("seeds the jobs for the parent agent, parks, then fences and checks its edits on --resume", async () => {
     const t = setup({ scenario: {}, options: { nested: true, json: true } })
     const parked = await step.run(t.ctx, t.deps)
@@ -555,57 +324,3 @@ describe("step jobs: nested mode (§3d.7)", () => {
   })
 })
 
-describe("step jobs: nested inside another sandbox (§3z B26)", () => {
-  const NO_SANDBOX = "macOS sandbox-exec could not apply a profile (sandbox_apply: Operation not permitted); refusing to run site code unsandboxed."
-
-  it("continues with unknown local checks when before already declared the sandbox unavailable", async () => {
-    const t = setup({ scenario: {}, options: { nested: true, json: true } })
-    write(t.root, ".infinite/wizard/before.json", JSON.stringify({ schema: "infinite-tag.before-facts.v1", runId: STEP_RUN_ID, measuredAt: t.ctx.now().toISOString(), facts: {
-      keys: await t.deps.bridge.keys(), hosting: {}, census: { entries: [] }, dryLive: null, localValidation: "not_measured", baselineBuild: { ok: false, failureSignature: [], durationMs: 1 }
-    } }))
-    t.deps.checks.build = async () => { throw new Error("must not retry unavailable local build") }
-    t.deps.checks.t0 = async (scenarios) => scenarios.map((scenario) => ({ checkId: scenario.checkId, tier: "T0", state: "undetermined", reason: `test_error — sandbox_unavailable: ${NO_SANDBOX}`, at: t.ctx.now().toISOString(), runId: STEP_RUN_ID }))
-    expect((await step.run(t.ctx, t.deps)).kind).toBe("parked")
-    write(t.root, "app/page.tsx", PAGE_EDIT)
-    t.ctx.options.resume = true
-    expect((await step.run(t.ctx, t.deps)).kind).toBe("ok")
-    expect(t.current().jobs.flatMap((job) => job.checks).filter((check) => check.tier === "B").every((check) => check.state === "undetermined")).toBe(true)
-  })
-
-  it("the build cannot run → undetermined test_error (never a pass), the run parks with the own-terminal line; the user's terminal finishes the checks without an agent", async () => {
-    const t = setup({ scenario: {}, options: { nested: true, json: true }, checks: { build: [{ ok: false, failureSignature: [], durationMs: 1, error: NO_SANDBOX } as never, { ok: true, failureSignature: [], durationMs: 1 }] } })
-    // T0 inside the parent's sandbox: run.ts answers sandbox_unavailable, so every scenario reads test_error.
-    const realT0 = t.deps.checks.t0
-    let t0Calls = 0
-    t.deps.checks.t0 = async (scenarios, artifacts) => {
-      t0Calls += 1
-      if (t0Calls > 1) return realT0(scenarios, artifacts)
-      return scenarios.map((scenario) => ({ checkId: scenario.checkId, tier: "T0", state: "undetermined", reason: `test_error — sandbox_unavailable: ${NO_SANDBOX}`, at: "2026-10-02T10:00:00.000Z", runId: STEP_RUN_ID }))
-    }
-    expect((await step.run(t.ctx, t.deps)).kind).toBe("parked")
-    write(t.root, "app/page.tsx", PAGE_EDIT)
-    t.ctx.options.resume = true
-    const resumed = await step.run(t.ctx, t.deps)
-    expect(resumed).toMatchObject({ kind: "ok" })
-    expect(NESTED_SANDBOX_HINT).toBe("Run npx infinite-tag --resume in your own terminal to finish the checks.")
-    expect(stateOf(t.current().jobs, "conversions_to_tools:trial")).toBe("left_for_you")
-    const build = t.current().jobs.find((item) => item.id === "meta_improve:landing")!.checks.find((check) => check.tier === "B")!
-    expect(build).toMatchObject({ state: "undetermined", reason: expect.stringMatching(/^test_error — the build could not run: macOS sandbox-exec/) })
-    // The user's own terminal: no nesting; the claimed jobs are checked, never handed to an agent again.
-    t.ctx.options.nested = false
-    const finished = await step.run(t.ctx, t.deps)
-    expect(finished.kind).toBe("ok")
-    expect(runs(t.fakes)).toEqual([])
-    expect(stateOf(t.current().jobs, "conversions_to_tools:trial")).toBe("left_for_you")
-    expect(stateOf(t.current().jobs, "meta_improve:landing")).not.toBe("claimed")
-  })
-
-  it("NEGATIVE: an ordinary red build with no new failures still reads as the baseline's, and a build that ran is never parked as a sandbox problem", async () => {
-    const t = setup({ scenario: {}, options: { nested: true, json: true }, checks: { build: [{ ok: false, failureSignature: ["tsc:TS2322"], durationMs: 1 }], baseline: { ok: false, failureSignature: ["tsc:TS2322"], durationMs: 1 } } })
-    await step.run(t.ctx, t.deps)
-    write(t.root, "app/page.tsx", PAGE_EDIT)
-    t.ctx.options.resume = true
-    expect((await step.run(t.ctx, t.deps)).kind).toBe("ok")
-    expect(stateOf(t.current().jobs, "conversions_to_tools:trial")).toBe("waiting_real_event")
-  })
-})

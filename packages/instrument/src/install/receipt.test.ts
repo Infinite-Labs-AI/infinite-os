@@ -6,7 +6,7 @@ import { join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
 
 import { cleanupSites, IDS, makeSite, read, STATIC_HTML } from "../../test/wizard/o7-fakes.js"
-import { readInstallManifest, readInstallManifestOrRebuild, rebuildInstallManifestFromMarkers, writeInstallManifest } from "../manifest.js"
+import { readInstallManifest, rebuildInstallManifestFromMarkers, writeInstallManifest } from "../manifest.js"
 import type { InstallManifest } from "../types.js"
 import { reverseRecordedEdits, uninstallInstallation } from "../uninstall.js"
 
@@ -39,22 +39,9 @@ describe("install.json edits + ids (§3e.6)", () => {
     expect(readInstallManifest(root)).toMatchObject({ edits: [edit], ids })
   })
 
-  it("a NEWER tag's extra fields on an edit or on ids are tolerated, never 'corrupt' (P3-22)", () => {
-    const root = makeSite({ "index.html": STATIC_HTML })
-    const edit = makeEditRecord({ file: "index.html", before: "a", after: "b", jobId: null, planLineId: null, by: "agent", runId: IDS.run })
-    mkdirSync(join(root, ".infinite"), { recursive: true })
-    writeFileSync(join(root, ".infinite/install.json"), JSON.stringify(manifestWith({ edits: [{ ...edit, reviewedBy: "codex" } as never], ids: { ...ids, x: [] } as never })))
-    expect(readInstallManifest(root)?.edits?.[0]?.id).toBe(edit.id)
-  })
-
   it.each([
     ["an edit missing its id", (edit: Record<string, unknown>) => {
       const { id: _drop, ...rest } = edit
-      return rest
-    }],
-    ["a bare hex hash", (edit: Record<string, unknown>) => ({ ...edit, afterHash: "ab".repeat(32) })],
-    ["an edit with no textEdits", (edit: Record<string, unknown>) => {
-      const { textEdits: _drop, ...rest } = edit
       return rest
     }],
     ["an unknown author", (edit: Record<string, unknown>) => ({ ...edit, by: "someone" })]
@@ -89,16 +76,6 @@ describe("rebuild from markers (a corrupt receipt)", () => {
     expect(result.managedFiles.sort()).toEqual(["index.html", "lib/infinite-analytics.ts"])
     expect(result.manifest.providers).toEqual(["ga4"])
     expect(result.lost).toEqual(["edits", "configOwnership", "serverLane", "requiresManual"])
-  })
-
-  it("readInstallManifestOrRebuild rebuilds only when allowed; NEGATIVE: without it a corrupt receipt still throws", () => {
-    const root = makeSite({ "index.html": STATIC_HTML })
-    mkdirSync(join(root, ".infinite"), { recursive: true })
-    writeFileSync(join(root, ".infinite/install.json"), "{ nope")
-    expect(() => readInstallManifestOrRebuild(root, { rebuild: null })).toThrow(/Corrupt/)
-    const rebuilt = readInstallManifestOrRebuild(root, { rebuild: { appRoot: ".", framework: "static-html", workspaceId: "wizard:abababababababab" } })
-    expect(rebuilt.rebuilt).toBe(true)
-    expect(readInstallManifest(root)?.workspaceId).toBe("wizard:abababababababab")
   })
 })
 

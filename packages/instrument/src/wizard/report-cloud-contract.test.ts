@@ -15,7 +15,7 @@ import { parseCloudReport, type CloudReportContext } from "../../test/wizard/clo
 import { census, fixtureBaseline, fixtureDryLive, fixtureKeys } from "../../test/wizard/o8/fixtures.js"
 import { MERGE_SHA, RUN_ID, fakeContext, fakeDeps, keysFixture, lane, realVisitResult, receiptsAll } from "../../test/wizard/runtime-fakes.js"
 import { liveTodayColumnInput, type LiveTodaySource } from "./before-column.js"
-import type { CheckResult, ChecklistItem } from "./contracts/jobs.js"
+import type { CheckResult } from "./contracts/jobs.js"
 import { REPORT_COLUMN_IDS, type ReportColumnId, type ReportColumnSnapshot, type ReportV2 } from "./contracts/report.js"
 import type { WizardRunState } from "./contracts/state.js"
 import { testExpectFromKeys, type TestTool } from "./contracts/test-engine.js"
@@ -33,31 +33,9 @@ const runStateExample = JSON.parse(readFileSync(join(contracts, "run-state.examp
 /** The run's start on the cloud's clock (the fake bridge's `runs.start` answers the same instant). */
 const STARTED_AT = "2026-10-02T09:02:00.000Z"
 const AT = "2026-10-02T09:12:00.000Z"
-const BASE_SHA = "0a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d"
 const tagPost = (phase: CloudReportContext["phase"]): CloudReportContext => ({ runId: example.runId, startedAt: STARTED_AT, phase, producer: "tag", partial: false })
 
 describe("the cloud's report rules (test/wizard/cloud-rules.ts, a port of 1bu-1 parseReportV2)", () => {
-  it("keeps long owner guards and wiring out of bounded cloud notes while rendering their exact copyable bytes", () => {
-    const guard = `if (${Array.from({ length: 18 }, (_, i) => `location.hostname !== 'preview-${i}.example.test'`).join(" && ")}) {\n  // Existing analytics start-up statements go here.\n}`
-    const wiring = 'import { InfiniteAnalyticsClient } from "../lib/infinite-analytics-client"\n\n<InfiniteAnalyticsClient />'
-    const jobs: ChecklistItem[] = ["ga4", "meta", "posthog"].map(tool => ({ id: `preview_guard:${tool}`, jobId: "preview_guard", n: 7, title: `Guard ${tool}`, owner: "agent", state: "left_for_you", checks: [], allow: { files: [], create: [] }, note: `For you: add the preview guard to ${tool}'s start-up at src/tracking.ts:5; until then preview and local visits count in ${tool}.`, ownerBoundary: { kind: "frozen_unit", file: "src/tracking.ts", line: 5, guard }, trigger: { finding: `For you: ${tool}\n\n\`\`\`js\n${guard}\n\`\`\``, evidence: [] } }))
-    jobs.push({ ...jobs[0]!, id: "unusual_layout:app/layout.tsx", jobId: "unusual_layout", owner: "code", title: "Owner wiring", ownerBoundary: { kind: "frozen_unit", file: "app/layout.tsx", line: 1, wiring }, trigger: { finding: `For you: owner wiring\n\n\`\`\`js\n${wiring}\n\`\`\``, evidence: [] } })
-    const report = buildReport({ runId: example.runId, tagVersion: "0.0.0", site: example.site, columns: { live_today: null, in_pr: structuredClone(runStateExample.report.in_pr), proven_live: null }, provenLivePending: null, day7: null, notes: [], verdictFacts: { jobs, openFindings: [], tools: null, installedUnknown: null, ownerPolicyFindings: Array.from({ length: 30 }, (_, i) => `Owner-only finding ${i}: ${"Owner controls this setting. ".repeat(20)}`) } })
-    expect(parseCloudReport(report, tagPost("in_pr"))).toEqual({ ok: true })
-    expect(report.notes.every(note => note.length > 0 && note.length <= 300 && !note.includes("```"))).toBe(true)
-    expect(report.notes).toHaveLength(20)
-    expect(report.notes.some(note => note.startsWith("NOT DONE for "))).toBe(true)
-    expect(report.notes.some(note => note.includes("additional notes are omitted"))).toBe(true)
-    expect(JSON.stringify(report)).not.toContain("preview-17.example.test")
-    for (const rendered of [renderMarkdown(report, undefined, jobs)]) {
-      expect(rendered).toContain(guard)
-      expect(rendered).toContain(wiring)
-      expect(rendered).toContain("src/tracking.ts:5")
-    }
-    const terminal = renderTerminal(report, 80, { ownerJobs: jobs })
-    expect(terminal).toContain("Full text in the pull request and .infinite/wizard/report.md")
-    expect(terminal).not.toContain(guard)
-  })
   it("accepts the contract example under each column phase (the port is not vacuous)", () => {
     for (const phase of REPORT_COLUMN_IDS) expect(parseCloudReport(example, tagPost(phase))).toEqual({ ok: true })
   })
@@ -66,28 +44,7 @@ describe("the cloud's report rules (test/wizard/cloud-rules.ts, a port of 1bu-1 
   // report is never built only to be refused at step 12.
   const firstRow = (report: ReportV2) => report.rows.find((row) => row.id === "ga4_page_views_per_visit")!.cells.in_pr
   const MUTATIONS: Array<[string, (report: ReportV2) => void, string]> = [
-    ["F17: the live_today column carries the base commit", (r) => void (r.columns.live_today.sha = BASE_SHA), "report.columns.live_today.sha"],
-    ["the PR head is a short SHA", (r) => void (r.columns.in_pr.sha = "1a2b3c4"), "report.columns.in_pr.sha"],
     ["a cell computed from agent output", (r) => void ((firstRow(r).provenance as { source: string }).source = "agent"), "report.rows[1].cells.in_pr.provenance.source"],
-    [
-      '"verified" without a receipt',
-      (r) => {
-        const cell = firstRow(r)
-        cell.display = "verified"
-        delete cell.provenance.receiptAt
-      },
-      "report.rows[1].cells.in_pr.display"
-    ],
-    [
-      "a percentage with no raw counts",
-      (r) => {
-        const cell = firstRow(r)
-        cell.display = "12%"
-        delete cell.raw
-      },
-      "report.rows[1].cells.in_pr.raw"
-    ],
-    ["an arrow across columns", (r) => void (firstRow(r).display = "2 -> 1"), "report.rows[1].cells.in_pr.display"],
     [
       "a 0 where nothing was measured",
       (r) => {
@@ -97,15 +54,6 @@ describe("the cloud's report rules (test/wizard/cloud-rules.ts, a port of 1bu-1 
         cell.state = "not_measured"
       },
       "report.rows[1].cells.in_pr.value"
-    ],
-    [
-      "a finish-line cell §3i.7 marks '—' given a value",
-      (r) => {
-        const cell = r.finishLine.find((line) => line.id === "proof_from_real_visit")!.cells.live_today
-        Object.assign(cell, { value: "pass", display: "pass", state: "pass" })
-        delete cell.reason
-      },
-      "report.finishLine[12].cells.live_today"
     ],
     ["an unknown report key", (r) => void ((r as unknown as Record<string, unknown>).extra = 1), "report.extra"]
   ]

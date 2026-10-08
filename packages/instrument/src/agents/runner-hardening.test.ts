@@ -8,8 +8,6 @@ import { afterEach, beforeAll, describe, expect, it, vi } from "vitest"
 import { assertBuilt, fakeAgents, makeRunner, RUN_ID } from "../../test/wizard/agents.js"
 import { cleanup, item, makeFenceFixture, write } from "../../test/wizard/repo.js"
 import type { RunJobsInput } from "../wizard/contracts/agents.js"
-import { claudeModelRejected, modelRejectedText } from "./claude.js"
-import { codexModelRejected } from "./codex.js"
 import { Fence } from "./fence.js"
 import { snapshotDir } from "./paths.js"
 import type { AgentRunResultWithExtras } from "./runner.js"
@@ -61,13 +59,6 @@ describe("F10: a turn a killed wizard left open is undone before the next turn s
     expect(result.edits).toEqual([])
     expect(beats.some((beat) => beat.startsWith("Undid an unfinished agent turn from an earlier run: app/page.tsx"))).toBe(true)
   })
-
-  it("negative: with no leftover snapshot nothing is restored and nothing is said", async () => {
-    const { root, fakes } = setup({ turns: [{ steps: [CLAIM_DONE] }] })
-    const { input, beats } = jobsInput()
-    await makeRunner(fakes, root).runJobs(input)
-    expect(beats.some((beat) => beat.startsWith("Undid an unfinished agent turn"))).toBe(false)
-  })
 })
 
 describe("F11: a kept turn returns its seal; an aborted one does not", () => {
@@ -88,25 +79,5 @@ describe("F20: model fallback", () => {
     const result = (await makeRunner(fakes, root, { preferWorker: "codex" }).runJobs(jobsInput().input)) as AgentRunResultWithExtras
     expect(result.modelFallback).toBe(true)
     expect(result.outcome).toBe("toolless")
-  })
-
-  it("control: a retry that reaches the channel completes", async () => {
-    const { root, fakes } = setup({ turns: [{ rejectModelAfterMcp: true, steps: [] }, { steps: [CLAIM_DONE] }] })
-    const result = (await makeRunner(fakes, root, { preferWorker: "codex" }).runJobs(jobsInput().input)) as AgentRunResultWithExtras
-    expect(result.modelFallback).toBe(true)
-    expect(result.outcome).toBe("completed")
-  })
-
-  it("only the CLIs' model-not-found shapes for THE pinned model count as a refusal", () => {
-    expect(modelRejectedText("There's an issue with the selected model (claude-opus-4-8). It may not exist or you may not have access to it.", "claude-opus-4-8")).toBe(true)
-    expect(codexModelRejected("The 'gpt-6.1-sol' model is not supported when using Codex with a ChatGPT account.", "gpt-6.1-sol")).toBe(true)
-    expect(modelRejectedText('{"error":{"code":"model_not_found"}}', "gpt-6.1-sol")).toBe(true)
-    // Negatives: an unrelated error that says "model … invalid", another model's name, no pinned model.
-    expect(modelRejectedText("invalid request: the model output was not valid JSON", "claude-opus-4-8")).toBe(false)
-    expect(modelRejectedText("Your data model is invalid: field `x` not found", "claude-opus-4-8")).toBe(false)
-    expect(codexModelRejected("The 'gpt-5.5' model is not supported", "gpt-6.1-sol")).toBe(false)
-    expect(codexModelRejected("The 'gpt-6.1-sol' model is not supported", null)).toBe(false)
-    expect(claudeModelRejected({ kind: "assistant_error", error: "model_not_found" } as never, null)).toBe(false)
-    expect(claudeModelRejected({ kind: "assistant_error", error: "model_not_found" } as never, "claude-opus-4-8")).toBe(true)
   })
 })

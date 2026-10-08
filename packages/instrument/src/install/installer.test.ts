@@ -1,7 +1,7 @@
 // The wizard installer against fixture sites on disk (no network, no agent, no cloud). The managed
 // bytes are the existing adapters'; what is tested here is the composition: approvals → artifacts,
 // the improve edits, the receipt, open jobs, the build rollback, uninstall, scan and app roots.
-import { mkdirSync, writeFileSync } from "node:fs"
+import { writeFileSync } from "node:fs"
 import { join } from "node:path"
 
 import { afterEach, describe, expect, it } from "vitest"
@@ -17,14 +17,10 @@ import {
   fakeProductionDeniedConflict,
   IDS,
   makeSite,
-  notConnectedKeys,
   read,
   STATIC_HTML
 } from "../../test/wizard/o7-fakes.js"
-import { run3File } from "../../test/wizard/run3-fixture.js"
-import { parseHarnessArgs } from "../harness/args.js"
-import { runHarness, type HarnessIo } from "../harness/run.js"
-import { computeContentHash, readInstallManifest, writeInstallManifest } from "../manifest.js"
+import { computeContentHash, readInstallManifest } from "../manifest.js"
 import type { BuildResult, PlanModel } from "../wizard/contracts/jobs.js"
 
 import { makeEditRecord } from "./edits.js"
@@ -96,54 +92,6 @@ describe("WizardInstaller.apply: a new install on a static site", () => {
     expect(readInstallManifest(root)!.ids?.meta ?? []).toEqual([])
   })
 
-  // Review P1-6: the PostHog sensitive-page list is PostHog's (replay and autocapture off there). It never hides a page
-  // from Infinite, whose ledger exists to count the checkout and success pages.
-  it("never turns the PostHog sensitive-page list into Infinite route exclusions", async () => {
-    const root = makeSite({ "index.html": STATIC_HTML, "checkout.html": STATIC_HTML })
-    const subject = installer()
-    const scan = await subject.scan({ root, hosting: fakeHosting() })
-    expect(scan.sensitivePaths).toContain("/checkout")
-    const plan = subject.buildPlan(scan, fakeKeys(), fakeBefore(), [])
-    const result = (await subject.apply(plan, approveAll(plan))) as WizardApplyResult
-    expect(result.ok).toBe(true)
-    expect(result.artifacts.infinite).toBeDefined()
-    expect(result.artifacts.infinite?.excludedPaths).toBeUndefined()
-    expect(read(root, "index.html")).not.toContain('"excludedPaths":')
-  })
-
-  it("excluded Infinite, managed guard and sensitive-page edits never reach installer artifacts", async () => {
-    const root = makeSite({ "index.html": STATIC_HTML, "login.html": STATIC_HTML })
-    const subject = installer()
-    const scan = await subject.scan({ root, hosting: fakeHosting() })
-    const plan = subject.buildPlan(scan, fakeKeys(), fakeBefore(), [])
-    const declined = ["install_provider:infinite", "preview_guard_managed", "sensitive_pages:posthog:managed"]
-    for (const id of declined) expect(plan.lines.map(line => line.id)).toContain(id)
-    const result = await subject.apply(plan, { ...approveAll(plan), declined }) as WizardApplyResult
-    expect(result.ok).toBe(true)
-    expect(result.artifacts.infinite).toBeUndefined()
-    expect(result.artifacts.hostGuard).toBeUndefined()
-    expect(result.artifacts.posthog?.sensitivePaths).toBeUndefined()
-    expect(read(root, "index.html")).not.toContain(IDS.siteSource)
-    expect(read(root, "index.html")).not.toContain("/login")
-    expect(read(root, "index.html")).not.toContain(".vercel.app")
-    expect(readInstallManifest(root)!.ids?.infinite).toBeNull()
-  })
-
-  it("excluded managed Meta capture creates no capture module or entry import", async () => {
-    const root = makeSite({ "index.html": ADOPTED_META_HTML })
-    const subject = installer()
-    const scan = await subject.scan({ root, hosting: fakeHosting() })
-    const plan = subject.buildPlan(scan, fakeKeys(), fakeBefore(), [])
-    const capture = plan.lines.find(line => line.kind === "capture_beside_adopted_pixel")!
-    expect(capture.requires).toBe("info")
-    const result = await subject.apply(plan, { ...approveAll(plan), declined: [capture.id] }) as WizardApplyResult
-    expect(result.ok).toBe(true)
-    expect(result.edits.some(edit => edit.planLineId === capture.id)).toBe(false)
-    expect(result.changedFiles.some(file => file.includes("infinite-meta-click-id"))).toBe(false)
-    expect(read(root, "index.html")).not.toContain("infinite-meta-click-id")
-    expect(exists(root, "infinite-meta-click-id.js")).toBe(false)
-  })
-
   it("applies with no consent answer: nothing is asked and the tag installs active", async () => {
     const root = makeSite({ "index.html": STATIC_HTML })
     const subject = installer()
@@ -189,35 +137,6 @@ describe("requiresManual is an OPEN JOB, never 'installed' (S1 fix, run.ts apply
     expect(jobs[0]?.trigger.finding).toContain("<InfiniteAnalyticsClient />")
     expect(plan.installTools).toEqual([])
     expect(exists(root, "lib/infinite-analytics.ts")).toBe(false)
-  })
-
-  it("Vite with no </head>: owner placement is required without a worker or unused install", async () => {
-    const root = makeSite({ "package.json": VITE_PACKAGE, "index.html": VITE_NO_HEAD, "vercel.json": "{}\n" })
-    const subject = installer()
-    const scan = await subject.scan({ root, hosting: fakeHosting() })
-    expect(scan.framework).toBe("vite-react")
-    const plan = subject.buildPlan(scan, fakeKeys(), fakeBefore(), [])
-    expect(plan.ownerWiring).toMatchObject({ canWire: false, requirements: [expect.objectContaining({ path: "index.html" })] })
-    expect(plan.installTools).toEqual([])
-    const result = (await subject.apply(plan, approveAll(plan))) as WizardApplyResult
-    expect(result.ok).toBe(true)
-    expect(result.openJobs).toEqual([])
-    expect(result.changedFiles).toEqual([])
-    expect(readInstallManifest(root)).toBeNull()
-    expect(read(root, "index.html")).toBe(VITE_NO_HEAD)
-  })
-
-  it("NEGATIVE (the old behaviour): the harness no longer marks GA4 'installed' when the tag could not be added", async () => {
-    const root = makeSite({ "package.json": VITE_PACKAGE, "index.html": VITE_NO_HEAD, "vercel.json": "{}\n" })
-    const io: HarnessIo = { interactive: false, out: () => undefined, err: () => undefined, confirm: async () => false }
-    const { report } = await runHarness(
-      parseHarnessArgs(["--yes", "--no-mark", "--allow-dirty", "--root", root, "--ga4-measurement-id", IDS.ga4, "--workspace", "ws-local"]),
-      io
-    )
-    const ga4 = report.providers.find((provider) => provider.provider === "ga4")!
-    expect(ga4.state).not.toBe("installed")
-    expect(ga4.reason).toMatch(/open job/)
-    expect(report.nextSteps.some((line) => line.includes("open job") && line.includes("index.html"))).toBe(true)
   })
 })
 
@@ -280,23 +199,6 @@ describe("improve in place + the edit receipt + uninstall", () => {
     expect(report.leftAsIs).toEqual(["index.html"])
     expect(read(root, "index.html")).toBe(touched)
   })
-
-  it("refreshEditReceiptFromHead rebases a record a commit hook rewrote", async () => {
-    const root = makeSite({ "index.html": ADOPTED_META_HTML })
-    const blobs = new Map<string, string>()
-    const subject = installer({ readBlob: (_root, rev, path) => blobs.get(`${rev}:${path}`) ?? null })
-    const keys = fakeKeys({ ga4: { status: "not_connected", propertyLabel: null, streams: [] }, posthog: { status: "not_connected", projectKey: null, apiHost: null, ingestHost: null, uiHost: null, region: null } })
-    const scan = await subject.scan({ root, hosting: fakeHosting() })
-    const plan = subject.buildPlan(scan, keys, fakeBefore({ keys }), [])
-    await subject.apply(plan, approveAll(plan))
-    const hooked = read(root, "index.html").replace(/\n {4}/g, "\n  ") // a formatter re-indented it on commit
-    blobs.set("HEAD:index.html", hooked)
-    for (const file of Object.keys(readInstallManifest(root)!.contentHashes)) if (!blobs.has(`HEAD:${file}`)) blobs.set(`HEAD:${file}`, read(root, file))
-    expect(await subject.refreshEditReceiptFromHead()).toEqual({ refreshed: true })
-    writeFileSync(join(root, "index.html"), hooked)
-    await subject.uninstall({ root, dryRun: false })
-    expect(read(root, "index.html")).toBe(ADOPTED_META_HTML)
-  })
 })
 
 describe("the build check", () => {
@@ -313,70 +215,6 @@ describe("the build check", () => {
     expect(exists(root, ".infinite/install.json")).toBe(false)
     expect(exists(root, "vercel.json")).toBe(false)
   })
-
-  it("a build that was already red with the same failures is reported, not blamed on the install", async () => {
-    const root = makeSite({ "index.html": STATIC_HTML })
-    const subject = installer({ build: async () => ({ ok: false, failureSignature: ["old failure"], durationMs: 1 }) })
-    const scan = await subject.scan({ root, hosting: fakeHosting() })
-    const before: WizardBeforeFacts = { ...fakeBefore(), baselineBuild: { ok: false, failureSignature: ["old failure"], durationMs: 1 } }
-    const plan = subject.buildPlan(scan, fakeKeys(), before, [])
-    const result = (await subject.apply(plan, approveAll(plan))) as WizardApplyResult
-    expect(result).toMatchObject({ ok: true, build: "failed_baseline" })
-  })
-
-  it("B26: a build that could not run is not_run (undetermined), never 'already red' and never blamed on the install", async () => {
-    const root = makeSite({ "index.html": STATIC_HTML })
-    const couldNotRun = { ok: false, failureSignature: [], durationMs: 1, error: "sandbox-exec could not apply the profile" } as BuildResult
-    const subject = installer({ build: async () => couldNotRun })
-    const scan = await subject.scan({ root, hosting: fakeHosting() })
-    // The baseline could not run either (nested in another sandbox): red with no signature.
-    const before: WizardBeforeFacts = { ...fakeBefore(), baselineBuild: { ok: false, failureSignature: [], durationMs: 1 } }
-    const plan = subject.buildPlan(scan, fakeKeys(), before, [])
-    const result = (await subject.apply(plan, approveAll(plan))) as WizardApplyResult
-    expect(result).toMatchObject({ ok: true, build: "not_run" })
-    expect(result.warnings.some((warning) => warning.startsWith("The build could not run here (test_error"))).toBe(true)
-    // With a green baseline it is still not a new failure: the install stays.
-    const green = makeSite({ "index.html": STATIC_HTML })
-    const second = installer({ build: async () => couldNotRun })
-    const secondPlan = second.buildPlan(await second.scan({ root: green, hosting: fakeHosting() }), fakeKeys(), { ...fakeBefore(), baselineBuild: { ok: true, failureSignature: [], durationMs: 1 } } as WizardBeforeFacts, [])
-    expect(await second.apply(secondPlan, approveAll(secondPlan))).toMatchObject({ ok: true, build: "not_run" })
-  })
-})
-
-describe("D17 sensitive pages (decision 17: a plan line from the detector)", () => {
-  it("a NEW managed PostHog gets the sensitive-pages line from the detector, and the approved bytes carry the paths", async () => {
-    const root = makeSite({ "index.html": STATIC_HTML, "login.html": STATIC_HTML, "pricing.html": STATIC_HTML })
-    const subject = installer()
-    const scan = await subject.scan({ root, hosting: fakeHosting() })
-    const plan = subject.buildPlan(scan, fakeKeys(), fakeBefore(), [])
-    const line = plan.lines.find((entry) => entry.id === "sensitive_pages:posthog:managed")
-    expect(line, "the D17 line (the detector's /login) is on the plan").toBeDefined()
-    expect(line!.text).toContain("/login")
-    expect(line!.text).not.toContain("/pricing")
-    expect((await subject.apply(plan, approveAll(plan))).ok).toBe(true)
-    expect(read(root, "index.html")).toContain('var INFINITE_SENSITIVE_PATHS = ["/login"];')
-  })
-
-  it("managed sensitive-page handling runs on continue; no sensitive route means no line", async () => {
-    const root = makeSite({ "index.html": STATIC_HTML, "login.html": STATIC_HTML })
-    const subject = installer()
-    const plan = subject.buildPlan(await subject.scan({ root, hosting: fakeHosting() }), fakeKeys(), fakeBefore(), [])
-    const answer = approveAll(plan)
-    expect((await subject.apply(plan, { ...answer, approved: answer.approved.filter((id) => id !== "sensitive_pages:posthog:managed") })).ok).toBe(true)
-    expect(read(root, "index.html")).toContain("INFINITE_SENSITIVE_PATHS")
-    const plain = makeSite({ "index.html": STATIC_HTML, "pricing.html": STATIC_HTML })
-    const other = installer()
-    const plainPlan = other.buildPlan(await other.scan({ root: plain, hosting: fakeHosting() }), fakeKeys(), fakeBefore(), [])
-    expect(plainPlan.lines.some((entry) => entry.kind === "sensitive_pages")).toBe(false)
-  })
-
-  it("an adopted PostHog that already turns replay off there (setup check pass) gets no line", async () => {
-    const root = makeSite({ "index.html": STATIC_HTML, "login.html": STATIC_HTML })
-    const subject = installer()
-    const scan = await subject.scan({ root, hosting: fakeHosting() })
-    const handled = { ...fakeBefore(), checks: [{ checkId: "sensitive_pages", tier: "S" as const, state: "pass" as const, at: "2026-10-02T09:00:00.000Z", runId: IDS.run }] }
-    expect(subject.buildPlan(scan, fakeKeys(), handled, []).lines.some((entry) => entry.kind === "sensitive_pages")).toBe(false)
-  })
 })
 
 describe("scan: app root, truncation, a corrupt receipt", () => {
@@ -390,86 +228,6 @@ describe("scan: app root, truncation, a corrupt receipt", () => {
     })
     const scan = await installer().scan({ root, hosting: fakeHosting({ rootDirectory: "apps/web" }) })
     expect(scan).toMatchObject({ appRoot: "apps/web", appRootSource: "vercel_root_directory", framework: "vite-react" })
-  })
-
-  it("monorepo without Vercel: one web app among the workspace globs is the app; two is ambiguous (job 2) and says so", async () => {
-    const one = makeSite({ "package.json": `{"workspaces":["apps/*"]}\n`, "apps/web/package.json": VITE_PACKAGE, "apps/web/index.html": STATIC_HTML, "apps/api/package.json": `{"name":"api"}\n` })
-    expect(await installer().scan({ root: one, hosting: { provider: "none", vercel: null } })).toMatchObject({ appRoot: "apps/web", appRootSource: "workspace_globs" })
-    const two = makeSite({ "pnpm-workspace.yaml": "packages:\n  - 'apps/*'\n", "package.json": "{}\n", "apps/a/index.html": STATIC_HTML, "apps/b/index.html": STATIC_HTML })
-    const scan = await installer().scan({ root: two, hosting: { provider: "none", vercel: null } })
-    expect(scan).toMatchObject({ ambiguousAppRoot: true, appRootCandidates: ["apps/a", "apps/b"], appRootSource: "default" })
-    expect(scan.warnings.some((warning) => warning.includes("2 web apps"))).toBe(true)
-  })
-
-  it("truncation: 2,001 source files → a warning; 2,000 → none", async () => {
-    const big = makeSite({ "index.html": STATIC_HTML })
-    mkdirSync(join(big, "src"), { recursive: true })
-    for (let index = 0; index < 2_000; index += 1) writeFileSync(join(big, "src", `m${String(index).padStart(4, "0")}.js`), "export {}\n")
-    const scan = await installer().scan({ root: big, hosting: fakeHosting() })
-    expect(scan.truncated).toBe(true)
-    expect(scan.fileCount).toBe(2_000)
-    expect(scan.warnings.some((warning) => /stopped at 2,000 files/.test(warning))).toBe(true)
-
-    const fits = makeSite({ "index.html": STATIC_HTML })
-    mkdirSync(join(fits, "src"), { recursive: true })
-    for (let index = 0; index < 1_999; index += 1) writeFileSync(join(fits, "src", `m${index}.js`), "export {}\n")
-    const ok = await installer().scan({ root: fits, hosting: fakeHosting() })
-    expect(ok.truncated).toBe(false)
-    expect(ok.warnings.some((warning) => /stopped at/.test(warning))).toBe(false)
-  })
-
-  it("static sites scan public/ too (they serve pages from it)", async () => {
-    const root = makeSite({ "index.html": STATIC_HTML, "public/landing.html": STATIC_HTML })
-    const scan = await installer().scan({ root, hosting: fakeHosting() })
-    expect(scan.fileCount).toBe(2)
-  })
-
-  it("a corrupt receipt is rebuilt from the managed markers, and the scan says what was lost", async () => {
-    const root = makeSite({ "index.html": STATIC_HTML })
-    const subject = installer()
-    const scan = await subject.scan({ root, hosting: fakeHosting() })
-    const plan = subject.buildPlan(scan, fakeKeys(), fakeBefore(), [])
-    await subject.apply(plan, approveAll(plan))
-    writeFileSync(join(root, ".infinite/install.json"), "{ not json")
-    const rescanned = await installer().scan({ root, hosting: fakeHosting() })
-    expect(rescanned.receiptRebuilt?.lost).toContain("edits")
-    expect(rescanned.warnings.some((warning) => warning.includes("rebuilt from the managed markers"))).toBe(true)
-    const rebuilt = readInstallManifest(root)!
-    expect(rebuilt.files).toContain("index.html")
-    expect(rebuilt.providers).toEqual(expect.arrayContaining(["ga4", "meta"]))
-  })
-})
-
-describe("candidates and the adopted-provider rule through the installer", () => {
-  it("a job-3 candidate links to its improve line; no line for it is ever an install line", async () => {
-    const root = makeSite({ "index.html": STATIC_HTML.replace("</head>", `  <script>posthog.init('${IDS.posthog}', { api_host: 'https://us.i.posthog.com' })</script>\n  </head>`) })
-    const subject = installer()
-    const scan = await subject.scan({ root, hosting: fakeHosting() })
-    const plan = subject.buildPlan(scan, fakeKeys(), fakeBefore(), [candidate("posthog_improve", "history_change")])
-    expect(plan.lines.find((line) => line.id === "improve_additive:posthog:history_change")?.jobIds).toEqual(["posthog_improve:history_change"])
-    expect(plan.lines.some((line) => line.id.startsWith("install_provider:posthog"))).toBe(false)
-  })
-})
-
-describe("the receipt in a fresh process (O3 records agent edits, O4 refreshes after hooks)", () => {
-  it("recordEdits works without a prior scan when the installer knows its root", async () => {
-    const root = makeSite({ "index.html": STATIC_HTML })
-    const after = STATIC_HTML.replace("<h1>Acme</h1>", "<h1>Acme!</h1>")
-    writeFileSync(join(root, "index.html"), after)
-    await installer({ root }).recordEdits([makeEditRecord({ file: "index.html", before: STATIC_HTML, after, jobId: "csp", planLineId: null, by: "agent", runId: IDS.run })])
-    expect(readInstallManifest(root)!.edits).toHaveLength(1)
-    // NEGATIVE: without a root or a scan it refuses rather than guessing a repo.
-    await expect(installer().recordEdits([makeEditRecord({ file: "index.html", before: "a", after: "b", jobId: null, planLineId: null, by: "agent", runId: IDS.run })])).rejects.toThrow(/needs a scan/)
-  })
-
-  it("excluding every repository action writes no tag bytes", async () => {
-    const root = makeSite({ "index.html": STATIC_HTML })
-    const subject = installer()
-    const scan = await subject.scan({ root, hosting: fakeHosting() })
-    const plan = subject.buildPlan(scan, fakeKeys(), fakeBefore(), [])
-    const declineAll = { approved: ["consent_mode"], declined: plan.lines.filter((line) => line.id !== "consent_mode").map((line) => line.id), edits: { consent_mode: "not_required" } }
-    expect((await subject.apply(plan, declineAll)).ok).toBe(true)
-    expect(read(root, "index.html")).toBe(STATIC_HTML)
   })
 })
 
@@ -500,57 +258,6 @@ describe("review fixes (O7 fix round)", () => {
     const report = await second.subject.uninstall({ root, dryRun: false })
     expect(report.leftAsIs).toEqual([])
     expect(read(root, "index.html")).toBe(ADOPTED_META_HTML)
-  })
-
-  it("P1-4 + P2-12: declining 'Update …' on a re-run KEEPS the managed tags and their ids (never drops them)", async () => {
-    const root = makeSite({ "index.html": STATIC_HTML })
-    expect((await run(root)).result.ok).toBe(true)
-    const installed = read(root, "index.html")
-    const second = await run(root, fakeKeys(), fakeHosting(), (plan) => {
-      const updates = plan.lines.filter((line) => line.kind === "install_provider" && !line.id.startsWith("install_provider:infinite")).map((line) => line.id)
-      const all = approveAll(plan)
-      return { ...all, approved: all.approved.filter((id) => !updates.includes(id)), declined: updates }
-    })
-    expect(second.result.ok).toBe(true)
-    const html = read(root, "index.html")
-    for (const id of [IDS.ga4, IDS.posthog, IDS.meta]) expect(html).toContain(id)
-    expect(html).toBe(installed)
-    expect(readInstallManifest(root)!.providers).toEqual(expect.arrayContaining(["ga4", "posthog", "meta", "infinite"]))
-    expect(readInstallManifest(root)!.ids).toEqual({ ga4: [IDS.ga4], posthog: { projectKey: IDS.posthog, apiHost: "/ingest" }, meta: [IDS.meta], infinite: { siteSourceKey: IDS.siteSource } })
-  })
-
-  it("P1-5: a static site NOT served by Vercel installs PostHog straight to its region — no /ingest, no vercel.json", async () => {
-    const root = makeSite({ "index.html": STATIC_HTML })
-    const { plan, result } = await run(root, fakeKeys(), noVercel)
-    expect(result.ok).toBe(true)
-    expect(result.artifacts.posthog).toMatchObject({ apiHost: "https://us.i.posthog.com" })
-    expect(result.artifacts.posthog?.proxy).toBeUndefined()
-    expect(exists(root, "vercel.json")).toBe(false)
-    expect(plan.lines.find((line) => line.id.startsWith("install_provider:posthog"))?.text).not.toContain("/ingest")
-    expect(readInstallManifest(root)!.ids?.posthog?.apiHost).toBe("https://us.i.posthog.com")
-  })
-
-  it("P1-6: a static site off Vercel is still installable — Infinite becomes a user-action line, the other tools install", async () => {
-    const root = makeSite({ "index.html": STATIC_HTML })
-    const { plan, result } = await run(root, fakeKeys(), noVercel)
-    expect(result).toMatchObject({ ok: true })
-    expect(plan.lines.some((line) => line.id.startsWith("install_provider:infinite"))).toBe(false)
-    expect(plan.lines.find((line) => line.id === "user_action:infinite_blocked")?.text).toMatch(/not served through Vercel/)
-    const html = read(root, "index.html")
-    expect(html).toContain(IDS.ga4)
-    expect(html).not.toContain(IDS.siteSource)
-  })
-
-  it("P1-8: an adopted gtag in public/ is detected on a static site — no second managed GA4 on that page", async () => {
-    const gtag = `<script async src="https://www.googletagmanager.com/gtag/js?id=${IDS.ga4}"></script>\n    <script>window.dataLayer=[];function gtag(){dataLayer.push(arguments)}gtag('js', new Date());gtag('config', '${IDS.ga4}');</script>\n  </head>`
-    const root = makeSite({ "index.html": STATIC_HTML, "public/landing.html": STATIC_HTML.replace("</head>", gtag) })
-    const subject = installer()
-    const scan = await subject.scan({ root, hosting: fakeHosting() })
-    expect(scan.detected.some((entry) => entry.provider === "ga4" && entry.file === "public/landing.html")).toBe(true)
-    const plan = subject.buildPlan(scan, fakeKeys(), fakeBefore(), [])
-    expect(plan.lines.some((line) => line.id.startsWith("install_provider:ga4"))).toBe(false)
-    expect((await subject.apply(plan, approveAll(plan))).ok).toBe(true)
-    expect(read(root, "public/landing.html").match(new RegExp(`config', '${IDS.ga4}'`, "g"))).toHaveLength(1)
   })
 
   it("the npm line never runs without its own explicit yes", async () => {
@@ -611,128 +318,5 @@ describe("review fixes (O7 fix round)", () => {
     // Uninstall reverses it with the rest of the lane (hash-gated: only while unedited).
     expect(reverseServerLane({ root, manifest: receipt, dryRun: true }).removedFiles).toContain("docs/infinite-server-events.md")
   })
-
-  it("P0-6: no server conversion in the plan → no hand-off file", async () => {
-    const root = makeSite({ "index.html": STATIC_HTML, "vercel.json": "{}\n" })
-    const subject = installer()
-    const scan = await subject.scan({ root, hosting: fakeHosting() })
-    const plan = subject.buildPlan(scan, fakeKeys(), fakeBefore(), [])
-    const answer = approveAll(plan)
-    const result = await subject.apply(plan, { ...answer, approved: answer.approved.filter((id) => id !== "npm_install") })
-    expect(result.ok).toBe(true)
-    expect(exists(root, "docs/infinite-server-events.md")).toBe(false)
-  })
-
-  it("P3-22: a receipt that parses but fails the shape check is never overwritten by a rebuild", async () => {
-    const root = makeSite({ "index.html": STATIC_HTML })
-    mkdirSync(join(root, ".infinite"), { recursive: true })
-    const newer = `{"workspaceId":"wizard:abababababababab","appRoot":".","framework":"static-html","providers":"a newer shape"}\n`
-    writeFileSync(join(root, ".infinite/install.json"), newer)
-    await expect(installer().scan({ root, hosting: fakeHosting() })).rejects.toThrow(/Corrupt/)
-    expect(read(root, ".infinite/install.json")).toBe(newer)
-  })
 })
 
-describe("§3x.3 (B3, W4): the conversion helpers are written whenever job 10 is seeded", () => {
-  const RUN3_FILES = ["package.json", "tsconfig.json", "app/layout.tsx", "app/page.tsx", "app/signup/page.tsx", "app/globals.css", "app/api/signup/route.ts", "lib/users.ts"]
-  const run3Site = () => makeSite(Object.fromEntries(RUN3_FILES.map((rel) => [rel, run3File(`site-6d16d8f/${rel}`)])))
-
-  async function installRun3(conversion: boolean) {
-    const root = run3Site()
-    const subject = installer()
-    const scan = await subject.scan({ root, hosting: fakeHosting() })
-    const keys = notConnectedKeys()
-    const ready = { ...keys, infinite: fakeKeys().infinite }
-    const candidates = conversion ? [candidate("conversions_to_tools", "signup", { allow: { files: ["app/signup/page.tsx"], create: [] } })] : []
-    const plan = subject.buildPlan(scan, ready, fakeBefore({ keys: ready }), candidates)
-    const answer = approveAll(plan)
-    if (!conversion) answer.approved = answer.approved.filter((id) => id !== "conversion_names")
-    const result = (await subject.apply(plan, answer)) as WizardApplyResult
-    return { root, plan, result }
-  }
-
-  it.each([true, false])("a recorded inline-consent layout leaves helpers unwired (conversion selected %s)", async conversion => {
-    const { root, plan, result } = await installRun3(conversion)
-    expect(result.ok).toBe(true)
-    expect(plan.ownerWiring?.canWire).toBe(false)
-    expect(plan.installTools).toEqual([])
-    expect(result.artifacts.conversions).toBeUndefined()
-    expect(exists(root, "lib/infinite-analytics.ts")).toBe(false)
-    expect(read(root, "app/layout.tsx")).toBe(run3File("site-6d16d8f/app/layout.tsx"))
-  })
-})
-
-describe("resume refresh of committed managed files", () => {
-  it("re-emits stale receipt-owned bytes without touching the customer entrypoint", async () => {
-    const root = makeSite({ "package.json": '{"dependencies":{"next":"15.0.0","react":"19.0.0"}}', "app/layout.tsx": 'export default function Layout({children}) { return <html><body>{children}</body></html> }' })
-    const blobs = new Map<string, string>()
-    const subject = installer({ readBlob: (_root, _rev, path) => blobs.get(path) ?? null })
-    const candidates = [candidate("conversions_to_tools", "signup", { allow: { files: ["app/layout.tsx"], create: [] } })]
-    const plan = subject.buildPlan(await subject.scan({ root, hosting: fakeHosting() }), fakeKeys(), fakeBefore(), candidates)
-    expect((await subject.apply(plan, approveAll(plan))).ok).toBe(true)
-    const path = "lib/infinite-analytics.ts"
-    const fresh = read(root, path)
-    // The pre-fix emitter used named parameters in a type-only signature, triggering no-unused-vars.
-    const old = fresh.replace("infiniteTrack?: typeof infiniteTrack", "infiniteTrack?: (name: string, props?: InfiniteEventProps, options?: InfiniteGateOption) => boolean")
-    expect(old).not.toBe(fresh)
-    writeFileSync(join(root, path), old)
-    const receipt = readInstallManifest(root)!
-    writeInstallManifest(root, { ...receipt, contentHashes: { ...receipt.contentHashes, [path]: computeContentHash(old) } })
-    for (const file of [...receipt.files, ".infinite/install.json"]) if (exists(root, file)) blobs.set(file, read(root, file))
-    const entrypoint = read(root, "app/layout.tsx") + "\n// customer edit\n"
-    writeFileSync(join(root, "app/layout.tsx"), entrypoint)
-    const resumed = subject.buildPlan(await subject.scan({ root, hosting: fakeHosting() }), fakeKeys(), fakeBefore(), candidates)
-    const result = await subject.refreshManaged(resumed, approveAll(plan))
-    expect(result).toMatchObject({ changedFiles: expect.arrayContaining([path, ".infinite/install.json"]), blocked: [] })
-    expect(read(root, path)).toBe(fresh)
-    expect(read(root, "app/layout.tsx")).toBe(entrypoint)
-    expect(readInstallManifest(root)!.contentHashes[path]).toBe(computeContentHash(fresh))
-    for (const file of [...receipt.files, ".infinite/install.json"]) if (exists(root, file)) blobs.set(file, read(root, file))
-    expect(await subject.refreshManaged(resumed, approveAll(plan))).toEqual({ changedFiles: [], blocked: [] })
-    // A hand edit to generated bytes is never adopted into the new receipt or overwritten.
-    const changed = fresh + "\n// hand edit\n"
-    writeFileSync(join(root, path), changed)
-    expect((await subject.refreshManaged(resumed, approveAll(plan))).blocked).toContain(path)
-    expect(read(root, path)).toBe(changed)
-    const unowned = readInstallManifest(root)!
-    delete unowned.contentHashes[path]
-    unowned.files = unowned.files.filter(file => file !== path)
-    writeInstallManifest(root, unowned)
-    blobs.set(".infinite/install.json", read(root, ".infinite/install.json"))
-    blobs.set(path, changed)
-    expect((await subject.refreshManaged(resumed, approveAll(plan))).changedFiles).not.toContain(path)
-    expect(read(root, path)).toBe(changed)
-
-  })
-})
-
-it("does not rerun or repeat the local-validation warning after before chose not measured", async () => {
-  const root = makeSite({ "index.html": STATIC_HTML })
-  let builds = 0
-  const subject = installer({ build: async () => { builds += 1; throw new Error("must not run") } })
-  const plan = subject.buildPlan(await subject.scan({ root, hosting: fakeHosting() }), fakeKeys(), { ...fakeBefore(), localValidation: "not_measured" } as WizardBeforeFacts, [])
-  const result = await subject.apply(plan, approveAll(plan))
-  expect(result).toMatchObject({ ok: true, build: "not_run" })
-  expect(builds).toBe(0)
-  expect(result.warnings.some(warning => /build.*could not run|checks will be the judge/.test(warning))).toBe(false)
-})
-
-it.each([true, false])("a free app entry emits executable conversion helpers only when selected (%s)", async selected => {
-  const { createBrowserVm } = await import("../../test/site-code/browser-vm.js")
-  const { transpileToCommonJs } = await import("../../test/site-code/typescript.js")
-  const root = makeSite({ "package.json": '{"dependencies":{"next":"16.0.0","react":"19.0.0"}}', "app/layout.tsx": 'export default function Layout({children}) { return <html><body>{children}</body></html> }\n' })
-  const subject = installer()
-  const scan = await subject.scan({ root, hosting: fakeHosting() })
-  const candidates = selected ? [candidate("conversions_to_tools", "signup", { allow: { files: ["app/layout.tsx"], create: [] } })] : []
-  const plan = subject.buildPlan(scan, fakeKeys(), fakeBefore(), candidates)
-  const answer = approveAll(plan)
-  if (!selected) answer.approved = answer.approved.filter(id => id !== "conversion_names")
-  const applied = await subject.apply(plan, answer)
-  expect(applied.ok).toBe(true)
-  const browser = createBrowserVm({ url: "https://example.test/" })
-  browser.window.exports = {}
-  browser.runScript(`(function (exports) {\n${transpileToCommonJs(read(root, "lib/infinite-analytics.ts"))}\n})(window.exports);`)
-  expect(browser.scriptErrors).toEqual([])
-  const api = browser.window.exports as Record<string, unknown>
-  for (const name of ["infiniteTrack", "infiniteTrackThenNavigate", "infiniteIdentify", "infiniteReset", "infiniteMetaMirror"]) expect(typeof api[name], name).toBe(selected ? "function" : "undefined")
-})

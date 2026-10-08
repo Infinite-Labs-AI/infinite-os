@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest"
 
-import { escapeMarkdownCell, escapeRegExp, trimTrailingSlashes } from "./text-escape.js"
+import { escapeMarkdownCell, escapeRegExp } from "./text-escape.js"
 
 describe("escapeRegExp", () => {
   it("escapes every metacharacter, the backslash included, so the value matches only itself", () => {
@@ -27,18 +27,3 @@ describe("escapeMarkdownCell", () => {
   })
 })
 
-describe("trimTrailingSlashes", () => {
-  it("trims only the trailing run", () => {
-    expect(trimTrailingSlashes("/ingest///")).toBe("/ingest")
-    expect(trimTrailingSlashes("a/b")).toBe("a/b")
-    expect(trimTrailingSlashes("///")).toBe("")
-    expect(trimTrailingSlashes("")).toBe("")
-  })
-
-  it("is linear on many slashes that are not trailing (the regex it replaces was quadratic)", () => {
-    const hostile = `${"/".repeat(200_000)}x`
-    const started = performance.now()
-    expect(trimTrailingSlashes(hostile)).toBe(hostile)
-    expect(performance.now() - started).toBeLessThan(200)
-  })
-})

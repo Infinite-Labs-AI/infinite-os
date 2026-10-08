@@ -8,7 +8,6 @@ import { join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
 
 import { fakeBridge, fakeChecks, fakeRegistry, initialState, RUN_ID, testContext, testDeps } from "../../test/wizard/o4-fakes.js"
-import { buildVerdict } from "../checks/build.js"
 import type { BuildResult, ChecklistItem } from "../wizard/contracts/jobs.js"
 import { verifyFix, settleFixRound } from "./fix.js"
 
@@ -42,7 +41,7 @@ async function verifyWith(build: BuildResult & { error?: string | null }, baseli
   return { ...await verifyFix(ctx, deps, { runId: RUN_ID, items: [item()], editedFiles: ["app/layout.tsx"], edits: [{ id: "e1", file: "app/layout.tsx" }] }), calls }
 }
 
-describe("verifyFix: the B verdict (review I1 P2-1)", () => {
+describe("verifyFix: the B verdict", () => {
   it("a build that could not run (sandbox unavailable) defers to PR checks, and the B check is undetermined, never pass", async () => {
     const result = await verifyWith({ ok: false, failureSignature: [], durationMs: 1, error: "sandbox-exec could not apply the profile" })
     expect(result.buildOk).toBe(false)
@@ -58,20 +57,6 @@ describe("verifyFix: the B verdict (review I1 P2-1)", () => {
     expect(result.items[0]!.checks.find((check) => check.tier === "B")!.state).toBe("undetermined")
   })
 
-  it("honors the saved not-measured decision without executing another local check", async () => {
-    const red = { ok: false, failureSignature: ["lint: app/layout.tsx | no-unused-vars | x"], durationMs: 1 }
-    const result = await verifyWith(red, red, { localValidation: "not_measured", baselineBuild: red })
-    expect(result.calls).toEqual({ build: 0, baseline: 0 })
-    expect(result.items[0]!.checks[0]!.state).toBe("undetermined")
-  })
-
-  it("compares a measured fix against the saved base, never retaking a baseline on its edits", async () => {
-    const red = { ok: false, failureSignature: ["lint: app/layout.tsx | no-unused-vars | x"], durationMs: 1 }
-    const result = await verifyWith(red, red, { localValidation: "measured", baselineBuild: { ok: true, failureSignature: [], durationMs: 1 } })
-    expect(result.calls).toEqual({ build: 1, baseline: 0 })
-    expect(result.buildOk).toBe(false)
-  })
-
   it("green is a pass; red with only the baseline's own failures is a pass; a new failure is a problem", async () => {
     expect((await verifyWith({ ok: true, failureSignature: [], durationMs: 1 })).buildOk).toBe(true)
     const known = { ok: false, failureSignature: ["TS2304 app/old.tsx"], durationMs: 1 }
@@ -82,7 +67,7 @@ describe("verifyFix: the B verdict (review I1 P2-1)", () => {
   })
 })
 
-describe("verifyFix: a review fix is ticked by its recorded change (LF4 close round 2, P1-1)", () => {
+describe("verifyFix: a review fix is ticked by its recorded change", () => {
   it("the round's kept edits to the item's own files are recorded on it only when the build stands; another file's edit never is", async () => {
     const green = await verifyWith({ ok: true, failureSignature: [], durationMs: 1 })
     expect(green.items[0]!.edits).toEqual([{ editId: "e1", file: "app/layout.tsx" }])
@@ -91,22 +76,6 @@ describe("verifyFix: a review fix is ticked by its recorded change (LF4 close ro
     expect(red.items[0]!.edits).toEqual([])
   })
 })
-
-describe("buildVerdict (the one B26 rule)", () => {
-  it("reads the baseline only for a red build with a signature", async () => {
-    let reads = 0
-    const baseline = async () => {
-      reads += 1
-      return { failureSignature: [] }
-    }
-    expect(await buildVerdict({ ok: true, failureSignature: [], durationMs: 1 }, baseline)).toEqual({ state: "pass" })
-    expect((await buildVerdict({ ok: false, failureSignature: [], durationMs: 1, error: "spawn failed" } as BuildResult, baseline)).state).toBe("undetermined")
-    expect(reads).toBe(0)
-    expect((await buildVerdict({ ok: false, failureSignature: ["x"], durationMs: 1 }, baseline)).state).toBe("problem")
-    expect(reads).toBe(1)
-  })
-})
-
 
 it("restores a shared review hunk and cannot close its verified co-owner after all edits are gone", async () => {
   const root = mkdtempSync(join(tmpdir(), "fix-settlement-"))

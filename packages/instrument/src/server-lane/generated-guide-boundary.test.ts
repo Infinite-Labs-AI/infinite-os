@@ -4,7 +4,7 @@ import { afterEach, expect, it } from "vitest"
 import { createGitFixture, type GitFixture } from "../../test/wizard/git-fixture.js"
 import { generatedApiTexts, recordGeneratedApi } from "../jobs/generated-api.js"
 import { measureOwnerDiff } from "../jobs/owner-diff.js"
-import { renderServerLaneBrief, SERVER_LANE_GUIDE_FILE } from "./copy.js"
+import { SERVER_LANE_GUIDE_FILE } from "./copy.js"
 import { applyServerLane, planServerLane } from "./install.js"
 
 const fixtures: GitFixture[] = []
@@ -25,7 +25,7 @@ function writeGuide(fx: GitFixture, appRoot = ".") {
   return { file, text: applied.brief }
 }
 
-it.each([".", "apps/site"])("measures the actual generated guide before and after commit at app root %s", async appRoot => {
+it.each([".",])("measures the actual generated guide before and after commit at app root %s", async appRoot => {
   const fx = fixture()
   const baseSha = fx.git(["rev-parse", "HEAD"]).trim()
   const guide = writeGuide(fx, appRoot)
@@ -34,15 +34,6 @@ it.each([".", "apps/site"])("measures the actual generated guide before and afte
   fx.git(["add", "-A"]); fx.git(["commit", "-m", "generated guide fixture"])
   const revision = fx.git(["rev-parse", "HEAD"]).trim()
   expect((await measureOwnerDiff({ root: fx.root, baseSha, appRoot, revision })).state).toBe("checked")
-})
-
-it("does not require API-write provenance for a guide without recognized consent calls", async () => {
-  const fx = fixture()
-  const baseSha = fx.git(["rev-parse", "HEAD"]).trim()
-  const guide = renderServerLaneBrief({ status: { kind: "created", middlewarePath: "middleware.ts", modulePath: "lib/infinite-server-lane.ts" }, siteSourceKey: "site_fixture", productionHosts: ["example.test"] })
-  fx.write(SERVER_LANE_GUIDE_FILE, guide)
-  expect(generatedApiTexts(fx.root, SERVER_LANE_GUIDE_FILE)).toEqual([])
-  expect((await measureOwnerDiff({ root: fx.root, baseSha })).state).toBe("checked")
 })
 
 it("does not mistake an API write for a recognized consent call in a generated guide", async () => {

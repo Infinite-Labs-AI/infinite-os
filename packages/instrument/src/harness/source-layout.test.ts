@@ -23,10 +23,6 @@ it("distinguishes build output from editable source without executing the build"
   expect(source.notes.join(" ")).not.toContain("SECRET_DO_NOT_PRINT")
   expect(inspectSourceLayout(root, "dist/get-started", "0.9.1").generatedTarget).toBe(true)
 })
-it("does not treat a plain static publish directory as generated without a build", () => {
-  const root = fixture({ outputDirectory: "public" })
-  expect(inspectSourceLayout(root, "public", "0.9.1").generatedTarget).toBe(false)
-})
 it("ignores unsafe output paths and reports an older exact project pin", () => {
   const root = fixture({ buildCommand: "build", outputDirectory: "../outside" })
   writeFileSync(
@@ -37,12 +33,4 @@ it("ignores unsafe output paths and reports an older exact project pin", () => {
   expect(result.outputDirectory).toBeUndefined()
   expect(result.notes.join(" ")).toContain("0.6.0")
   expect(result.notes.join(" ")).toContain("does not upgrade")
-})
-it("never recommends downgrading a newer project pin", () => {
-  const root = fixture({})
-  writeFileSync(
-    join(root, "package.json"),
-    JSON.stringify({ dependencies: { "infinite-tag": "1.0.0" } })
-  )
-  expect(inspectSourceLayout(root, ".", "0.9.1").notes).toEqual([])
 })

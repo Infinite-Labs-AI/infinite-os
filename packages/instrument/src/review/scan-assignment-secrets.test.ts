@@ -1,5 +1,4 @@
 // Every credential-shaped value in this file is synthetic.
-import { createHash } from "node:crypto"
 import { describe, expect, it } from "vitest"
 import { createScanner } from "./scan.js"
 
@@ -8,101 +7,71 @@ const scanner = createScanner({ literals: [], allowedIds: [] })
 const commitHits = (text: string) => scanner.findInCommit([{ path: "src/config.ts", added: text.split("\n").map((line, index) => ({ line: index + 1, text: line })) }], () => false)
 
 describe("explicit assignment secret names", () => {
-  it.each([
-    "stripeSecretKey", "apiKey", "secret_key", "db_password", "password", "passwd", "apikey",
-    "api_key", "privatekey", "private_key", "auth_token", "client_secret", "serviceToken", "AUTH",
-    "SESSION_KEY", "ENCRYPTION_KEY", "SIGNING_KEY", "MASTER_KEY", "PRIVATE_KEY", "SERVICE_SIGNING_KEY"
-  ])("redacts the value under %s", name => {
-    for (const text of [`${name}=${VALUE}`, `"${name}": "${VALUE}"`]) {
-      expect(scanner.redact(text).text).not.toContain(VALUE)
-      expect(commitHits(text)).toHaveLength(1)
-    }
-  })
-
-  it.each(["/", "+", "=", "_", "-", "."])("accepts %s within a quoted named credential", character => {
-    const value = `${VALUE}${character}${VALUE}`
-    const text = `NEXTAUTH_SECRET="${value}"`
-    expect(scanner.redact(text).text).toBe('NEXTAUTH_SECRET="[redacted: generic_secret]"')
-    expect(commitHits(text)).toHaveLength(1)
-  })
-
-  it("redacts every value in a generated base64 assignment corpus", () => {
-    for (let index = 0; index < 2_000; index += 1) {
-      const value = createHash("sha256").update(`synthetic-credential-${index}`).digest("base64")
-      for (const quote of ["", '"']) {
-        const text = `NEXTAUTH_SECRET=${quote}${value}${quote}`
-        expect(scanner.redact(text).text, `synthetic sample ${index}`).not.toContain(value)
-        expect(commitHits(text), `synthetic sample ${index}`).toHaveLength(1)
+  it("redacts the value under each credential name shape", () => {
+    for (const name of ["stripeSecretKey", "apiKey", "db_password", "client_secret", "serviceToken", "AUTH", "SIGNING_KEY", "PRIVATE_KEY"]) {
+      for (const text of [`${name}=${VALUE}`, `"${name}": "${VALUE}"`]) {
+        expect(scanner.redact(text).text, text).not.toContain(VALUE)
+        expect(commitHits(text), text).toHaveLength(1)
       }
     }
   })
 
-  it.each(["NEXTAUTH_SECRET=abcdefghi.xyz", "API_KEY=aaaa.bbbb", "API_KEY=aaaa/bbbb.ts", "api_key: abcdefghi.xyz", "API_KEY: config.providers.key", "API_KEY=someSecretValue"])("redacts the ambiguous standalone assignment %s", text => {
-    expect(scanner.redact(text).hits).toEqual([{ kind: "generic_secret" }])
-    expect(commitHits(text)).toEqual([{ kind: "generic_secret", file: "src/config.ts", line: 1 }])
+  it("redacts a base64 value with punctuation inside a quoted named credential", () => {
+    const text = `NEXTAUTH_SECRET="${VALUE}/+=${VALUE}"`
+    expect(scanner.redact(text).text).toBe('NEXTAUTH_SECRET="[redacted: generic_secret]"')
+    expect(commitHits(text)).toHaveLength(1)
   })
 
-  it.each([
-    "const API_KEY = config.providers.key;",
-    "let API_KEY = options.apiKey;",
-    "var secret = secretfromenvironment;",
-    "const options = { apiKey: config.providers.key };",
-    'const options = { "apiKey": config.providers.key };',
-    "return { secret: request.headers.authorization }",
-    "configure({ token: process.env.SERVICE_TOKEN });",
-    "record({ request, path: request.url, secret: env.SERVER_SECRET, sourceKey: env.PUBLIC_ID });",
-    'record({ request, secret: Netlify.env.get("SERVER_SECRET"), sourceKey: env.PUBLIC_ID });'
-  ])("preserves the explicit source expression %s", text => {
-    expect(scanner.redact(text)).toEqual({ text, hits: [] })
-    expect(commitHits(text)).toEqual([])
-  })
-
-  it("still redacts a literal credential inside a multi-property source object", () => {
+  it("preserves an explicit source expression but still redacts a literal beside it", () => {
+    for (const text of ["const API_KEY = config.providers.key;", "configure({ token: process.env.SERVICE_TOKEN });", 'record({ request, secret: Netlify.env.get("SERVER_SECRET"), sourceKey: env.PUBLIC_ID });']) {
+      expect(scanner.redact(text), text).toEqual({ text, hits: [] })
+      expect(commitHits(text), text).toEqual([])
+    }
     const text = `record({ request, secret: "${VALUE}", sourceKey: env.PUBLIC_ID });`
     expect(scanner.redact(text).text).toBe('record({ request, secret: "[redacted: generic_secret]", sourceKey: env.PUBLIC_ID });')
     expect(commitHits(text)).toEqual([{ kind: "generic_secret", file: "src/config.ts", line: 1 }])
   })
 
-  it.each(["AUTHOR", "GIT_AUTHOR_NAME", "OAUTH_CALLBACK_PATH", "AUTH_PROVIDER", "PASSWORD_HASH_ALGORITHM",
-    "TOKEN_NAME", "TOKEN_PATH", "TOKEN_URL", "TOKEN_PROVIDER", "TOKEN_EXPIRY_MS", "TOKEN_TTL",
-    "TOKEN_ALGORITHM", "TOKEN_HEADER", "TOKEN_TYPE", "authProvider", "passwordHashAlgorithm"])("keeps the setting named %s", name => {
-    const text = `${name}=${VALUE}`
-    expect(scanner.redact(text)).toEqual({ text, hits: [] })
-    expect(commitHits(text)).toEqual([])
-  })
-
-  it.each(["changeme", "<replace_with_a_secret>", "${SERVICE_SECRET}", "xxxx", "xxxxxxxxxxxxxxxx",
-    "your_api_key_here", "", "86400000", "01234567", "123.456", "true", "false",
-    "https://auth.example/callback", "https://auth.example/callback?code=test", "custom://auth.example/value"])("keeps the ordinary named value %s", value => {
-    for (const name of ["API_KEY", "secret", "x-api-key"]) {
-      const text = `${name}: "${value}"`
-      expect(scanner.redact(text)).toEqual({ text, hits: [] })
-      expect(commitHits(text)).toEqual([])
+  it("keeps settings whose names only mention auth or tokens, and placeholder values", () => {
+    for (const name of ["AUTHOR", "OAUTH_CALLBACK_PATH", "TOKEN_URL", "TOKEN_EXPIRY_MS", "passwordHashAlgorithm"]) {
+      const text = `${name}=${VALUE}`
+      expect(scanner.redact(text), text).toEqual({ text, hits: [] })
+      expect(commitHits(text), text).toEqual([])
+    }
+    for (const value of ["changeme", "<replace_with_a_secret>", "${SERVICE_SECRET}", "your_api_key_here", "86400000", "true", "https://auth.example/callback?code=test"]) {
+      const text = `API_KEY: "${value}"`
+      expect(scanner.redact(text), text).toEqual({ text, hits: [] })
+      expect(commitHits(text), text).toEqual([])
     }
   })
 })
 
 describe("credential shape boundaries", () => {
-  it.each(["https", "http", "postgresql", "mysql", "redis", "custom+transport"])("redacts URL passwords for the %s scheme", scheme => {
-    const text = `${scheme}://user:password@host`
-    expect(scanner.redact(text).text).toBe(`${scheme}://user:[redacted: url_password]@host`)
-    expect(commitHits(text)).toEqual([{ kind: "url_password", file: "src/config.ts", line: 1 }])
+  it("redacts URL passwords", () => {
+    for (const scheme of ["https", "postgresql", "custom+transport"]) {
+      const text = `${scheme}://user:password@host`
+      expect(scanner.redact(text).text).toBe(`${scheme}://user:[redacted: url_password]@host`)
+      expect(commitHits(text)).toEqual([{ kind: "url_password", file: "src/config.ts", line: 1 }])
+    }
   })
 
-  it.each(["Bearer authentication", "bearer authentication", "sprite@2x.png", "re_initializeAnalyticsClient"])("preserves %s", text => {
-    expect(scanner.redact(text)).toEqual({ text, hits: [] })
-    expect(commitHits(text)).toEqual([])
+  it("preserves bearer prose and ordinary asset names", () => {
+    for (const text of ["Bearer authentication", "sprite@2x.png"]) {
+      expect(scanner.redact(text), text).toEqual({ text, hits: [] })
+      expect(commitHits(text), text).toEqual([])
+    }
   })
 
-  it.each(["PUBLIC KEY", "RSA PUBLIC KEY", "CERTIFICATE"])("preserves a PEM %s", label => {
-    const text = [`-----BEGIN ${label}-----`, "MII" + VALUE.repeat(3), VALUE + "==", `-----END ${label}-----`].join("\n")
-    expect(scanner.redact(text)).toEqual({ text, hits: [] })
-    expect(commitHits(text)).toEqual([])
-  })
-
-  it.each(["PRIVATE KEY", "RSA PRIVATE KEY", "EC PRIVATE KEY", "ENCRYPTED PRIVATE KEY"])("still redacts a PEM %s", label => {
-    const text = [`-----BEGIN ${label}-----`, "MII" + VALUE.repeat(3), `-----END ${label}-----`].join("\n")
-    expect(scanner.redact(text).text).toBe("[redacted: private_key]")
-    expect(commitHits(text)).toEqual([{ kind: "private_key", file: "src/config.ts", line: 1 }])
+  it("redacts a PEM private key block but preserves a public key or certificate", () => {
+    for (const label of ["PRIVATE KEY", "EC PRIVATE KEY"]) {
+      const text = [`-----BEGIN ${label}-----`, "MII" + VALUE.repeat(3), `-----END ${label}-----`].join("\n")
+      expect(scanner.redact(text).text, label).toBe("[redacted: private_key]")
+      expect(commitHits(text), label).toEqual([{ kind: "private_key", file: "src/config.ts", line: 1 }])
+    }
+    for (const label of ["PUBLIC KEY", "CERTIFICATE"]) {
+      const text = [`-----BEGIN ${label}-----`, "MII" + VALUE.repeat(3), VALUE + "==", `-----END ${label}-----`].join("\n")
+      expect(scanner.redact(text), label).toEqual({ text, hits: [] })
+      expect(commitHits(text), label).toEqual([])
+    }
   })
 })

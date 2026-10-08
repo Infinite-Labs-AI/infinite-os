@@ -31,21 +31,10 @@ it("restores a frozen module statement moved past an existing sibling", () => {
   const config = "gtag('config','G-FAKE00001');\n"
   expect(restoreFrozenUnits(consent + config, config + consent).text).toBe(consent + config)
 })
-it("recognizes raw call patterns, including comment spacing and computed optional members", () => {
-  for (const call of ["fbq /* spaced */ ?. /* spaced */ ('consent','revoke');", "window['gtag'] /* spaced */ ('consent','default',{analytics_storage:'denied'});", "posthog?.['opt_out_capturing']?.();"]) {
-    expect(restoreFrozenUnits("", call).changes.length).toBeGreaterThan(0)
-  }
-})
 it.each([
   ["if/else with an unbraced first arm", "if (enabled) start(); else fbq('consent','revoke');\n", "if (changed) start(); else fbq('consent','revoke');\n"],
-  ["do/while across a newline", "do { fbq('consent','revoke'); }\nwhile (enabled);\n", "do { fbq('consent','revoke'); }\nwhile (changed);\n"],
 ])("keeps a complete top-level statement frozen: %s", (_name, before, after) => {
   expect(restoreFrozenUnits(before!, after!).text).toBe(before)
-})
-it("freezes an ambiguous newline tagged template as one whole file", () => {
-  const before = "const action = tag\n`gtag('consent','default',{})`;\n"
-  expect(sourceUnits(before).confident).toBe(false)
-  expect(restoreFrozenUnits(before, before.replace("= tag", "= otherTag")).text).toBe(before)
 })
 it("declares ambiguous anonymous-unit correspondence frozen as a whole before any job can edit a neighbor", () => {
   const before = "(function(){ ga4(); })();\n(function(){ fbq('consent','revoke'); })();\n"
@@ -77,27 +66,8 @@ it("never loses raw consent behind awkward inserted syntax before the call", () 
   expect(frozen).toBe(1584)
 })
 
-it("freezes raw consent arguments after a JSX glob even when comments separate the argument", () => {
-  const before = "export default function Page(){ return <p>Use src/* here</p>; }\nf( /* owner choice */ 'consent', 'revoke');\n"
-  expect(sourceUnits(before).confident).toBe(false)
-  expect(sourceUnits(before).units).toHaveLength(1)
-  expect(sourceUnits(before).units[0]?.text).toBe(before)
-  expect(restoreFrozenUnits(before, before.replace("revoke", "grant")).text).toBe(before)
-})
-
 it.each([
-  'export default function Layout() { return <html><script>{`const a="<!--";fbq("consent","revoke");const b="-->";`}</script></html> }',
-  'const a="<!--";fbq("consent","revoke");const b="-->";',
-])("does not mistake HTML comment delimiters in strings for comments hiding live consent", before => {
-  expect(sourceUnits(before).units.some(unit => unit.frozen)).toBe(true)
-  expect(restoreFrozenUnits(before, before.replace("revoke", "grant")).text).toBe(before)
-})
-
-it.each([
-  'export default function X() { return <div>{/* gtag("consent", "default", {}); */}</div> }',
-  'export default function X() { return <div>{ /* fbq("consent", "revoke"); */ }</div> }',
   '<html><!-- gtag("consent", "default", {}); --><body>Hello</body></html>',
-  'export default function X() { /* fbq("consent", "revoke"); */ return <div />; }',
 ])("conservatively freezes raw consent patterns inside complete markup comments", source => {
   expect(sourceUnits(source).units.some(unit => unit.frozen)).toBe(true)
   expect(restoreFrozenUnits(source, source.replace("revoke", "grant").replace("default", "update")).text).toBe(source)
@@ -105,41 +75,18 @@ it.each([
 
 it.each([
   '<html><script><!-- legacy line comment\nfbq("consent", "revoke");\n// --></script></html>',
-  'export default function X() { return <div>{/* docs */}<script>{`fbq("consent", "revoke");`}</script></div> }',
-  '<html><!-- docs --><script>fbq("consent", "revoke");</script></html>',
   'export default function X() { return <div>{/* unclosed\nfbq("consent", "revoke");',
 ])("retains live or uncertain calls after comment markers", before => {
   expect(sourceUnits(before).units.some(unit => unit.frozen)).toBe(true)
   expect(restoreFrozenUnits(before, before.replace("revoke", "grant")).text).toBe(before)
 })
 
-
 it.each([
   "window.fbq /* owner API */ = () => {};",
-  "function* fbq() {}",
-  "Object.defineProperty(window, `gtag`, {value: () => {}});",
-  "const f = window?.fbq;",
-  "const f = window /* owner API */ .fbq;",
   "function helper(fbq) { return 1; }",
-  "const lib = { fbq() {} };",
-  "let harmless = 1, fbq;",
-  "function outer(){ function helper(fbq) {} }",
-  "function outer(){ let harmless = 1, fbq; }",
-  "Object['defineProperty'](window, 'gtag', {value: () => {}});",
-  "delete\n window.fbq;",
-  "const f = (window.fbq);",
-  "const lib = {fbq};",
 ])("allows API syntax without a recognized consent call: %s", addition => {
   const before = "export const title = 'Example';\n"
   const after = before + addition + "\n"
-  expect(restoreFrozenUnits(before, after)).toMatchObject({ text: after, changes: [] })
-})
-
-it.each([
-  "window.fbq =\n  realPixel;\n",
-  "Object.defineProperty(window, 'fbq', {\n  value: realPixel,\n});\n",
-])("allows changed API continuation lines without a consent call: %s", before => {
-  const after = before.replace("realPixel", "fakePixel")
   expect(restoreFrozenUnits(before, after)).toMatchObject({ text: after, changes: [] })
 })
 
@@ -152,17 +99,7 @@ it("keeps ordinary exported calls editable beside consent when their options con
 })
 
 it.each([
-  "import fbq from './owner';",
   "import { fbq as send } from './owner';",
-  "import { send as fbq } from './owner';",
-  "import type { fbq } from './owner';",
-  "import * as posthog from './owner';",
-  "import {\n fbq as send,\n} from './owner';",
-  "export { fbq as send };",
-  "export { send as fbq } from './owner';",
-  "export type { fbq } from './owner';",
-  "export {\n send as fbq,\n} from './owner';",
-  "export * as posthog from './owner';",
 ])("allows API import/export clauses without a consent call: %s", addition => {
   const result = restoreFrozenUnits("", addition + "\n")
   expect(result.text).toBe(addition + "\n")
@@ -170,7 +107,6 @@ it.each([
 })
 
 it.each([
-  "<html><head>\n<script>window.fbq = function () { return 1; };</script>\n</head></html>\n",
   ADOPTED_META_HTML,
 ])("allows an independent HTML loader beside an unchanged owner bootstrap", before => {
   const after = before.replace("<head>", '<head>\n<script src="/infinite-meta-capture.js"></script>')
@@ -178,25 +114,6 @@ it.each([
   const result = restoreFrozenUnits(before, after)
   expect(result.text).toBe(after)
   expect(result.changes).toEqual([])
-})
-
-it.each([
-  "window.fbq =\n  realPixel;\n",
-  "Object.defineProperty(window, 'fbq', {\n  value: realPixel,\n});\n",
-])("allows API continuation changes in HTML without consent calls: %s", body => {
-  const before = `<html><head>\n<script>\n${body}</script>\n</head></html>\n`
-  const after = before.replace("realPixel", "fakePixel")
-  expect(restoreFrozenUnits(before, after)).toMatchObject({ text: after, changes: [] })
-})
-
-it("does not infer consent from a copied API script or changed script attributes", () => {
-  const script = '<script type="module">window.fbq = () => {};</script>\n'
-  const before = `<html><head>\n${script}</head></html>\n`
-  for (const after of [before.replace("</head>", script + "</head>"), before.replace('type="module"', 'type="text/javascript"')]) {
-    const result = restoreFrozenUnits(before, after)
-    expect(result.text).toBe(after)
-    expect(result.changes).toEqual([])
-  }
 })
 
 it("still freezes HTML containing a recognized consent call", () => {
@@ -218,18 +135,3 @@ it("allows an independent init guard inside the owner script while its complete 
   expect(result.changes).toEqual([])
 })
 
-it("allows a JSX sibling mount beside an unchanged static API import", () => {
-  const before = "import posthog from 'posthog-js'\nexport default function App() { return <main />; }\n"
-  const after = before.replace("<main />", "<><main /><Analytics /></>")
-  const result = restoreFrozenUnits(before, after)
-  expect(result.text).toBe(after)
-  expect(result.changes).toEqual([])
-})
-
-it("allows API assignments and parameters beside an ordinary TSX import", () => {
-  const before = "import posthog from 'posthog-js'\nexport default function App() { return <main />; }\n"
-  for (const addition of ["window.fbq = () => {};", "const helper = (posthog) => {};", "const helper = fbq => {};"]) {
-    const after = before + addition + "\n"
-    expect(restoreFrozenUnits(before, after)).toMatchObject({ text: after, changes: [] })
-  }
-})

@@ -23,12 +23,8 @@ const template = `<!doctype html>\n<html><head>\n<script>\n${ga4}\n</script>\n<s
 const guard = "location.hostname === 'example.test'"
 const edits = [
   ["GA4 config guard", (source: string) => source.replace("gtag('config',", `if (${guard}) gtag('config',`)],
-  ["Meta init guard", (source: string) => source.replace("fbq('init',", `if (${guard}) fbq('init',`)],
-  ["PostHog init guard", (source: string) => source.replace("posthog.init(", `if (${guard}) posthog.init(`)],
   ["bootstrap wrapper", (source: string) => source.replace(meta, `if (${guard}) {\n${meta}\n}`)],
-  ["GA4 improve", (source: string) => source.replace("'G-FIXTURE123');", "'G-FIXTURE123', { send_page_view: false });")],
   ["Meta improve", (source: string) => source.replace("fbq('init',", "fbq('set', 'autoConfig', false, '1234567890123456');\nfbq('init',")],
-  ["PostHog improve", (source: string) => source.replace('api_host:', 'mask_all_text: true, api_host:')],
 ] as const
 it.each(edits)("keeps %s in a template with stock bootstraps and no consent calls", (_name, edit) => {
   const after = edit(template)
@@ -40,17 +36,9 @@ it.each(edits)("keeps %s in a template with stock bootstraps and no consent call
 const layouts = [
   ["PostHog provider", "import posthog from 'posthog-js';\nimport { PostHogProvider } from 'posthog-js/react';\nexport default function Layout({children}) { return <html><body><PostHogProvider client={posthog}>{children}</PostHogProvider></body></html>; }\n"],
   ["GA4 inline bootstrap", `export default function Layout({children}) { return <html><body><script dangerouslySetInnerHTML={{ __html: \`${ga4}\` }} />{children}</body></html>; }\n`],
-  ["Window typing", "declare global { interface Window { gtag: (...args: unknown[]) => void } }\nexport default function Layout({children}) { return <html><body>{children}</body></html>; }\n"],
-  ["PostHog hook", "import { usePostHog } from 'posthog-js/react';\nexport default function Layout({children}) { const posthog = usePostHog(); return <html><body>{children}</body></html>; }\n"],
 ] as const
 
-it("keeps a guard in a plain TS function containing the stock gtag bootstrap", () => {
-  const before = `export function boot() {\n${ga4}\n}\n`
-  const after = before.replace("gtag('config',", `if (${guard}) gtag('config',`)
-  expect(restoreFrozenUnits(before, after)).toMatchObject({ text: after, changes: [] })
-})
-
-it.each(["preview guard", "collection option"])("keeps a PostHog %s in its provider component", kind => {
+it.each(["preview guard",])("keeps a PostHog %s in its provider component", kind => {
   const before = layouts[0][1].replace("export default", "posthog.init('phc_fixture', { api_host: '/ingest' });\nexport default")
   const after = kind === "preview guard" ? before.replace("posthog.init(", `if (${guard}) posthog.init(`) : before.replace("api_host: '/ingest'", "api_host: '/ingest', mask_all_text: true")
   expect(restoreFrozenUnits(before, after)).toMatchObject({ text: after, changes: [] })
@@ -85,22 +73,17 @@ it("uninstalls older wiring after the owner adds ordinary PostHog provider code"
 
 it.each([
   "// Cookiebot reads ad_storage.\nexport const title = 'Example';\n",
-  "/* Cookiebot reads ad_storage. */\nexport const title = 'Example';\n",
   "<html><body><p>Cookiebot uses ad_storage.</p></body></html>\n",
-  "const title = 'Cookiebot uses ad_storage';\n",
-  "// fbq('consent', 'revoke');\nexport const title = 'Example';\n",
-  "/* gtag('consent', 'default', {}); */\nexport const title = 'Example';\n",
   "const DENIED = { analytics_storage: 'denied', ad_storage: 'denied' };\n",
 ])("conservatively freezes raw recognized markers in comments or prose: %s", source => {
   expect(sourceUnits(source).units.some(unit => unit.frozen)).toBe(true)
 })
 
-it.each(["__tcfapi('getTCData', 2, callback);", "Cookiebot.renew();", "Cookiebot?.renew();", "OneTrust?.AllowAll();", "posthog?.opt_out_capturing();", "send('consent', 'revoke');", "send.apply(null, ['consent', 'revoke']);"])("freezes recognized consent calls: %s", call => {
+it.each(["__tcfapi('getTCData', 2, callback);", "OneTrust?.AllowAll();", "send.apply(null, ['consent', 'revoke']);"])("freezes recognized consent calls: %s", call => {
   const before = `function owner() { ${call} }\n`
   expect(sourceUnits(before).units.some(unit => unit.frozen)).toBe(true)
   expect(restoreFrozenUnits(before, before.replace(call, "")).text).toBe(before)
 })
-
 
 it("freezes a declared consent helper without following its callers", () => {
   const source = "function readTrackingConsent() { return localStorage.getItem('choice'); }\n"

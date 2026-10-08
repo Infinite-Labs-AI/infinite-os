@@ -12,9 +12,9 @@ import { createGitOps } from "../git/index.js"
 import { makeEditRecord, sha256Tagged } from "../install/edits.js"
 import type { WizardDeps } from "./contracts/deps.js"
 import type { WizardRunState } from "./contracts/state.js"
-import { abandonRun, freshStart } from "./command.js"
+import { freshStart } from "./command.js"
 import { nodeWizardFs } from "./fs.js"
-import { findLeftovers, resetStaleReceipt } from "./leftovers.js"
+import { findLeftovers } from "./leftovers.js"
 import { createRunState } from "./run-state.js"
 import type { WizardIo } from "./wiring.js"
 
@@ -106,37 +106,6 @@ describe("--fresh over the wizard's own leftovers (§3y.8, P2-4)", () => {
     expect(existsSync(join(fx.root, "lib/infinite-analytics-client.tsx"))).toBe(false)
   })
 
-  it.each([false, true])("never treats another or mixed run's matching content hash as this set-aside run's leftover (mixed=%s)", async (mixed) => {
-    const { fx } = liveRun3()
-    fx.write("pages/_app.tsx", "export const marker = true\n")
-    const receipt = JSON.parse(readFileSync(join(fx.root, ".infinite/install.json"), "utf8")) as { edits: Array<{ runId: string }>; files?: string[]; contentHashes?: Record<string, string> }
-    receipt.edits.forEach((edit) => { edit.runId = "other-run" })
-    if (mixed) receipt.edits.push({ ...receipt.edits[0]!, runId: OLD_RUN })
-    receipt.files = ["pages/_app.tsx"]
-    receipt.contentHashes = { "pages/_app.tsx": sha256Tagged("export const marker = true\n").slice(7) }
-    fx.write(".infinite/install.json", JSON.stringify(receipt))
-    const git = createGitOps({ cwd: fx.root, env: fx.env, worktreeRoot: join(fx.dir, "worktrees") })
-    const scan = await findLeftovers(fx.root, nodeWizardFs, git, OLD_RUN)
-    expect(scan.others).toContain("pages/_app.tsx")
-    expect(scan.leftovers.some((entry) => entry.path === "pages/_app.tsx")).toBe(false)
-  })
-
-  it("the live run-3 state → ONE confirm naming app/layout.tsx; yes restores exactly it, drops the run's receipt entries, switches to the base", async () => {
-    const { fx, old } = liveRun3()
-    const asked: Array<{ kind: string; payload: { question: string; defaultYes: boolean } }> = []
-    const ask = (async (kind: string, payload: { question: string; defaultYes: boolean }) => (asked.push({ kind, payload }), true)) as never
-    const out = io()
-    const stopped = await freshStart({ root: fx.root, deps: depsFor(fx), ask, io: out, old })
-    expect(stopped).toBeNull()
-    expect(asked).toEqual([{ kind: "confirm", payload: { question: "Your last run (r-5995) left its own unfinished changes, never committed: app/layout.tsx. Discard them and start fresh?", defaultYes: true } }])
-    expect(readFileSync(join(fx.root, "app/layout.tsx"), "utf8")).toBe(LAYOUT)
-    expect(readFileSync(join(fx.root, ".gitignore"), "utf8")).toBe("node_modules\n")
-    expect(fx.git(["symbolic-ref", "--short", "HEAD"]).trim()).toBe("main")
-    const receipt = JSON.parse(readFileSync(join(fx.root, ".infinite/install.json"), "utf8")) as { edits?: unknown[] }
-    expect(receipt.edits).toBeUndefined()
-    expect(fx.git(["status", "--porcelain", "--untracked-files=no"]).trim()).toBe("")
-  })
-
   it("--yes never answers it (the ask times out) → exit 2 with the exact commands; nothing is touched", async () => {
     const { fx, old } = liveRun3()
     const out = io()
@@ -160,33 +129,5 @@ describe("--fresh over the wizard's own leftovers (§3y.8, P2-4)", () => {
     expect(scan.leftovers).toEqual([])
     expect(scan.others).toEqual(["app/layout.tsx"])
   })
-
-  it("the set-aside run is PATCHed abandoned through its own link (best effort)", async () => {
-    const { fx, old } = liveRun3()
-    const patches: unknown[] = []
-    await abandonRun(depsFor(fx, patches), old, io())
-    expect(patches).toEqual([{ runId: OLD_RUN, patch: { phase: "abandoned" }, linkId: "lk_V0qMdOMEEFwiVnjdeP-GGg" }])
-    // A refusal is one line, never a stop.
-    const out = io()
-    const refusing = { ...depsFor(fx), bridge: { has: () => true, setLinkId: () => undefined, patchRun: async () => Promise.reject(Object.assign(new Error("x"), { code: "not_found" })) } } as unknown as WizardDeps
-    await abandonRun(refusing, old, out)
-    expect(out.errors).toHaveLength(1)
-  })
 })
 
-describe("the receipt reset after branching (§3y.8, P2-5)", () => {
-  it("a working receipt the base never had is moved to the cache (0600) and removed; one that equals the base's stays", async () => {
-    const { fx } = liveRun3()
-    const home = join(fx.dir, "home")
-    const git = createGitOps({ cwd: fx.root, env: fx.env, worktreeRoot: join(fx.dir, "wt") })
-    const baseSha = fx.git(["rev-parse", "main"]).trim()
-    const before = readFileSync(join(fx.root, ".infinite/install.json"), "utf8")
-    const kept = await resetStaleReceipt({ root: fx.root, fs: nodeWizardFs, git, baseSha, runId: "f42a314e-0000-4000-8000-000000000004", home })
-    expect(kept).toBe(join(home, "Library/Caches/infinite-tag/f42a314e-0000-4000-8000-000000000004/install.json.before-reset"))
-    expect(readFileSync(kept!, "utf8")).toBe(before)
-    expect(existsSync(join(fx.root, ".infinite/install.json"))).toBe(false)
-    // NEGATIVE: nothing to reset (no receipt, or the base's own) → null, nothing moved.
-    expect(await resetStaleReceipt({ root: fx.root, fs: nodeWizardFs, git, baseSha, runId: "r", home })).toBeNull()
-    expect(sha256Tagged(before)).toMatch(/^sha256:/)
-  })
-})

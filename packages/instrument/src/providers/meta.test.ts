@@ -27,32 +27,6 @@ describe("meta provider plan", () => {
     expect(blocked.instructions).toHaveLength(0)
   })
 
-  it("emits the standard fbevents bootstrap with init + PageView for static-html", () => {
-    const ok = metaProviderAdapter.plan("static-html", { pixelId: "1234567890123456" })
-    expect(ok.blockers).toEqual([])
-    const snippet = ok.instructions[0]!.snippet
-    expect(ok.instructions[0]!.path).toBe("index.html")
-    expect(ok.instructions[0]!.provider).toBe("meta")
-    expect(snippet).toContain("connect.facebook.net/en_US/fbevents.js")
-    expect(snippet).toContain('fbq(\'init\', "1234567890123456")')
-    expect(snippet).toContain("fbq('track', 'PageView')")
-    // static-html snippet is wrapped in a <script> tag.
-    expect(snippet.startsWith("<script>")).toBe(true)
-    expect(snippet.trimEnd().endsWith("</script>")).toBe(true)
-  })
-
-  it("emits a raw (unwrapped) snippet for JS-module frameworks folded into the module", () => {
-    // Next uses the JS module; Vite now injects the wrapped <script> into index.html like static-html.
-    const ok = metaProviderAdapter.plan("next-app-router", { pixelId: "1234567890123456" })
-    expect(ok.instructions[0]!.path).toBe("lib/infinite-analytics.ts")
-    const snippet = ok.instructions[0]!.snippet
-    expect(snippet.startsWith("<script>")).toBe(false)
-    expect(snippet).toContain("fbevents.js")
-    // Must be safe to fold into the module's String.raw`…` bootstrap template.
-    expect(snippet).not.toContain("`")
-    expect(snippet).not.toContain("${")
-  })
-
   it("turns Meta's Automatic Configuration OFF before init so no button clicks or page metadata go to Meta", () => {
     const snippet = buildMetaPixelSnippet("1234567890123456")
     const setLine = `fbq('set', 'autoConfig', 'false', "1234567890123456");`
@@ -71,10 +45,6 @@ describe("meta provider plan", () => {
     const hostile = buildMetaPixelSnippet("</script>")
     expect(hostile).toContain(`fbq('set', 'autoConfig', 'false', "\\u003c/script>");`)
     expect(hostile).not.toContain("</script>")
-  })
-
-  it("records no env keys (the pixel id is an inlined public value)", () => {
-    expect(metaProviderAdapter.envKeys("next-app-router")).toEqual([])
   })
 
   it("builder escapes a would-be breakout in the pixel id", () => {

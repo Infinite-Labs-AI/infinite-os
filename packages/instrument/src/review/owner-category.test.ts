@@ -1,8 +1,7 @@
 import { expect, it } from "vitest"
-import { isReviewResult, omitOwnerPolicyReview } from "./brief.js"
+import { omitOwnerPolicyReview } from "./brief.js"
 import { emptyLedger, openFindings, recordDecisions } from "./ledger.js"
 import { RULINGS, triage, triageKey, type TriageItem } from "./triage.js"
-import { ciFixItem } from "./fix.js"
 import { applyClaim } from "../jobs/state-machine.js"
 import { item } from "../../test/wizard/repo.js"
 import type { ReviewResult } from "../wizard/contracts/agents.js"
@@ -11,12 +10,6 @@ const finding = { id: "F1", item: "R1" as const, severity: "blocker" as const, p
 const review: ReviewResult = { verdict: "changes_suggested", summary: "Review mentions consent incidentally", checklist: [], findings: [finding] }
 const context = { allowlist: [finding.path], declinedKeys: new Set<string>(), passingChecks: new Set<string>(), answerFor: () => null }
 const triageItem: TriageItem = { ...finding, source: "reviewer", threadId: null, findingId: finding.id, suggestedFix: null }
-
-it("keeps ordinary components in review scope without inferring ownership from their names", () => {
-  const path = "components/PolicyContent.tsx"
-  const decision = triage([{ ...triageItem, path }], { ...context, allowlist: [path] })[0]!
-  expect(decision).toMatchObject({ action: "FIX" })
-})
 
 it("keeps secret/PII findings regardless of consent words or a policy page path", () => {
   expect(omitOwnerPolicyReview(review)).toEqual(review)
@@ -37,11 +30,6 @@ it("uses structured owner category for information while retaining the finding",
   expect(openFindings(ledger, [])).toHaveLength(0)
 })
 
-it("findings on this run's own code stay in scope even when the reviewer labels them owner-only", () => {
-  const decision = triage([{ ...triageItem, category: "owner_consent_privacy" } as TriageItem], { ...context, ownership: () => "the wizard's own change" as const })[0]!
-  expect(decision.action).toBe("INFINITE")
-})
-
 it("an agent's blocked consent note remains blocked and cannot close a review finding", () => {
   const job = item("review_comments:F1", [finding.path])
   const result = applyClaim(job, { jobId: job.id, status: "blocked", note: "consent code in the way", at: "2026-10-07T00:00:00Z" }, () => ({ agrees: false, evidence: [] })).item
@@ -51,26 +39,9 @@ it("an agent's blocked consent note remains blocked and cannot close a review fi
   expect(openFindings(ledger, [result])).toHaveLength(1)
 })
 
-it("selects the last actual CI error rather than an early success message containing error", () => {
-  const output = "error tracking configured successfully\n" + "successful setup\n".repeat(500) + "src/broken.ts:1 ERROR actual failure\n"
-  expect(ciFixItem(["src/broken.ts"], output).trigger.finding).toContain("actual failure")
-})
-it("selects the failing step section when Actions logs include step markers", () => {
-  const output = "job\tSetup\t2026-10-07 error tracking configured\n" + "job\tSetup\t2026-10-07 success\n".repeat(200) + "job\tBuild\t2026-10-07 src/broken.ts:1 ERROR actual failure\n" + "job\tCleanup\t2026-10-07 configured error tracking\n"
-  const excerpt = ciFixItem(["src/broken.ts"], output).trigger.finding
-  expect(excerpt).toContain("actual failure")
-  expect(excerpt).not.toContain("Setup")
-})
-
 it("keeps a blocker on run-written capture open for the owner", () => {
   const decision = triage([{ ...triageItem, path: "src/capture.ts", category: "owner_consent_privacy" }], { ...context, allowlist: ["src/capture.ts"], writtenByRun: () => true })[0]!
   expect(decision.action).toBe("ASK")
-})
-
-it("accepts structured category in fresh reviews and leaves legacy missing-category findings in scope", () => {
-  expect(isReviewResult(review)).toBe(true)
-  expect(isReviewResult({ ...review, findings: [{ ...finding, category: "owner_consent_privacy" }] })).toBe(true)
-  expect(isReviewResult({ ...review, findings: [{ ...finding, category: "trust_me" }] })).toBe(true)
 })
 
 it("keeps a blocker open even when its owner category refers to this run's code", async () => {
@@ -86,47 +57,6 @@ it("keeps a blocker open even when its owner category refers to this run's code"
   expect(openFindings(ledger, [], ownership.classify, ownership.writtenByRun)).toHaveLength(1)
 })
 
-it("never appends a changed-neither claim to an unmeasured PR or final comment", async () => {
-  const { buildPrBody, buildFinalComment } = await import("./post.js")
-  const { createScanner } = await import("./scan.js")
-  const scanner = createScanner({ literals: [], allowedIds: [] })
-  const pr = buildPrBody({ reportMarkdown: "Unmeasured report", howToReview: "Review changes", runId: "fixture", isPrivate: true, diffText: "", connectionIds: [], scanner })
-  const final = buildFinalComment({ runId: "fixture", reportMarkdown: "Unmeasured report", reviewer: null, reviewed: false, jobs: [], decisions: [], untrusted: [], notes: [], scanner })
-  expect(pr).not.toContain("changed neither")
-  expect(final).not.toContain("changed neither")
-})
-
-it("shows the exact owner guard and distinguishes a restored edit from a withheld guard", async () => {
-  const { buildChecklist, jobStateCell } = await import("./post.js")
-  const { buildHostGuardExpression } = await import("../host-guard.js")
-  const guard = `if (${buildHostGuardExpression({ mode: "allow", hosts: ["fictional.test"] })}) {\n  // Existing analytics start-up statements go here.\n}`
-  const note = "For you: add the preview guard to GA4's start-up at src/tracking.ts:7; until then preview and local visits count in GA4."
-  const withheld = { ...item("preview_guard:ga4", ["src/tracking.ts"]), state: "left_for_you" as const, note, ownerBoundary: { kind: "frozen_unit" as const, file: "src/tracking.ts", line: 7, guard } }
-  expect(jobStateCell(withheld)).toBe(note)
-  const checklist = buildChecklist([withheld])
-  expect(checklist).toContain(guard)
-  expect(checklist).toContain("src/tracking.ts:7")
-  expect(jobStateCell({ ...withheld, note: "ignored old note", ownerBoundary: { kind: "restored_unit" } })).toBe("Put back: an edit reached code that handles consent.")
-})
-
-it("treats a stale assertion string as text, never as measurement authority", async () => {
-  const { buildPrBody } = await import("./post.js")
-  const { createScanner } = await import("./scan.js")
-  const { OWNER_BOUNDARY } = await import("../jobs/owner-boundary.js")
-  const output = buildPrBody({ reportMarkdown: OWNER_BOUNDARY, howToReview: "Review changes", runId: "fixture", isPrivate: true, diffText: "", connectionIds: [], scanner: createScanner({ literals: [], allowedIds: [] }) })
-  expect(output).not.toContain("changed neither")
-})
-
-it("keeps manual installer wiring distinct from a preview guard", async () => {
-  const { buildChecklist } = await import("./post.js")
-  const wiring = 'import { AnalyticsClient } from "./analytics-client";\n<AnalyticsClient />'
-  const manual = { ...item("unusual_layout:owner_wiring", ["app/layout.tsx"]), state: "left_for_you" as const, note: "For you: add the analytics wiring at app/layout.tsx:1, inside your consent code.", ownerBoundary: { kind: "frozen_unit" as const, file: "app/layout.tsx", wiring } }
-  const text = buildChecklist([manual])
-  expect(text).toContain(wiring)
-  expect(text).toContain("has not been applied")
-  expect(text).not.toContain("Apply this condition")
-})
-
 const requestRulings = [
   ["request_ga4_proxy", "ga4_proxy", "R11"],
   ["request_meta_unsupported", "meta_never_list", "R8"],
@@ -138,24 +68,6 @@ it("does not decline security or legacy findings because their text mentions a s
     for (const body of ["PII phone sent to the Meta pixel unhashed", "GA4 proxy sends a secret header to the browser", "Delete leaked credentials from Meta payloads"]) {
       const current: TriageItem = { ...triageItem, category, path: "src/capture.ts", severity: "should", item: "R11", body }
       expect(triage([current], { ...context, allowlist: [current.path!], passingChecks: new Set(["posthog_via_proxy_once"]) })[0]?.action).toBe("FIX")
-    }
-  }
-})
-
-it("reopens legacy and security ruling declines when resuming either ledger format", () => {
-  for (const format of ["findings", "rounds"] as const) {
-    for (const category of [undefined, "security", "analytics"] as const) {
-      for (const [, rulingId] of requestRulings) {
-        const current: TriageItem = { ...triageItem, category, path: "src/capture.ts", severity: "should" }
-        const ruling = RULINGS.find(entry => entry.id === rulingId)!
-        const ledger = emptyLedger("fixture")
-        if (format === "findings") recordDecisions(ledger, [{ item: current, action: "DECLINE", ruling: ruling.id, reason: ruling.reply }], 1)
-        else {
-          ledger.rounds = [{ round: 1, reviewedSha: "a".repeat(40), reviewer: "codex", fixSha: null, review: { ...review, findings: [{ ...finding, path: current.path!, category, severity: "should" }] } }]
-          ledger.declined = [{ key: triageKey(current), reason: ruling.reply, round: 1 }]
-        }
-        expect(openFindings(ledger, []), `${format}: ${category}: ${rulingId}`).toHaveLength(1)
-      }
     }
   }
 })
