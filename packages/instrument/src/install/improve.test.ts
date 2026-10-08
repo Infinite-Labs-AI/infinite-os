@@ -9,7 +9,7 @@ import { detectProvidersWithEvidence } from "../harness/inspect.js"
 import { checkMetaAutoConfigOptOut } from "../providers/meta-browser/autoconfig.js"
 import { reverseTextEdits } from "../server-lane/text-edits.js"
 
-import { applyImproveEdit, CAPTURE_BLOCK_MARKER, detectAdoptedFacts, improveLinesFor, withSensitivePaths } from "./improve.js"
+import { applyImproveEdit, CAPTURE_BLOCK_MARKER, detectAdoptedFacts, expressionInitOf, expressionOptOutLines, improveLinesFor, withSensitivePaths } from "./improve.js"
 
 afterEach(cleanupSites)
 
@@ -213,6 +213,37 @@ describe("applyImproveEdit: the deterministic code edits (approved lines only)",
     expect(runPage(ADOPTED_META_HTML).queue()[0]).toEqual(["init", IDS.meta])
     // Applying it twice changes nothing more.
     expect(edit(root, line)).toEqual({ ok: true, record: null })
+  })
+
+  it("review P2: a pixel whose id comes from a variable also gets Meta's automatic events and history PageViews turned off", () => {
+    const html = ADOPTED_META_HTML.replace(`fbq('init', '${IDS.meta}');`, `var metaPixelId = window.__sitePixelId;\n        fbq('init', metaPixelId);`)
+    expect(html).not.toBe(ADOPTED_META_HTML)
+    const { root, facts, lines } = linesFor({ "index.html": html })
+    expect(facts.meta[0]?.pixelId).toBeNull()
+    expect(facts.meta[0]?.expressionInit).toMatchObject({ receiver: "fbq", idExpression: "metaPixelId", pushStateOff: false })
+    const line = lines.find((entry) => entry.kind === "autoconfig_off_adopted")!
+    expect(line.owner).toBe("code")
+    expect(line.text).toContain("metaPixelId")
+    const result = edit(root, line)
+    expect(result.ok).toBe(true)
+    const after = read(root, "index.html")
+    const page = runPage(after.replace("<head>", `<head>\n<script>window.__sitePixelId = '${IDS.meta}';</script>`))
+    expect(page.queue()).toEqual([["set", "autoConfig", false, IDS.meta], ["init", IDS.meta], ["track", "PageView"]])
+    expect((page.window.fbq as { disablePushState?: boolean }).disablePushState).toBe(true)
+    // Once set, nothing more is proposed or written.
+    expect(edit(root, line)).toEqual({ ok: true, record: null })
+    expect(linesFor({ "index.html": after }).lines.find((entry) => entry.kind === "autoconfig_off_adopted")).toBeUndefined()
+  })
+
+  it("review P2: the env-var init in a module keeps its own receiver, and TypeScript gets a form that compiles on any pixel type", () => {
+    const source = "if (!metaInitialized) {\n    trackingWindow.fbq(\"init\", process.env.NEXT_PUBLIC_META_PIXEL_ID);\n  }"
+    expect(expressionInitOf(source)).toMatchObject({ receiver: "trackingWindow.fbq", idExpression: "process.env.NEXT_PUBLIC_META_PIXEL_ID", pushStateOff: false })
+    expect(expressionOptOutLines("trackingWindow.fbq", "process.env.NEXT_PUBLIC_META_PIXEL_ID", true)).toEqual([
+      "trackingWindow.fbq('set', 'autoConfig', false, process.env.NEXT_PUBLIC_META_PIXEL_ID);",
+      "Object.assign(trackingWindow.fbq, { disablePushState: true });"
+    ])
+    expect(expressionInitOf(`fbq('init', '${IDS.meta}')`)).toBeNull()
+    expect(expressionInitOf("fbq.disablePushState = true; fbq('init', pixelId)")?.pushStateOff).toBe(true)
   })
 
   it("the PostHog /ingest rewrite in vercel.json, region from the connection; reversal removes the file it created", () => {

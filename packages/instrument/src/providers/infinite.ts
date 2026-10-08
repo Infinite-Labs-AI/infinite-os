@@ -99,7 +99,13 @@ export const infiniteProviderAdapter: ProviderAdapter = {
       // Only `true` is serialized — an absent flag keeps the runtime config byte-identical (bots
       // are never counted). Synthetic/test sandbox sources only; installer-gated to non-prod hosts.
       ...(infinite?.allowAutomation === true ? { allowAutomation: true } : {}),
-      ...(infinite?.excludedPaths && infinite.excludedPaths.length > 0 ? { excludedPaths: infinite.excludedPaths } : {})
+      ...(infinite?.excludedPaths && infinite.excludedPaths.length > 0 ? { excludedPaths: infinite.excludedPaths } : {}),
+      // Follow mode only (review P1-6); absent otherwise, so the runtime config stays byte-identical.
+      ...(infinite?.followSitePixels === true && consentMode === "not_required" && infinite.pixelFreePaths && infinite.pixelFreePaths.length > 0
+        ? { pixelFreePaths: infinite.pixelFreePaths }
+        : {}),
+      // Parity gap 8: only `true` is serialized.
+      ...(infinite?.metaPageViews === true ? { metaPageViews: true } : {})
     }
     return {
       assumptions: [

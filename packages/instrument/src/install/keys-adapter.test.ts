@@ -23,7 +23,8 @@ describe("artifactsFromKeys (§3b keys → the installer's input)", () => {
       uiHost: "https://us.posthog.com",
       proxy: { path: "/ingest", ingestHost: "https://us.i.posthog.com", assetsHost: "https://us-assets.i.posthog.com" }
     })
-    expect(artifacts.meta).toEqual({ pixelId: IDS.meta, consentMode: "not_required" })
+    // Parity gap 5: the browser leg's match data is ON by default when Meta is connected.
+    expect(artifacts.meta).toEqual({ pixelId: IDS.meta, consentMode: "not_required", advancedMatching: true })
     expect(artifacts.productionHosts).toEqual(["acme-store.com"])
   })
 
@@ -108,6 +109,11 @@ describe("artifactsFromKeys (§3b keys → the installer's input)", () => {
     const result = artifactsFromKeysDetailed(fakeKeys(), { ...decided, consentMode: null })
     expect(result.artifacts.infinite).toBeUndefined()
     expect(result.skipped.infinite).toBe("consent_unanswered")
+  })
+
+  it("browser match data can be turned off by the plan decision, and only by it", () => {
+    expect(artifactsFromKeys(fakeKeys(), { ...decided, metaAdvancedMatching: false }).meta).toEqual({ pixelId: IDS.meta, consentMode: "not_required" })
+    expect(artifactsFromKeys(fakeKeys(), { ...decided, metaAdvancedMatching: true }).meta?.advancedMatching).toBe(true)
   })
 
   it("passes route exclusions only to Infinite's runtime config", () => {

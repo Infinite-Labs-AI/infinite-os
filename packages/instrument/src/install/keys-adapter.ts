@@ -158,7 +158,10 @@ export function artifactsFromKeysDetailed(keys: TagKeys, answers: PlanModel["dec
   if (meta.status === "connected" && meta.pixels.length === 1) {
     const pixelId = meta.pixels[0]!.pixelId
     if (validateMetaPixelId(pixelId) !== null) skipped.meta = "invalid_id"
-    else artifacts.meta = { pixelId, ...(answers.consentMode ? { consentMode: answers.consentMode } : {}) }
+    // Parity gap 5: the browser leg's match data is a plan DEFAULT when Meta is connected (the flag the old CLI path
+    // needed was never set by the wizard). Hashing happens on the page, only when the site's own code passes identity
+    // and only while the tag says the visitor allowed tracking; `decisions.metaAdvancedMatching: false` turns it off.
+    else artifacts.meta = { pixelId, ...(answers.consentMode ? { consentMode: answers.consentMode } : {}), ...(answers.metaAdvancedMatching === false ? {} : { advancedMatching: true }) }
   } else {
     skipped.meta =
       meta.status === "infinite_dataset"

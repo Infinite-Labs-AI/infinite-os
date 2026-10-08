@@ -647,6 +647,12 @@ export interface PlanModel {
     conversionNames: string[]
     privacyText: string | null
     npmInstall: string | null
+    /**
+     * Parity gap 5: hashed email / external id on the browser leg of a Meta conversion (`infiniteMetaAdvancedMatch`,
+     * used by `infiniteMetaMirror(name, id, { identity })`). Absent or true = ON whenever Meta is connected; only an
+     * explicit `false` (the owner turned the plan line off) leaves it out.
+     */
+    metaAdvancedMatching?: boolean
   }
 }
 
