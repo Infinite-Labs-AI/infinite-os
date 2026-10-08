@@ -18,6 +18,7 @@ import { CONVERSION_TYPES, type ConversionType } from "../wizard/contracts/bridg
 import type { PlanLineKind } from "../wizard/contracts/asks.js"
 import {
   JOB_TABLE,
+  TARGET_ONLY_CHECKS,
   type BeforeFacts,
   type BlockedReason,
   type ChecklistItem,
@@ -252,7 +253,8 @@ function checksFor(jobId: JobId, target: string, framework: string): ChecklistIt
   const clickTier: CheckTier = T0_CLICK_FRAMEWORKS.has(framework) ? "T0" : "RH"
   const table = JOB_TABLE[jobId].checks.filter((spec) => spec.checkId !== "click_test" || spec.tier === clickTier)
   const chosen = TARGET_CHECKS[jobId]?.(target, framework)
-  const specs = chosen ? table.filter((spec) => chosen.includes(`${spec.tier}:${spec.checkId}`)) : table
+  // A target-only check (`TARGET_ONLY_CHECKS`) is carried only by the target whose list names it.
+  const specs = chosen ? [...table, ...(TARGET_ONLY_CHECKS[jobId] ?? [])].filter((spec) => chosen.includes(`${spec.tier}:${spec.checkId}`)) : table
   return specs.map((spec) => ({ id: spec.checkId, tier: spec.tier, state: "not_run" as const }))
 }
 
@@ -767,8 +769,11 @@ export function seedCandidatesFrom(scan: JobScan, facts: BeforeFacts): Checklist
     const funnelEntry = funnel ? inventoryEntry(inventory, funnel) : null
     const browserTools = (["ga4", "posthog"] as const).filter((tool) => (funnelEntry ? funnelEntry.missing.includes(tool) : true) && presence[tool])
     if (funnel && browserTools.length === 0) continue
-    const gapFields = funnelEntry
-      ? { inventory: [funnelEntry], title: `Send the ${type} conversion to ${listWords(browserTools.map((tool) => COMMERCE_TOOL_NAME[tool]))}` }
+    // The item's copy of the entry names as missing only the browser tools THIS job adds (a tool the site does not run
+    // is absent, not missing), so its brief's `destinations` are exactly the title's tools.
+    const itemEntry = funnelEntry ? { ...funnelEntry, missing: funnelEntry.missing.filter((tool) => (tool !== "ga4" && tool !== "posthog") || (browserTools as readonly string[]).includes(tool)) } : null
+    const gapFields = itemEntry
+      ? { inventory: [itemEntry], title: `Send the ${type} conversion to ${listWords(browserTools.map((tool) => COMMERCE_TOOL_NAME[tool]))}` }
       : {}
     if (OUTCOME_CONVERSION_TYPES.has(type)) {
       const success = d.successPaths.filter((finding) => finding.conversionType === type)

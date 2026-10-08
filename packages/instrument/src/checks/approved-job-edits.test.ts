@@ -155,7 +155,9 @@ it("verifies correct scripted source edits for each applicable kind on the main 
   edit(logout, source => source.replace("  await supabase.auth.signOut()", "  await supabase.auth.signOut()\n  infiniteReset()"))
   edit(form, source => source.replace('if (response.ok) window.location.assign("/")', 'if (response.ok) { infiniteTrack("sign_up"); window.location.assign("/"); }'))
   const run = () => ({ conversionNames: ["sign_up"], posthogSensitivePaths: ["/login"], productionHosts: ["fixture.example"], expectedEmittedGuard: guard, expect: { ga4: ["G-FAKE00001"], meta: ["1234567890123456"] }, proxy })
-  const functions = { ...jobStaticCheckFunctions({ root, run }), ...o9CheckFunctions({ root, version: "test", run, readBaseFile: (_root, file) => originals.get(file) ?? null }) }
+  // The code before the run (the fixture as copied): the double-count check compares the new sends with it.
+  const readBaseFile = (_root: string, file: string) => originals.get(file) ?? null
+  const functions = { ...jobStaticCheckFunctions({ root, run, readBaseFile }), ...o9CheckFunctions({ root, version: "test", run, readBaseFile: (_root, file) => originals.get(file) ?? null }) }
   const runner = createCheckRunner({ root, appRoot: ".", runId: () => ctx.runId, now: ctx.now })
   const build = await runner.run("build", {})
   const buildResults = Array.isArray(build) ? build : [build]

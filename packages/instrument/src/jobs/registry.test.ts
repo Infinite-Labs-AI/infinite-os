@@ -117,7 +117,9 @@ describe("seedCandidates", () => {
     // §3x.3: an outcome conversion is checked where it succeeds (static) and by its first real event, never by a
     // click test (its success branch cannot run in a no-send load); it targets the success line, not the links.
     const signup = items.find((item) => item.id === "conversions_to_tools:signup")!
-    expect(signup.checks.map((c) => `${c.tier}:${c.id}`)).toEqual(["S:no_fbq_standard_on_click", "S:track_after_success", "P:first_real_conversion"])
+    // Review r3: a browser conversion also may never add a second send of what a tool already gets, nor a page-made
+    // Meta event id (both only fail the job, never tick it).
+    expect(signup.checks.map((c) => `${c.tier}:${c.id}`)).toEqual(["S:no_fbq_standard_on_click", "S:track_after_success", "S:no_double_count", "S:meta_event_id_from_server", "P:first_real_conversion"])
     expect(signup.trigger.evidence).toEqual([{ file: "app/signup/page.tsx", line: 5 }])
     expect(signup.allow.files).toEqual(["app/signup/page.tsx"])
     // P0-5: the title names the tools that miss the conversion, never "every tool".
@@ -615,9 +617,13 @@ describe("§3x.3 live run 3: job 10 targets the success, job 11 is not a second 
     const approvals = { approved: ["conversion_names"], declined: [], edits: {} }
     const facts = { runId: RUN_ID, framework: "next-app-router", packageManager: "npm", router: "app" as const, appRoot: ".", plan: briefPlanFrom(plan, approvals), connections: null, previewGuard: null, helpers: { module: "lib/infinite-analytics.ts" } }
     const brief = buildBrief(items, facts)
-    expect(brief).toContain('import { infiniteTrack, infiniteTrackThenNavigate } from \\"../../lib/infinite-analytics\\"')
-    expect(brief).toContain("The helpers are already in your repo: import { infiniteTrack, infiniteTrackThenNavigate } from \"../../lib/infinite-analytics\". Never re-implement them.")
-    expect(brief).toContain('call infiniteTrack("signup") right after the success is confirmed and before any navigation')
+    // P0-5: the scan's inventory names the tools that miss the signup (GA4 here: PostHog already gets it), and the page
+    // passes the visitor's tracking signal to its own API route.
+    expect(brief).toContain('import { infiniteTrack, infiniteTrackThenNavigate, infiniteAdMatchAllowed } from \\"../../lib/infinite-analytics\\"')
+    expect(brief).toContain("The helpers are already in your repo: import { infiniteTrack, infiniteTrackThenNavigate, infiniteAdMatchAllowed } from \"../../lib/infinite-analytics\". Never re-implement them.")
+    expect(brief).toContain('call infiniteTrack(<the approved name>, {}, { destinations: ["ga4"] })')
+    expect(brief).not.toContain('"posthog"]')
+    expect(brief).toContain("right after the success is confirmed and before any navigation")
     expect(brief).toContain("Never on the link or button that leads to the form.")
     // Negative: no helpers written → no promise in the operator rules, and job 10 refuses to brief.
     expect(() => buildBrief(items, { ...facts, helpers: null })).toThrow(/helpers the install writes/)

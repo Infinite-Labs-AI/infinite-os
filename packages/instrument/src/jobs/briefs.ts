@@ -303,7 +303,7 @@ function conversionGist(target: string, data: Record<string, unknown> | Error): 
   }
   const destinations = !(data instanceof Error) && Array.isArray(data.destinations) ? (data.destinations as string[]) : null
   if (destinations && OUTCOME_CONVERSION_TYPES.has(target as never)) {
-    return `Here: right after the success is confirmed and before any navigation, call infiniteTrack(<the approved name>, {}, { destinations: ${JSON.stringify(destinations)} }) — exactly those tools: the site already sends this to the others (alreadySentTo), and Meta and Infinite get it from your server (its own job). Never on the link or button that leads to the form. Where this form posts to your own API route, also send adMatch: infiniteAdMatchAllowed() in its JSON body (or ad_match=1 in a form post when it is true), so your server can attach Meta match data; change nothing else in the request.${helper}`
+    return `Here: right after the success is confirmed and before any navigation, call infiniteTrack(<the approved name>, {}, { destinations: ${JSON.stringify(destinations)} }) (or infiniteTrackThenNavigate(…) with the same destinations when the success navigates) — exactly those tools: the site already sends this to the others (alreadySentTo), and Meta and Infinite get it from your server (its own job). Never on the link or button that leads to the form. Where this form posts to your own API route, also send adMatch: infiniteAdMatchAllowed() in its JSON body (or ad_match=1 in a form post when it is true), so your server can attach Meta match data; change nothing else in the request.${helper}`
   }
   if (OUTCOME_CONVERSION_TYPES.has(target as never)) {
     return `Here: call infiniteTrack(${JSON.stringify(target)}) right after the success is confirmed and before any navigation (or use infiniteTrackThenNavigate). Never on the link or button that leads to the form.${helper}`
@@ -452,7 +452,7 @@ function planDataFor(item: ChecklistItem, facts: BriefFacts): Record<string, unk
           ? { destinations: missing.map((tool) => DESTINATION[tool]), events: entries.map((entry) => inventoryData(entry, missing)) }
           : {}),
         ...(facts.helpers.module && file
-          ? { helperImport: helperImportFor(file, facts.helpers.module, entries.length > 0 && outcome ? ["infiniteTrack", "infiniteAdMatchAllowed"] : undefined) }
+          ? { helperImport: helperImportFor(file, facts.helpers.module, entries.length > 0 && outcome ? ["infiniteTrack", "infiniteTrackThenNavigate", "infiniteAdMatchAllowed"] : undefined) }
           : {})
       }
     }

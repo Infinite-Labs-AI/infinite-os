@@ -33,7 +33,12 @@ import { analyzeCsp, cspNeeds, parseCspPolicies } from "./live/csp.js"
 import { checkResult, isolated } from "./result.js"
 import { callsOf, literalString, splitTopLevelArgs, topLevelProps, type Call } from "./source-calls.js"
 import { adMatchFindings, canonicalEvent, doubleCountFindings, metaEventIdFindings, piiFindings, promiseFindings, valueFindings, type CommerceCheckInput, type CommerceFinding } from "./commerce-static.js"
-import type { EventInventory } from "./commerce-inventory.js"
+import type { EventInventory, InventoryTool as CommerceTool } from "./commerce-inventory.js"
+import { COMMERCE_EVENTS_TARGET } from "../scan/event-inventory.js"
+
+/** The tool a browser commerce item (`<job>:commerce_events`) adds its events to. */
+const COMMERCE_ITEM_TOOL: Readonly<Partial<Record<string, CommerceTool>>> = { meta_improve: "meta", ga4_improve: "ga4", posthog_improve: "posthog" }
+const TOOL_NAME: Readonly<Record<CommerceTool, string>> = { meta: "Meta", ga4: "GA4", posthog: "PostHog", infinite: "Infinite" }
 import { loadRepoSnapshot } from "../jobs/repo-files.js"
 
 export { callsOf, topLevelProps } from "./source-calls.js"
@@ -100,7 +105,7 @@ export interface JobStaticDeps {
 }
 
 interface JobInput {
-  item: Pick<ChecklistItem, "id" | "jobId" | "allow" | "trigger">
+  item: Pick<ChecklistItem, "id" | "jobId" | "allow" | "trigger" | "inventory">
   root: string
   appRoot: string
 }
@@ -475,8 +480,15 @@ export function jobStaticCheckFunctions(deps: JobStaticDeps): Record<JobStaticCh
       const run = context()
       if (!run.eventInventory) return result("commerce_promises_met", ctx, "undetermined", "the plan's event list is not known, so what it promised each tool could not be compared with the code")
       const files = loadRepoSnapshot(input.root, input.appRoot).files
-      const findings = promiseFindings({ files, inventory: run.eventInventory }, canonicalEvent(itemTarget(input.item)))
-      return commerceResult("commerce_promises_met", ctx, findings ?? [], "every event the plan promised is sent to its tools")
+      const target = itemTarget(input.item)
+      // A browser commerce item (`<tool>_improve:commerce_events`) answers for ITS tool and the events it carries; an
+      // item named for one event, for that event; anything else, for every promise.
+      const tool = target === COMMERCE_EVENTS_TARGET ? COMMERCE_ITEM_TOOL[input.item.jobId] : undefined
+      const events = tool ? new Set((input.item.inventory ?? []).map((entry) => canonicalEvent(entry.event)).filter((event) => event !== null)) : null
+      const findings = (promiseFindings({ files, inventory: run.eventInventory }, canonicalEvent(target)) ?? []).filter(
+        (finding) => !tool || (finding.tool === tool && (events === null || events.size === 0 || (finding.event !== undefined && events.has(finding.event))))
+      )
+      return commerceResult("commerce_promises_met", ctx, findings, tool ? `every event the plan promised ${TOOL_NAME[tool]} is sent` : "every event the plan promised is sent to its tools")
     }),
 
     // Review r3: an outcome Meta gets from the server carries the match data (adMatch).

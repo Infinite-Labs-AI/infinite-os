@@ -1,9 +1,9 @@
 import { expect, it } from "vitest"
-import { JOB_TABLE } from "../wizard/contracts/jobs.js"
+import { JOB_TABLE, TARGET_ONLY_CHECKS } from "../wizard/contracts/jobs.js"
 import { CHECK_LABELS, checkWords, plainCheckDetail } from "./check-words.js"
 
 it("request 3 labels: every job check that can reach a note has a plain label", () => {
-  for (const id of new Set([...Object.values(JOB_TABLE).flatMap(job => job.checks.map(check => check.checkId)), "turn_gate"])) {
+  for (const id of new Set([...Object.values(JOB_TABLE).flatMap(job => job.checks.map(check => check.checkId)), ...Object.values(TARGET_ONLY_CHECKS).flatMap(checks => (checks ?? []).map(check => check.checkId)), "turn_gate"])) {
     expect(CHECK_LABELS[id], `missing label for ${id}`).toBeTruthy()
     expect(CHECK_LABELS[id]).not.toContain("_")
   }
