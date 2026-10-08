@@ -16,6 +16,7 @@ import type { PrivacyPageFinding } from "./privacy-page.js"
 import { detectRedirects, type RedirectFinding } from "./redirects.js"
 import { detectMiddlewareFiles, detectServerMount, type ServerMountFinding } from "./server-mount.js"
 import { isNonProductPath, routePathOf, type Finding } from "./shared.js"
+import { buildEventInventory, type EventInventory } from "../../scan/event-inventory.js"
 
 export interface StaticDetections {
   serverMount: ServerMountFinding[]
@@ -35,6 +36,11 @@ export interface StaticDetections {
   cmp: CmpDetection
   /** Static page routes (no API routes, no dynamic segments), most conversion-relevant first. */
   pages: string[]
+  /**
+   * The event × tool inventory (`src/scan/event-inventory.ts`): where each funnel event fires and which tools get it.
+   * Jobs 5, 3, 4, 8 and 10 are seeded from its gaps only, so no tool is ever sent an event it already gets.
+   */
+  eventInventory: EventInventory
 }
 
 export interface JobScan extends ScanResult {
@@ -89,7 +95,8 @@ export function detectStatic(snapshot: RepoSnapshot, framework: string): StaticD
     fbcWriters: detectFbcWriters(snapshot),
     metaBrowserStandardEvents: detectMetaBrowserStandardEvents(snapshot),
     cmp: detectCmp(snapshot),
-    pages: detectPages(snapshot, framework)
+    pages: detectPages(snapshot, framework),
+    eventInventory: buildEventInventory(snapshot, outcomes)
   }
 }
 

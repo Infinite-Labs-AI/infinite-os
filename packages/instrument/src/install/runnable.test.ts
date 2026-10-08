@@ -182,7 +182,7 @@ describe("job 10 is seeded only when this install emits the conversion helpers (
     const plan = buildPlanModel(freshInput())
     // R2-6: job 8 reports through Infinite, which this run cannot install either, so it is withheld with job 10.
     expect(plan.withheld).toEqual(["server_conversions:signup", "conversions_to_tools:signup"])
-    expect(plan.lines.find((line) => line.id === "user_action:conversions_unwired")?.text).toBe(RUNNABILITY_TEXT.conversionsUnwired(["signup"]))
+    expect(plan.lines.find((line) => line.id === "user_action:conversions_unwired")?.text).toBe(RUNNABILITY_TEXT.conversionsUnwired(["sign_up"]))
     const all = resolvePlanAnswers(plan, { approved: approvable(plan).map((line) => line.id), declined: [], edits: { consent_mode: "not_required" } }, { consentFlag: null })
     const seeded = seedItemsAfterApprovals(freshInput().candidates, plan.seeds, plan, all.approvals)
     expect(seeded.some((item) => item.jobId === "conversions_to_tools")).toBe(false)

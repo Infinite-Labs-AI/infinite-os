@@ -394,12 +394,19 @@ export async function createDefaultWizardDeps(input: DefaultDepsInput, overrides
     // §3y.5: the answered host and a pending claim (the run state), and whether the app offers the claim path.
     runFacts: () => {
       let siteClaim = false
+      let metaRelay: boolean | undefined
       try {
         siteClaim = bridge.has("tag.site-claim.v1")
       } catch {
         siteClaim = false
       }
-      return { site: state()?.site ?? null, siteClaim }
+      try {
+        // P1-8: Meta counts as connected in Infinite only when the app can send server events to Meta.
+        metaRelay = bridge.has("tag.meta-relay.v1")
+      } catch {
+        metaRelay = undefined
+      }
+      return { site: state()?.site ?? null, siteClaim, ...(metaRelay === undefined ? {} : { metaRelay }) }
     }
   })
 
