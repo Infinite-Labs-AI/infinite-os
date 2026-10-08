@@ -586,3 +586,45 @@ describe("Finding 4: a link or a form that leaves by itself must cancel that bef
     expect(found.map((finding) => finding.message)).toEqual([expect.stringMatching(/its click is on a plain link or a form that leaves by itself, so the page unloads before the wait ends\. Call event\.preventDefault\(\) first/)])
   })
 })
+
+describe("Finding 6: lost_before_leaving answers per caller, not per file", () => {
+  const helper = 'export function addToCart(p) {\n  const wait = infiniteTrackBeforeLeaving("add_to_cart", { item_id: p.id }, { destinations: ["meta"] })\n  return wait\n}\n'
+  const before = [
+    'import { addToCart } from "../src/events"',
+    "export default function Page({ p }) {",
+    "  const buy = () => {",
+    "    addToCart(p)",
+    '    router.push("/cart")',
+    "  }",
+    "  const buyNow = () => {",
+    "    addToCart(p)",
+    '    window.location.assign("/checkout")',
+    "  }",
+    "  return null",
+    "}",
+    ""
+  ].join("\n")
+  // The scan read the file before the run: the client caller at line 4, the full-load caller at line 8.
+  const inventory: EventInventory = {
+    rows: [{
+      event: "add_to_cart",
+      tools: { meta: { state: "will_add", lane: "browser" } },
+      sites: [
+        { file: "pages/a.tsx", line: 4, via: "helper:addToCart", navigation: "client", helperAt: { file: "src/events.ts", line: 1 } },
+        { file: "pages/a.tsx", line: 8, via: "helper:addToCart", navigation: "full_load", helperAt: { file: "src/events.ts", line: 1 } }
+      ]
+    }]
+  }
+  const correct = before
+    .replace('import { addToCart } from "../src/events"', 'import { addToCart } from "../src/events"\nimport { infiniteLeaveAfter } from "../lib/infinite-analytics"')
+    .replace('  const buyNow = () => {\n    addToCart(p)\n    window.location.assign("/checkout")\n  }', '  const buyNow = () =>\n    infiniteLeaveAfter(\n      () => addToCart(p),\n      () => window.location.assign("/checkout")\n    )')
+
+  it("only the full-load caller must wait; the client-routing caller left as it is passes (lines moved by the edit)", () => {
+    expect(leaveFindings({ files: files({ "src/events.ts": helper, "pages/a.tsx": correct }), base: new Map([["pages/a.tsx", before]]), inventory })).toEqual([])
+  })
+
+  it("the full-load caller left as it is fails, and only it is named", () => {
+    const found = leaveFindings({ files: files({ "src/events.ts": helper, "pages/a.tsx": before }), base: new Map([["pages/a.tsx", before]]), inventory })
+    expect(found.map((finding) => [finding.rule, finding.line])).toEqual([["lost_before_leaving", 8]])
+  })
+})

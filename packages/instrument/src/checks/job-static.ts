@@ -555,7 +555,8 @@ export function jobStaticCheckFunctions(deps: JobStaticDeps): Record<JobStaticCh
     sends_before_leaving: run("sends_before_leaving", (input, ctx) => {
       const inventory = context().eventInventory
       if (!inventory) return result("sends_before_leaving", ctx, "undetermined", "the plan's event list is not known, so which clicks leave with a full page load is unknown")
-      return commerceResult("sends_before_leaving", ctx, leaveFindings({ files: itemFiles(input), inventory }), "every Meta event a full page load follows is out before the page leaves")
+      // Finding 6: with the code before the run, each caller's line is followed through the edit to its own handler.
+      return commerceResult("sends_before_leaving", ctx, leaveFindings(withBase(input, { files: itemFiles(input), inventory })), "every Meta event a full page load follows is out before the page leaves")
     }),
 
     // Finding 3: a helper the turn changed never returns before its own sends (`return wait` is its LAST line).

@@ -35,7 +35,8 @@ import { maskCommentsAndStrings } from "../frameworks/shared.js"
 import { lineNumberAt } from "../harness/scan.js"
 import { isServerFile } from "../jobs/detectors/outcomes.js"
 import { findEventIdHits } from "../setup-checks/meta-event-id.js"
-import { alreadySentOf, promisesOf, INVENTORY_EVENTS, type EventInventory, type InventoryEvent, type InventoryTool } from "./commerce-inventory.js"
+import { diffLines } from "../agents/line-diff.js"
+import { alreadySentOf, promisesOf, INVENTORY_EVENTS, type EventInventory, type InventoryEvent, type InventorySite, type InventoryTool } from "./commerce-inventory.js"
 import { callsOf, closingOf, literalString, objectProps, splitTopLevelArgs, topLevelProps, type Call } from "./source-calls.js"
 
 // ---------------------------------------------------------------------------------------------
@@ -995,6 +996,57 @@ function reachWaits(entry: ClickPathFile, reach: Reach): boolean {
   return false
 }
 
+/** One of the scan's trigger sites in the file as it is NOW: its line moved through the run's edit, and its handler. */
+interface CallerSite {
+  site: InventorySite
+  line: number
+  handler: FunctionRange | null
+}
+
+/**
+ * The line a base line (the scan read the file BEFORE the run) is on now: an unchanged line moves with the diff; a line
+ * the run changed lands at the same place inside the change that replaced it.
+ */
+function lineMapper(before: string | null | undefined, now: string): (line: number) => number {
+  if (typeof before !== "string" || before === now) return (line) => line
+  const hunks = diffLines(before, now)
+  return (line) => {
+    const zero = line - 1
+    let shift = 0
+    for (const hunk of hunks) {
+      if (zero < hunk.aStart) break
+      if (zero < hunk.aEnd) return hunk.bStart + 1 + Math.min(zero - hunk.aStart, Math.max(0, hunk.bEnd - hunk.bStart - 1))
+      shift = hunk.bEnd - hunk.aEnd
+    }
+    return line + shift
+  }
+}
+
+/** Finding 6: the scan's trigger sites in one file, each at its line now and in its click handler now. */
+function callerSites(entry: ClickPathFile, sites: readonly InventorySite[], before: string | null | undefined): CallerSite[] {
+  const map = lineMapper(before, entry.text)
+  const starts = [0, ...[...entry.text.matchAll(/\n/g)].map((match) => (match.index ?? 0) + 1)]
+  return sites.map((site) => {
+    const line = map(site.line)
+    const from = starts[line - 1] ?? 0
+    const to = starts[line] ?? entry.text.length
+    const name = site.via?.startsWith("helper:") ? site.via.slice("helper:".length) : null
+    const call = name ? new RegExp(`(?<![\\w$.])${name.replace(/\$/g, "\\$")}\\s*\\(`).exec(entry.masked.slice(from, to)) : null
+    const at = call ? from + call.index : from + (entry.masked.slice(from, to).search(/\S/) + 1 || 1) - 1
+    return { site, line, handler: outermostHandler(entry.masked, entry.ranges, at) }
+  })
+}
+
+/** The scan's site a reach answers to: the one in the same click handler (else the nearest by line) of the same kind. */
+function callerOf(entry: ClickPathFile, callers: readonly CallerSite[], reach: Reach): InventorySite | null {
+  const kind = callers.filter((caller) => (reach.through === null ? !caller.site.via?.startsWith("helper:") : caller.site.via === `helper:${reach.through}`))
+  if (kind.length === 0) return null
+  const handler = outermostHandler(entry.masked, entry.ranges, reach.index)
+  const same = handler ? kind.filter((caller) => caller.handler !== null && caller.handler.start === handler.start && caller.handler.end === handler.end) : []
+  if (same.length > 0) return same.find((caller) => caller.site.navigation === "full_load")?.site ?? same[0]!.site
+  return [...kind].sort((a, b) => Math.abs(a.line - reach.line) - Math.abs(b.line - reach.line))[0]!.site
+}
+
 /** Finding 4: the click handler holding the reach cancels the element's default action (`event.preventDefault()`). */
 function cancelsDefault(entry: ClickPathFile, reach: Reach): boolean {
   const handler = outermostHandler(entry.masked, entry.ranges, reach.index)
@@ -1029,14 +1081,15 @@ export function leaveFindings(input: CommerceCheckInput): CommerceFinding[] {
     for (const file of [...new Set(leaving.map((site) => site.file))]) {
       const entry = files.find((candidate) => candidate.file === file)
       if (!entry) continue
-      const helpers = new Set(leaving.filter((site) => site.file === file && site.via?.startsWith("helper:")).map((site) => site.via!.slice("helper:".length)))
-      const inline = leaving.some((site) => site.file === file && !site.via?.startsWith("helper:"))
-      const here = reaches.filter((reach) => reach.file === file && reach.event === row.event && (reach.through === null ? inline : helpers.has(reach.through)))
-      for (const reach of here) {
-        // Finding 4: a plain link or a form leaves by itself: the wait only helps once the handler cancels that.
-        const byDefault = leaving.some((site) => site.file === file && (site.leavesBy === "link" || site.leavesBy === "form") && (reach.through === null ? !site.via?.startsWith("helper:") : site.via === `helper:${reach.through}`))
+      // Finding 6: each reach answers to ITS caller (the scan's site in the same handler), never to the whole file: a
+      // client-routing caller beside a full-load one in the same file is left as it is.
+      const callers = callerSites(entry, (row.sites ?? []).filter((site) => site.file === file && !SERVER_ROUTE_VIAS.has(site.via ?? "")), input.base?.get(file))
+      for (const reach of reaches.filter((candidate) => candidate.file === file && candidate.event === row.event)) {
+        const site = callerOf(entry, callers, reach)
+        if (!site || site.navigation !== "full_load") continue
         if (reachWaits(entry, reach)) {
-          if (!byDefault || cancelsDefault(entry, reach)) continue
+          // Finding 4: a plain link or a form leaves by itself: the wait only helps once the handler cancels that.
+          if ((site.leavesBy !== "link" && site.leavesBy !== "form") || cancelsDefault(entry, reach)) continue
           findings.push({
             rule: "lost_before_leaving",
             state: "problem",
@@ -1046,7 +1099,7 @@ export function leaveFindings(input: CommerceCheckInput): CommerceFinding[] {
             tool: "meta",
             message: `${where(file, reach.line)} waits for Meta ${META_EVENT_NAMES[row.event]}, but its click is on a plain link or a form that leaves by itself, so the page unloads before the wait ends. Call event.preventDefault() first in this handler, and leave through go: () => window.location.assign(<the link's href>) or () => form.submit().`
           })
-          break
+          continue
         }
         findings.push({
           rule: "lost_before_leaving",
@@ -1057,7 +1110,6 @@ export function leaveFindings(input: CommerceCheckInput): CommerceFinding[] {
           tool: "meta",
           message: `${where(file, reach.line)} sends Meta ${META_EVENT_NAMES[row.event]}${reach.through ? ` through ${reach.through}()` : ""} and then leaves with a full page load without waiting, so the page can unload before Meta has it. ${reach.through ? `Start ${reach.through}() with const wait = infiniteTrackBeforeLeaving(…), keep its own sends, end it with return wait, and wrap this handler in infiniteLeaveAfter(() => { …; return ${reach.through}(…) }, () => <its own navigation>).` : "Use infiniteTrackThenNavigate in place of the handler's own navigation."}`
         })
-        break
       }
     }
     // The helper a full-load caller waits on must return the wait, not a plain infiniteTrack.
