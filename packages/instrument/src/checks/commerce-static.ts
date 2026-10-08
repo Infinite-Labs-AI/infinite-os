@@ -721,6 +721,12 @@ export function functionRanges(masked: string): FunctionRange[] {
         if (depth === 0) return { start: at, end: cursor }
         depth -= 1
       } else if ((ch === "," || ch === ";") && depth === 0) return { start: at, end: cursor }
+      else if (ch === "\n" && depth === 0 && cursor > at) {
+        // A line break ends the expression unless the statement plainly goes on (`a\n  .then(…)`, `a &&\n b`).
+        const before = masked.slice(at, cursor).trimEnd().slice(-1)
+        const after = masked.slice(cursor).trimStart()[0] ?? ""
+        if (!/[([{,=+\-*/%&|?:.<>!]/.test(before) && !/[.?:+\-*/%&|=]/.test(after)) return { start: at, end: cursor }
+      }
     }
     return { start: at, end: masked.length }
   }
@@ -768,6 +774,22 @@ function innermost(ranges: readonly FunctionRange[], index: number): FunctionRan
   return best
 }
 
+/** A component or a hook (`Page`, `useCart`), or a function that returns markup: it holds handlers, it is not one. */
+function holdsHandlers(masked: string, range: FunctionRange): boolean {
+  if (range.name && (/^[A-Z]/.test(range.name) || /^use[A-Z]/.test(range.name))) return true
+  const body = masked.slice(range.start, range.end)
+  return masked[range.start - 1] === "{" ? /\breturn\s*\(?\s*<[A-Za-z>]/.test(body) : /^\s*\(?\s*<[A-Za-z>]/.test(body)
+}
+
+/**
+ * Finding 2: the click handler holding `index`: the OUTERMOST function that is not a component, a hook or a render
+ * function. A nested arrow inside a handler (`infiniteLeaveAfter(() => …)`) is part of the same click.
+ */
+function outermostHandler(masked: string, ranges: readonly FunctionRange[], index: number): FunctionRange | null {
+  const holding = ranges.filter((range) => range.start <= index && index < range.end).sort((a, b) => a.start - b.start || b.end - a.end)
+  return holding.find((range) => !holdsHandlers(masked, range)) ?? null
+}
+
 /** The innermost NAMED function holding `index` (the helper a send is in), or null. */
 function innermostNamed(ranges: readonly FunctionRange[], index: number): FunctionRange | null {
   let best: FunctionRange | null = null
@@ -793,6 +815,8 @@ interface Reach {
   through: string | null
   /** Where the helper's own send is. */
   sendAt: { file: string; line: number }
+  /** For a send written here: what sends it (`infiniteTrackThenNavigate`, `fbq`, …). */
+  via?: string
 }
 
 const BROWSER_STEP_EVENTS: ReadonlySet<InventoryEvent> = new Set<InventoryEvent>(["view_item", "add_to_cart"])
@@ -804,7 +828,7 @@ function clickPathReaches(files: readonly ClickPathFile[]): Reach[] {
   for (const entry of files) {
     for (const send of sendsIn(entry.file, entry.text)) {
       if (send.index === undefined || send.tool === "infinite" || !BROWSER_STEP_EVENTS.has(send.event)) continue
-      const reach: Reach = { tool: send.tool, event: send.event, file: entry.file, line: send.line, index: send.index, through: null, sendAt: { file: entry.file, line: send.line } }
+      const reach: Reach = { tool: send.tool, event: send.event, file: entry.file, line: send.line, index: send.index, through: null, sendAt: { file: entry.file, line: send.line }, via: send.via }
       reaches.push(reach)
       const holder = innermostNamed(entry.ranges, send.index)
       if (holder?.name) helpers.set(holder.name, [...(helpers.get(holder.name) ?? []), reach])
@@ -865,7 +889,7 @@ export function clickPathFindings(input: CommerceCheckInput): CommerceFinding[] 
     const here = reaches.filter((reach) => reach.file === entry.file)
     const groups = new Map<string, Reach[]>()
     for (const reach of here) {
-      const fn = innermost(entry.ranges, reach.index)
+      const fn = outermostHandler(entry.masked, entry.ranges, reach.index)
       if (!fn) continue
       const key = `${fn.start}\u0000${reach.tool}\u0000${reach.event}`
       groups.set(key, [...(groups.get(key) ?? []), reach])
@@ -895,20 +919,92 @@ export function clickPathFindings(input: CommerceCheckInput): CommerceFinding[] 
   return findings
 }
 
-/** A wait the handler at `fn` gives the send before it leaves. */
-function handlerWaits(masked: string, fn: FunctionRange | null, index: number): boolean {
-  // Inside `infiniteLeaveAfter(() => { …; return helper(…) }, go)`: the call is in its arguments.
+/** A navigation, in code: a full page load, client routing, a form submit, a new window. */
+const NAVIGATION = /\blocation\b\s*(?:\.\s*(?:assign|replace)\s*\(|(?:\.\s*href\s*)?=(?![=>]))|\b(?:router|Router|history)\s*\.\s*(?:push|replace)\s*\(|\bnavigate\s*\(|\.\s*(?:requestSubmit|submit)\s*\(\s*\)|\bwindow\s*\.\s*open\s*\(/
+
+/** `go` really leaves: a navigation, a call, or a function passed by name; never `() => {}` / `() => undefined`. */
+function leaves(go: string): boolean {
+  const text = go.trim()
+  if (text === "" || /^(?:undefined|null|void\s+0)$/.test(text)) return false
+  if (/^(?:async\s*)?(?:\([^()]*\)|[\w$]+)\s*(?::[^=]+)?=>\s*(?:\{\s*\}|undefined|null|void\s+0|\(\s*\))\s*$/.test(text)) return false
+  return NAVIGATION.test(text) || /[\w$\])]\s*\(/.test(text) || /^[\w$.]+$/.test(text)
+}
+
+/** Every `infiniteLeaveAfter(start, go)` call: the offsets of its two arguments. */
+function leaveAfterCalls(masked: string): Array<{ start: [number, number]; go: [number, number] | null }> {
+  const out: Array<{ start: [number, number]; go: [number, number] | null }> = []
   for (const match of masked.matchAll(/\binfiniteLeaveAfter\s*\(/g)) {
     const open = (match.index ?? 0) + match[0].length - 1
     const close = closingOf(masked, open)
-    if (open < index && index < close) return true
+    if (close < 0) continue
+    let depth = 0
+    let comma = -1
+    for (let cursor = open + 1; cursor < close; cursor += 1) {
+      const ch = masked[cursor]!
+      if (ch === "(" || ch === "{" || ch === "[") depth += 1
+      else if (ch === ")" || ch === "}" || ch === "]") depth -= 1
+      else if (ch === "," && depth === 0) {
+        comma = cursor
+        break
+      }
+    }
+    out.push(comma < 0 ? { start: [open + 1, close], go: null } : { start: [open + 1, comma], go: [comma + 1, close] })
   }
-  const scope = fn ? masked.slice(fn.start, fn.end) : masked
-  if (/\b(?:infiniteLeaveAfter|infiniteTrackThenNavigate)\s*\(/.test(scope)) return true
-  // `await helper(…)` / `helper(…).then(…)` on the reaching call itself.
-  if (/\bawait\s*$/.test(masked.slice(Math.max(0, index - 12), index))) return true
-  const close = closingOf(masked, masked.indexOf("(", index))
-  return close > 0 && /^\s*\.\s*then\s*\(/.test(masked.slice(close + 1, close + 40))
+  return out
+}
+
+/** The function body [start, end) returns the call at `index`: `return call(…)`, `() => call(…)`, or `const w = call(…)` … `return w`. */
+function returnsCallAt(masked: string, fn: FunctionRange, index: number): boolean {
+  const before = masked.slice(fn.start, index)
+  if (masked[fn.start - 1] !== "{") return /^[\s(]*(?:await\s+)?$/.test(before)
+  if (/\breturn\s+(?:await\s+)?$/.test(before)) return true
+  const held = /\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*(?::[^=;]+)?=\s*(?:await\s+)?$/.exec(before)?.[1]
+  return held !== undefined && new RegExp(`\\breturn\\s+(?:await\\s+)?${held.replace(/\$/g, "\\$")}\\b`).test(masked.slice(index, fn.end))
+}
+
+/**
+ * Finding 2: the send at `reach` is waited for before its click leaves, all the way to the navigation:
+ *   • it is `infiniteTrackThenNavigate` itself (it navigates once the request is out);
+ *   • it is RETURNED by the `start` of `infiniteLeaveAfter(start, go)` (directly, or through a returned const), and
+ *     `go` really navigates;
+ *   • its promise's `.then(…)` holds the navigation, or the handler `await`s it and navigates after.
+ */
+function reachWaits(entry: ClickPathFile, reach: Reach): boolean {
+  const { masked, ranges } = entry
+  if (reach.through === null && reach.via === "infiniteTrackThenNavigate") return true
+  const inner = innermost(ranges, reach.index)
+  for (const call of leaveAfterCalls(masked)) {
+    if (reach.index < call.start[0] || reach.index >= call.start[1]) continue
+    const start = ranges.filter((range) => range.start >= call.start[0] && range.end <= call.start[1]).sort((a, b) => a.start - b.start)[0]
+    if (!start || inner !== start) return false
+    return returnsCallAt(masked, start, reach.index) && call.go !== null && leaves(masked.slice(call.go[0], call.go[1]))
+  }
+  const close = closingOf(masked, masked.indexOf("(", reach.index))
+  if (close > 0) {
+    const then = /^\s*\.\s*then\s*\(/.exec(masked.slice(close + 1, close + 40))
+    if (then) {
+      const open = close + 1 + then[0].length - 1
+      const end = closingOf(masked, open)
+      return end > 0 && NAVIGATION.test(masked.slice(open + 1, end))
+    }
+  }
+  if (/\bawait\s*$/.test(masked.slice(Math.max(0, reach.index - 12), reach.index))) {
+    const fn = inner
+    return close > 0 && NAVIGATION.test(masked.slice(close, fn ? fn.end : masked.length))
+  }
+  return false
+}
+
+/** Finding 2: the helper body hands its wait back to the caller: `return infiniteTrackBeforeLeaving(…)` or `return wait`. */
+function helperReturnsWait(masked: string, ranges: readonly FunctionRange[], body: FunctionRange): "returned" | "not_returned" | "absent" {
+  let found = false
+  for (const match of masked.slice(body.start, body.end).matchAll(/\binfiniteTrackBeforeLeaving\s*\(/g)) {
+    const index = body.start + (match.index ?? 0)
+    if (innermost(ranges, index) !== body) continue
+    found = true
+    if (returnsCallAt(masked, body, index)) return "returned"
+  }
+  return found ? "not_returned" : "absent"
 }
 
 /**
@@ -931,7 +1027,7 @@ export function leaveFindings(input: CommerceCheckInput): CommerceFinding[] {
       const inline = leaving.some((site) => site.file === file && !site.via?.startsWith("helper:"))
       const here = reaches.filter((reach) => reach.file === file && reach.event === row.event && (reach.through === null ? inline : helpers.has(reach.through)))
       for (const reach of here) {
-        if (handlerWaits(entry.masked, innermost(entry.ranges, reach.index), reach.index)) continue
+        if (reachWaits(entry, reach)) continue
         findings.push({
           rule: "lost_before_leaving",
           state: "problem",
@@ -951,9 +1047,21 @@ export function leaveFindings(input: CommerceCheckInput): CommerceFinding[] {
       if (!entry) continue
       const body = entry.ranges.find((range) => range.name === helper)
       if (!body) continue
-      const scope = entry.masked.slice(body.start, body.end)
       const metaHere = reaches.some((reach) => reach.file === entry.file && reach.through === null && reach.event === row.event && body.start <= reach.index && reach.index < body.end)
-      if (!metaHere || /\binfiniteTrackBeforeLeaving\s*\(/.test(scope)) continue
+      const wait = helperReturnsWait(entry.masked, entry.ranges, body)
+      if (!metaHere || wait === "returned") continue
+      if (wait === "not_returned") {
+        findings.push({
+          rule: "lost_before_leaving",
+          state: "problem",
+          file: entry.file,
+          line: lineNumberAt(entry.text, body.start),
+          event: row.event,
+          tool: "meta",
+          message: `${helper}() starts the wait for Meta ${META_EVENT_NAMES[row.event]} but does not return it, so a caller that leaves with a full page load cannot wait for it. Keep const wait = infiniteTrackBeforeLeaving(…) as its first new line and make return wait its last line.`
+        })
+        continue
+      }
       findings.push({
         rule: "lost_before_leaving",
         state: "problem",

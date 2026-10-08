@@ -537,3 +537,38 @@ describe("Finding 3: code after a return in a function the run changed", () => {
     expect(codeAfterReturn(two, 1, two.length - 1)).toBe(two.indexOf("go()"))
   })
 })
+
+describe("Finding 2: sends_before_leaving proves the wait reaches the navigation", () => {
+  const helper = (body: string) => ['import { infiniteTrackBeforeLeaving } from "../lib/infinite-analytics"', "export function addToCart(p) {", body, "}", ""].join("\n")
+  const RETURNED = '  const wait = infiniteTrackBeforeLeaving("add_to_cart", { item_id: p.id }, { destinations: ["meta", "infinite"] })\n  sendGa("add_to_cart", { id: p.id })\n  return wait'
+  const page = (body: string) => ['import { addToCart } from "../src/events"', 'import { infiniteLeaveAfter, infiniteTrackBeforeLeaving } from "../lib/infinite-analytics"', "export default function Page({ p }) {", "  const buy = () => {", body, "  }", "  return null", "}", ""].join("\n")
+  const inventory: EventInventory = { rows: [{ event: "add_to_cart", tools: { meta: { state: "will_add", lane: "browser" } }, sites: [{ file: "pages/a.tsx", line: 5, via: "helper:addToCart", navigation: "full_load", helperAt: { file: "src/events.ts", line: 2 } }] }] }
+  const check = (events: string, body: string) => {
+    const input = { files: files({ "src/events.ts": events, "pages/a.tsx": page(body) }), inventory }
+    return [...clickPathFindings(input), ...leaveFindings(input)].map((finding) => `${finding.rule}@${finding.file}`)
+  }
+
+  it("the reference fix's shape passes: the helper returns its wait, start returns the helper's call, go navigates", () => {
+    expect(check(helper(RETURNED), '    infiniteLeaveAfter(() => {\n      cart.add(p)\n      return addToCart(p)\n    }, () => window.location.assign("/cart"))')).toEqual([])
+    expect(check(helper(RETURNED), '    void addToCart(p).then(() => window.location.assign("/cart"))')).toEqual([])
+    expect(check(helper(RETURNED), '    infiniteLeaveAfter(() => addToCart(p), () => router.push("/cart"))')).toEqual([])
+  })
+
+  it("start without return: go runs at once, nothing waits", () => {
+    expect(check(helper(RETURNED), '    infiniteLeaveAfter(() => {\n      cart.add(p)\n      addToCart(p)\n    }, () => window.location.assign("/cart"))')).toEqual(["lost_before_leaving@pages/a.tsx"])
+  })
+
+  it("the helper starts the wait but does not return it (void infiniteTrackBeforeLeaving)", () => {
+    const found = leaveFindings({ files: files({ "src/events.ts": helper('  void infiniteTrackBeforeLeaving("add_to_cart", { item_id: p.id }, { destinations: ["meta"] })'), "pages/a.tsx": page('    infiniteLeaveAfter(() => addToCart(p), () => window.location.assign("/cart"))') }), inventory })
+    expect(found.map((finding) => finding.message)).toEqual([expect.stringMatching(/^addToCart\(\) starts the wait for Meta AddToCart but does not return it/)])
+  })
+
+  it(".then without the navigation in it, and a go that does nothing, fail", () => {
+    expect(check(helper(RETURNED), '    void addToCart(p).then(() => undefined)\n    window.location.assign("/cart")')).toEqual(["lost_before_leaving@pages/a.tsx"])
+    expect(check(helper(RETURNED), "    infiniteLeaveAfter(() => addToCart(p), () => {})")).toEqual(["lost_before_leaving@pages/a.tsx"])
+  })
+
+  it("a second send in a nested infiniteLeaveAfter beside the helper call is one click counted twice (grouped by the outermost handler)", () => {
+    expect(check(helper(RETURNED), '    addToCart(p)\n    infiniteLeaveAfter(() => infiniteTrackBeforeLeaving("add_to_cart", { item_id: p.id }, { destinations: ["meta"] }), () => router.push("/cart"))')).toEqual(["sent_twice_on_one_click@pages/a.tsx", "lost_before_leaving@pages/a.tsx"])
+  })
+})
