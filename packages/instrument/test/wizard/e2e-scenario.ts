@@ -81,17 +81,24 @@ export function identifyResetSteps(): Step[] {
 const SIGNUP_IMPORT = 'import { supabase } from "../../../lib/supabase"\n'
 const SIGNUP_CALL = "  const { data, error } = await supabase.auth.signUp({ email, password })\n"
 // Review r3: Meta is connected, so the sign_up carries the match data (adMatch), built from the visitor's own request.
-const MATCH = "adMatch: await adMatchFromRequest(request, { trackingAllowed: false, email })"
+// Finding 1: the page sends the tag's signal in its JSON body and the route reads that same key from the body.
+const MATCH = "adMatch: await adMatchFromRequest(request, { trackingAllowed: adMatch === true, email })"
+const SIGNUP_BODY = "  const { email, password } = (await request.json()) as { email: string; password: string }\n"
+const SIGNUP_FETCH = '    const response = await fetch("/api/signup", { method: "POST", body: JSON.stringify(Object.fromEntries(form)) })\n'
 export const EARLY_REPORT = `  await reportInfiniteOutcome({ type: "sign_up", path: "/api/signup", eventId: data.user?.id ?? "unknown", ${MATCH} })\n`
 const SIGNUP_RETURN = "  return Response.json({ ok: true, accountId: data.user.id })"
 export const LATE_REPORT = `  await reportInfiniteOutcome({ type: "sign_up", path: "/api/signup", eventId: data.user.id, ${MATCH} })\n`
 
 /** Job 8: report the signup outcome, deliberately BEFORE the error check (the reviewer flags it). */
 export function serverConversionSteps(): Step[] {
-  mustHold("app/api/signup/route.ts", SIGNUP_IMPORT, SIGNUP_CALL, SIGNUP_RETURN)
+  mustHold("app/api/signup/route.ts", SIGNUP_IMPORT, SIGNUP_CALL, SIGNUP_RETURN, SIGNUP_BODY)
+  mustHold("app/signup/page.tsx", SIGNUP_FETCH, "export default function Signup()")
   return [
     replaceStep("app/api/signup/route.ts", SIGNUP_IMPORT, `${SIGNUP_IMPORT}import { adMatchFromRequest, reportInfiniteOutcome } from "../../../lib/infinite-server-lane"\n`),
-    replaceStep("app/api/signup/route.ts", SIGNUP_CALL, `${SIGNUP_CALL}${EARLY_REPORT}`)
+    replaceStep("app/api/signup/route.ts", SIGNUP_BODY, "  const { email, password, adMatch } = (await request.json()) as { email: string; password: string; adMatch?: boolean }\n"),
+    replaceStep("app/api/signup/route.ts", SIGNUP_CALL, `${SIGNUP_CALL}${EARLY_REPORT}`),
+    replaceStep("app/signup/page.tsx", "export default function Signup()", 'import { infiniteAdMatchAllowed } from "../../lib/infinite-analytics"\n\nexport default function Signup()'),
+    replaceStep("app/signup/page.tsx", SIGNUP_FETCH, '    const response = await fetch("/api/signup", { method: "POST", body: JSON.stringify({ ...Object.fromEntries(form), adMatch: infiniteAdMatchAllowed() }) })\n')
   ]
 }
 /** The review fix (job 16): the outcome after the success branch, with the account id. */
