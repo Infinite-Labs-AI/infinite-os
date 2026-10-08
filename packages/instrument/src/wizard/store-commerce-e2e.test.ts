@@ -329,4 +329,33 @@ describe("store: the wizard's own scan, plan and briefs", () => {
       execFileSync("git", ["clean", "-fdq"], { cwd: root, stdio: "ignore" })
     }
   })
+
+  it("(d) [A, D] the jobs' own checks fail with the right words: Meta left with PageView only, a purchase without match data", async () => {
+    const { items } = await pipeline()
+    const { jobStaticCheckFunctions } = await import("../checks/job-static.js")
+    const inventory = await scanInventory((await pipeline()).scan)
+    const functions = jobStaticCheckFunctions({ root, run: () => ({ eventInventory: inventory, metaInUse: true, conversionNames: ["purchase", "begin_checkout", "lead"] }), readBaseFile: (_root, file) => SITE.get(file) ?? null })
+    const ctx = { runId: RUN_ID, now: () => new Date("2026-10-08T10:00:00.000Z") }
+    const run = async (id: string, check: "commerce_promises_met" | "outcome_ad_match") => {
+      const raw = await functions[check]({ item: items.find((item) => item.id === id)!, root, appRoot: "." }, ctx)
+      return (Array.isArray(raw) ? raw : [raw])[0]!
+    }
+    try {
+      // The agent changed nothing: Meta still gets PageView only.
+      const untouched = await run("meta_improve:commerce_events", "commerce_promises_met")
+      expect(untouched.state).toBe("problem")
+      expect(untouched.reason).toMatch(/The plan promised Meta (ViewContent|AddToCart), but no code sends it/)
+      // The webhook reports the purchase without the payer's match data.
+      const webhook = CORRECT_EDITS.get("pages/api/stripe-webhook.ts")!
+        .replace("import { reportStripeCheckoutPurchase } from", "import { reportInfiniteOutcome } from")
+        .replace('  return res.status(await reportStripeCheckoutPurchase(event, { path: "/success" })).json({ received: true })\n', '  const status = await reportInfiniteOutcome({ type: "purchase", eventId: event.id, path: "/success", properties: { value: 1, currency: "USD" } })\n  return res.status(status === null ? 500 : 200).json({ received: true })\n')
+      for (const [file, text] of [...CORRECT_EDITS, ["pages/api/stripe-webhook.ts", webhook] as const]) writeFileSync(join(root, file), text, { flag: "w" })
+      const bare = await run("server_conversions:purchase", "outcome_ad_match")
+      expect(bare.state).toBe("problem")
+      expect(bare.reason).toMatch(/reports the purchase to Infinite without match data \(no adMatch\), so Meta cannot tie it to an ad click/)
+    } finally {
+      execFileSync("git", ["checkout", "--", "."], { cwd: root, stdio: "ignore" })
+      execFileSync("git", ["clean", "-fdq"], { cwd: root, stdio: "ignore" })
+    }
+  })
 })
