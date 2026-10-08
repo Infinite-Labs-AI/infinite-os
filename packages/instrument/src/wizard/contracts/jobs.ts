@@ -187,8 +187,9 @@ export const JOB_TABLE: { readonly [J in JobId]: JobSpec & { jobId: J } } = {
     jobId: "conversions_to_tools",
     n: 10,
     // Browser-only Meta events carry no page-built eventID; server-twin Meta conversions still go server first and mirror
-    // only with Infinite's returned id.
-    title: "Send conversions to every tool",
+    // only with Infinite's returned id. Review P2: the title says what we do, never "every tool" (a purchase or a lead
+    // reaches Meta from the server, not from this job).
+    title: "Adding conversions to the tools that miss them",
     requiresApprovedLine: ["conversion_names"],
     // T0 click_test for static HTML / Vite, RH click_test for every other framework.
     // §3z.12 §3e.1 (B15): `first_real_conversion` (P) reads baseline(runId, since = the deploy time) on a re-run.
