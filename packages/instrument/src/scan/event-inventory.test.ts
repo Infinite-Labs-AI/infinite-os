@@ -261,6 +261,9 @@ describe("P1-A: how each Buy click leaves the page", () => {
       ["pages/f.tsx", "none", undefined]
     ])
     expect(got[2]!.navigationVia).toBe("goToCart(): location.assign")
+    // An effect that adds to the cart and then redirects does leave: the written navigation wins over "it runs on load".
+    const redirect = sites({ "pages/r.tsx": page("R", '  useEffect(() => {\n    addToCart("r")\n    window.location.replace("/cart")\n  }, [])', "null") })
+    expect(redirect.map((site) => [site.file, site.navigation])).toEqual([["pages/r.tsx", "full_load"]])
   })
 
   it("router navigation the site's own route-change hook turns into a full page load is a full page load (into a pixel-free route)", () => {

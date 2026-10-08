@@ -691,10 +691,11 @@ function navigationAt(view: FileView, offset: number, callee?: Callee): Navigati
   // The handler: the outermost function that is not a component, a hook or a render body.
   const handler = [...chain].reverse().find((fn) => !holdsHandlers(view, fn)) ?? null
   if (!handler) return null
-  const effect = chain.some((fn) => /\buse(?:Layout|Insertion)?Effect\s*\(\s*(?:async\s*)?(?:\([^()]*\)|[A-Za-z_$][\w$]*)?\s*=>\s*\{?\s*$/.test(view.code.slice(Math.max(0, fn.start - 80), fn.start)))
-  if (effect) return { kind: "none", via: "no navigation (it runs when the page loads, not on a click)", target: null }
+  // Navigation the code writes wins, in an effect too (a redirect page that adds to the cart and moves on).
   const written = navigationIn(view, handler.start, handler.end) ?? calleeNavigation(view, handler, callee)
   if (written) return written
+  const effect = chain.some((fn) => /\buse(?:Layout|Insertion)?Effect\s*\(\s*(?:async\s*)?(?:\([^()]*\)|[A-Za-z_$][\w$]*)?\s*=>\s*\{?\s*$/.test(view.code.slice(Math.max(0, fn.start - 80), fn.start)))
+  if (effect) return { kind: "none", via: "no navigation (it runs when the page loads, not on a click)", target: null }
   const cancels = /\bpreventDefault\s*\(/.test(view.code.slice(handler.start, handler.end))
   const attribute = handlerAttribute(view, handler)
   const element = attribute && !cancels ? elementDefault(view, attribute) : null
