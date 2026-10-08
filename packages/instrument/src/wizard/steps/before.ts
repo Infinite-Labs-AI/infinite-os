@@ -614,7 +614,9 @@ export function createBeforeStep(options: BeforeStepOptions = {}): WizardStep<"b
           cmpDetected: dryLive?.environment.cmpDetected ?? cmpDetectedStatic,
           loginFound,
           // Only a navigation that was measured (a dry load that came back) is one to repeat.
-          spaNavigation: dryLive ? spaNavigation : null
+          spaNavigation: dryLive ? spaNavigation : null,
+          // What the plan promised each tool, read back by the commerce checks, the reviewer and prove.
+          eventInventory: jobScan.detections.eventInventory ?? null
         }
         await writeBeforeFactsFile(deps.fs, ctx.root, factsFile)
         const duplicates = detectDuplicates(census, dryLive)

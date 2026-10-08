@@ -15,6 +15,7 @@ import type { WizardFs } from "../contracts/deps.js"
 import type { BeforeFacts, BuildResult, CheckResult } from "../contracts/jobs.js"
 import type { BaselineResponseFields } from "../contracts/report.js"
 import { WIZARD_PATHS } from "../contracts/state.js"
+import type { EventInventory } from "../../scan/event-inventory.js"
 import type { TestResult, TestTool } from "../contracts/test-engine.js"
 
 export const BEFORE_FACTS_PATH = WIZARD_PATHS.beforeFacts
@@ -43,6 +44,8 @@ export interface BeforeFactsFile {
   setupChecks: CheckResult[]
   envTargetChecks: CheckResult[]
   liveChecks: CheckResult[]
+  /** The scan's event × tool inventory (src/scan/event-inventory.ts): what each tool already gets and what the plan adds. */
+  eventInventory?: EventInventory | null
   /** The static CMP detector's answer (the grader's `cmpDetected` input when the window saw none). */
   cmpDetected: TestResult["environment"]["cmpDetected"]
   /** A login exists (auth detector): job 9 and the identity row apply. */

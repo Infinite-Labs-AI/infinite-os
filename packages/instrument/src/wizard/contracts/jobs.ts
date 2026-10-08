@@ -92,7 +92,7 @@ export const JOB_TABLE: { readonly [J in JobId]: JobSpec & { jobId: J } } = {
     n: 3,
     title: "Improve the existing PostHog",
     requiresApprovedLine: ["improve_additive"],
-    checks: [
+    checks: [p("S", "commerce_promises_met"), 
       // Passes on an untouched config too (its privacy settings unchanged): it may only fail the job.
       c("S", "posthog_config"),
       p("S", "next_rewrites_exact"),
@@ -110,7 +110,7 @@ export const JOB_TABLE: { readonly [J in JobId]: JobSpec & { jobId: J } } = {
     title: "Improve the existing GA4",
     requiresApprovedLine: ["improve_additive"],
     // R4-8: one GA4 page_view per client-side page change, measured by the rehearsal's page change.
-    checks: [p("S", "ga4_id_applied"), p("S", "spa_page_view_applied"), c("T1", "ga4_loader_id"), c("RH", "ga4_one_page_view"), c("RH", "ga4_spa_page_view"), c("PV", "ga4_seen_leaving")],
+    checks: [p("S", "commerce_promises_met"), p("S", "ga4_id_applied"), p("S", "spa_page_view_applied"), c("T1", "ga4_loader_id"), c("RH", "ga4_one_page_view"), c("RH", "ga4_spa_page_view"), c("PV", "ga4_seen_leaving")],
     donePath: ["done_in_code", "waiting_deploy", "proven"]
   },
   meta_improve: {
@@ -122,6 +122,8 @@ export const JOB_TABLE: { readonly [J in JobId]: JobSpec & { jobId: J } } = {
       c("S", "click_id_capture"),
       // Passes on a page with no Meta event at all: it may only fail the job.
       c("S", "meta_event_id_from_helper"),
+      // Review r3: the commerce item's own proof — every event the plan promised Meta is sent in the code.
+      p("S", "commerce_promises_met"),
       // LF4 close round 2 (P1-1): the mirror item's own check (the browser standard events go through infiniteMetaMirror).
       p("S", "meta_mirror_wired"),
       // LF4-P1-2: the autoConfig item's own check (automatic events off before the adopted pixel's init).

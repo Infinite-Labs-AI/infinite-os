@@ -183,7 +183,7 @@ const TARGET_CHECKS: Partial<Record<JobId, (target: string, framework: string) =
   // the wizard can read also carries `posthog_improve_applied` (the setting is in the adopted init).
   posthog_improve: (target, framework) =>
     target === COMMERCE_EVENTS_TARGET
-      ? ["S:inventory_events_sent", "PV:posthog_distinct_id_receipt"]
+      ? ["S:commerce_promises_met", "PV:posthog_distinct_id_receipt"]
       : target === "proxy"
       ? ["S:posthog_config", "S:posthog_improve_applied", ...(framework.startsWith("next") ? ["S:next_rewrites_exact"] : []), "RH:posthog_via_proxy_once", "PV:posthog_distinct_id_receipt"]
       : target === "history_change" || target === "defaults" || target === "sensitive_pages"
@@ -192,7 +192,7 @@ const TARGET_CHECKS: Partial<Record<JobId, (target: string, framework: string) =
   // R4-8: a page-change page_view is proven by the rehearsal's own page change (one GA4 page_view after it, never two).
   ga4_improve: (target) =>
     target === COMMERCE_EVENTS_TARGET
-      ? ["S:inventory_events_sent", "PV:ga4_seen_leaving"]
+      ? ["S:commerce_promises_met", "PV:ga4_seen_leaving"]
       : target === "id"
       ? ["S:ga4_id_applied", "T1:ga4_loader_id", "RH:ga4_one_page_view", "PV:ga4_seen_leaving"]
       : target === "spa_page_view"
@@ -202,8 +202,8 @@ const TARGET_CHECKS: Partial<Record<JobId, (target: string, framework: string) =
   // click, on the page as the agent left it (`item-t0.ts` builds that page from the job's files).
   meta_improve: (target) =>
     target === COMMERCE_EVENTS_TARGET
-      ? // The proving check (`inventory_events_sent`) is lane D's: listed here, it is carried once the job table has it.
-        ["S:inventory_events_sent", "S:meta_event_id_from_helper", "PV:meta_seen_leaving"]
+      ? // Proved by the code holding every event the plan promised Meta (checks/commerce-static.ts).
+        ["S:commerce_promises_met", "S:meta_event_id_from_helper", "PV:meta_seen_leaving"]
       : target === "retire_fbc_writer" || target === "capture"
       ? ["S:click_id_capture", "T0:fbc_capture", "PV:meta_seen_leaving"]
       : target === "spa_page_view"
@@ -227,10 +227,10 @@ const TARGET_CHECKS: Partial<Record<JobId, (target: string, framework: string) =
   // click test.
   conversions_to_tools: (target) =>
     OUTCOME_CONVERSION_TYPES.has(target as ConversionType)
-      ? ["S:no_fbq_standard_on_click", "S:track_after_success", "P:first_real_conversion"]
+      ? ["S:no_fbq_standard_on_click", "S:track_after_success", "S:no_double_count", "S:meta_event_id_from_server", "P:first_real_conversion"]
       : // LF4 close round 2 (P1-1): on a framework whose click test runs in the rehearsal, `no_fbq_standard_on_click`
         // was the click conversion's only local check, and it passes with nothing of the job in the code.
-        ["T0:click_test", "RH:click_test", "S:no_fbq_standard_on_click", "S:conversion_tracked", "P:first_real_conversion"],
+        ["T0:click_test", "RH:click_test", "S:no_fbq_standard_on_click", "S:conversion_tracked", "S:no_double_count", "S:meta_event_id_from_server", "P:first_real_conversion"],
   // A form's completed outcome cannot run in the no-send click rehearsal (its POST is cancelled).
   setup_check_fixes: target => target === "silent_form" ? ["S:setup_rerun_clean"] : null,
   preview_guard: (target, framework) => {
