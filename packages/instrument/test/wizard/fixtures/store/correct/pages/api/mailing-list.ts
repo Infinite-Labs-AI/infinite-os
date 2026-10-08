@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import type { NextApiRequest, NextApiResponse } from "next";
 import { reportInfiniteLead } from "../../lib/infinite-outcome";
 
@@ -36,6 +37,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     email, // the submitted address: hashed in the helper, never sent, stored or logged
     trackingAllowed: body.adMatch === true, // the page's signal that the visitor allowed tracking
     fallbackPath: "/mailing-list", // used when the request carries no same-site Referer
+    fallbackId: randomUUID(), // no row is stored here: one id per submission, used only when LEAD_ID_SECRET is not set
   });
 
   res.status(200).json({ ok: true });

@@ -140,7 +140,8 @@ describe("event names and sends", () => {
       ])
     )
     expect(read.rows[0]!.tools.ga4).toMatchObject({ state: "already_sent", evidence: [{ file: "src/events.ts", line: 3 }] })
-    expect(read.rows[0]!.sites).toEqual([{ file: "pages/index.tsx", line: 12 }])
+    // The trigger site keeps how it fires (P1-A reads it for the wait before a full page load).
+    expect(read.rows[0]!.sites).toEqual([{ file: "pages/index.tsx", line: 12, via: "helper:addToCart" }])
   })
 
   it("readEventInventory keeps known rows and cells; promisesOf defaults Meta's server events to the server lane", () => {

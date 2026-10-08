@@ -15,6 +15,12 @@
 //   purchase_without_value — a purchase outcome without its value and currency;
 //   double_count           — the turn added a send of an event a tool already gets from the site (a new
 //                            `gtag('event', X)`, `posthog.capture(X)`, `infiniteTrack(X)` that reaches GA4/PostHog, …);
+//   sent_twice_on_one_click — P1-A: one click reaches two sends of the same browser event to one tool (a send inside
+//                            the site's helper AND another in the handler that calls it, or two helpers that both send);
+//   lost_before_leaving    — P1-A: a click the scan saw leave with a FULL page load reaches a browser Meta send that
+//                            nothing waits for (no infiniteLeaveAfter / infiniteTrackThenNavigate / returned wait), so
+//                            the page can unload before Meta has it;
+//   lead_may_send_nothing  — P2-7: `reportInfiniteLead` without a `fallbackId` reports nothing until LEAD_ID_SECRET is set;
 //   page_built_meta_event_id — a browser Meta event carries an event id that is not the one the server got back;
 //   pii_in_outcome / pii_in_stripe_metadata — a raw email, name, address or any phone reaches an outcome's request
 //                            body or Stripe metadata. Only what REACHES the body counts: the arguments of a call
@@ -79,6 +85,8 @@ export interface Send {
   line: number
   /** What sends it: `gtag`, `posthog.capture`, `fbq`, `infiniteTrack`, or the site's own wrapper's name. */
   via: string
+  /** The offset of the send in the file's text. */
+  index?: number
 }
 
 /** The site's own wrappers, by name: `sendGa("x")`, `trackGoogleEvent("x")`, `capturePosthog("x")`, `trackMetaEvent("X")`. */
@@ -88,7 +96,7 @@ const WRAPPER_TOOLS: ReadonlyArray<{ tool: InventoryTool; pattern: RegExp }> = [
   { tool: "meta", pattern: /^(?:meta|fb|pixel|facebook)(?:[A-Z_]|$)|[a-z](?:Meta|Fb|Fbq|Pixel|Facebook)(?:[A-Z_]|$)/ }
 ]
 /** Never a wrapper: the tools' own functions (read on their own) and the tag's helpers. */
-const NOT_A_WRAPPER = /^(?:gtag|fbq|infiniteTrack|infiniteTrackThenNavigate|infiniteMetaMirror|reportInfiniteOutcome|postInfiniteOutcome)$/
+const NOT_A_WRAPPER = /^(?:gtag|fbq|infiniteTrack|infiniteTrackBeforeLeaving|infiniteTrackThenNavigate|infiniteLeaveAfter|infiniteMetaMirror|reportInfiniteOutcome|postInfiniteOutcome)$/
 
 /**
  * The tool is skipped by the options argument (`conversions/track.ts`): `destinations: { ga4: false }` turns one off, and
@@ -111,11 +119,12 @@ function namedObject(text: string, name: string): string | null {
   return close < 0 ? null : text.slice(open, close + 1)
 }
 
-/** The tag's `infiniteTrack(name, props, options)` / `infiniteTrackThenNavigate(…)`: the tools it reaches. */
+/** The tag's `infiniteTrack(name, props, options)` / `infiniteTrackBeforeLeaving(…)` / `infiniteTrackThenNavigate(…)`: the tools it reaches. */
 function helperSends(call: Call, file: string, text: string): Send[] {
   const parts = splitTopLevelArgs(call.args)
+  const first = call.name === "infiniteTrack" || call.name === "infiniteTrackBeforeLeaving"
   let name: string | null = null
-  if (call.name === "infiniteTrack") name = parts[0] !== undefined ? literalString(parts[0]) : null
+  if (first) name = parts[0] !== undefined ? literalString(parts[0]) : null
   else for (const part of parts) {
     const value = literalString(part)
     if (value !== null && /^[A-Za-z][A-Za-z0-9_]*$/.test(value)) {
@@ -124,18 +133,18 @@ function helperSends(call: Call, file: string, text: string): Send[] {
     }
   }
   if (name === null) return []
-  const raw = call.name === "infiniteTrack" ? (parts[2] ?? "") : (parts.filter((part) => part.trim().startsWith("{")).pop() ?? "")
+  const raw = first ? (parts[2] ?? "") : (parts.filter((part) => part.trim().startsWith("{")).pop() ?? "")
   const options = maskCommentsAndStrings(namedObject(text, raw.trim()) ?? raw, false)
   const metaName = /\bmetaEventName\s*:\s*["'`]([A-Za-z]+)["'`]/.exec(options)?.[1] ?? null
   const event = canonicalEvent(name)
   const line = lineNumberAt(text, call.index)
   const out: Send[] = []
   if (event !== null) {
-    for (const tool of ["ga4", "posthog", "infinite"] as const) if (!destinationOff(options, tool)) out.push({ tool, event, name, file, line, via: call.name })
+    for (const tool of ["ga4", "posthog", "infinite"] as const) if (!destinationOff(options, tool)) out.push({ tool, event, name, file, line, via: call.name, index: call.index })
   }
   const metaEvent = metaName !== null ? canonicalEvent(metaName) : event
   if (metaEvent !== null && (metaEvent === "view_item" || metaEvent === "add_to_cart") && !destinationOff(options, "meta")) {
-    out.push({ tool: "meta", event: metaEvent, name: metaName ?? META_EVENT_NAMES[metaEvent], file, line, via: call.name })
+    out.push({ tool: "meta", event: metaEvent, name: metaName ?? META_EVENT_NAMES[metaEvent], file, line, via: call.name, index: call.index })
   }
   return out
 }
@@ -146,7 +155,7 @@ export function sendsIn(file: string, text: string): Send[] {
   const add = (tool: InventoryTool, name: string | null, index: number, via: string) => {
     if (name === null) return
     const event = canonicalEvent(name)
-    if (event !== null) out.push({ tool, event, name, file, line: lineNumberAt(text, index), via })
+    if (event !== null) out.push({ tool, event, name, file, line: lineNumberAt(text, index), via, index })
   }
   for (const call of callsOf(text, ["gtag"])) {
     const [kind, name] = splitTopLevelArgs(call.args)
@@ -169,7 +178,7 @@ export function sendsIn(file: string, text: string): Send[] {
     const name = method === "track" || method === "trackCustom" ? parts[1] : method === "trackSingle" || method === "trackSingleCustom" ? parts[2] : undefined
     if (name !== undefined) add("meta", literalString(name), call.index, "fbq")
   }
-  for (const call of callsOf(text, ["infiniteTrack", "infiniteTrackThenNavigate"])) out.push(...helperSends(call, file, text))
+  for (const call of callsOf(text, ["infiniteTrack", "infiniteTrackBeforeLeaving", "infiniteTrackThenNavigate"])) out.push(...helperSends(call, file, text))
   // The site's own wrappers, called with a literal event name.
   for (const match of commentsOnly.matchAll(/(?<![\w$.])([A-Za-z_$][\w$]*)\s*\(\s*(["'])([A-Za-z0-9_$]+)\2/g)) {
     const ident = match[1]!
@@ -274,6 +283,9 @@ export const COMMERCE_RULES = [
   "outcome_without_ad_match",
   "purchase_without_value",
   "double_count",
+  "sent_twice_on_one_click",
+  "lost_before_leaving",
+  "lead_may_send_nothing",
   "page_built_meta_event_id",
   "pii_in_outcome",
   "pii_in_stripe_metadata"
@@ -500,6 +512,317 @@ export function doubleCountFindings(input: CommerceCheckInput): CommerceFinding[
   return findings
 }
 
+// ---- one click path (P1-A) ----
+
+/** A function's body in a file: `name` when it is bound to one, its body's offsets, and its parameters' offsets. */
+interface FunctionRange {
+  name: string | null
+  start: number
+  end: number
+}
+
+/** The index of the bracket that opens the one closing at `close` (masked text), or -1. */
+function openingOf(masked: string, close: number): number {
+  let depth = 0
+  for (let cursor = close; cursor >= 0; cursor -= 1) {
+    const ch = masked[cursor]
+    if (ch === ")" || ch === "}" || ch === "]") depth += 1
+    else if (ch === "(" || ch === "{" || ch === "[") {
+      depth -= 1
+      if (depth === 0) return cursor
+    }
+  }
+  return -1
+}
+
+/** Every function body (declarations, function expressions and arrows) in masked text, with the name it is bound to. */
+export function functionRanges(masked: string): FunctionRange[] {
+  const out: FunctionRange[] = []
+  const bodyFrom = (from: number): { start: number; end: number } | null => {
+    let at = from
+    while (at < masked.length && /\s/.test(masked[at]!)) at += 1
+    if (masked[at] === "{") {
+      const end = closingOf(masked, at)
+      return end < 0 ? null : { start: at + 1, end }
+    }
+    // An expression body: to the end of the expression (a `,`, `;` or closing bracket at depth 0).
+    let depth = 0
+    for (let cursor = at; cursor < masked.length; cursor += 1) {
+      const ch = masked[cursor]!
+      if (ch === "(" || ch === "{" || ch === "[") depth += 1
+      else if (ch === ")" || ch === "}" || ch === "]") {
+        if (depth === 0) return { start: at, end: cursor }
+        depth -= 1
+      } else if ((ch === "," || ch === ";") && depth === 0) return { start: at, end: cursor }
+    }
+    return { start: at, end: masked.length }
+  }
+  const boundName = (before: number): string | null =>
+    /\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*(?::[^=;]*)?=\s*(?:async\s*)?(?:function\b[^(]*)?$/.exec(masked.slice(Math.max(0, before - 160), before))?.[1] ??
+    /(?:^|[\s,{;])([A-Za-z_$][\w$]*)\s*:\s*(?:async\s*)?$/.exec(masked.slice(Math.max(0, before - 80), before))?.[1] ??
+    null
+  for (const match of masked.matchAll(/\bfunction\b\s*\*?\s*([A-Za-z_$][\w$]*)?\s*(?:<[^>()]*>)?\s*\(/g)) {
+    const open = (match.index ?? 0) + match[0].length - 1
+    const close = closingOf(masked, open)
+    if (close < 0) continue
+    const brace = /^\s*(?::[^{;=]*)?\{/.exec(masked.slice(close + 1, close + 200))
+    if (!brace) continue
+    const start = close + brace[0].length
+    const end = closingOf(masked, start)
+    if (end < 0) continue
+    out.push({ name: match[1] ?? boundName(match.index ?? 0), start: start + 1, end })
+  }
+  for (const match of masked.matchAll(/=>/g)) {
+    const arrow = match.index ?? 0
+    let head = arrow - 1
+    while (head >= 0 && /\s/.test(masked[head]!)) head -= 1
+    // Skip a return type annotation: `(a): void =>` is read from its parameter list.
+    let paramsStart: number
+    if (masked[head] === ")") paramsStart = openingOf(masked, head)
+    else {
+      const ident = /[A-Za-z_$][\w$]*$/.exec(masked.slice(Math.max(0, head - 60), head + 1))
+      if (!ident) continue
+      paramsStart = head + 1 - ident[0].length
+    }
+    if (paramsStart < 0) continue
+    const body = bodyFrom(arrow + 2)
+    if (!body) continue
+    const before = masked.slice(Math.max(0, paramsStart - 10), paramsStart)
+    const asyncStart = /async\s*$/.test(before) ? paramsStart - (before.length - before.search(/async\s*$/)) : paramsStart
+    out.push({ name: boundName(asyncStart), start: body.start, end: body.end })
+  }
+  return out
+}
+
+/** The innermost function holding `index`, or null (module level). */
+function innermost(ranges: readonly FunctionRange[], index: number): FunctionRange | null {
+  let best: FunctionRange | null = null
+  for (const range of ranges) if (range.start <= index && index < range.end && (!best || range.start >= best.start)) best = range
+  return best
+}
+
+/** The innermost NAMED function holding `index` (the helper a send is in), or null. */
+function innermostNamed(ranges: readonly FunctionRange[], index: number): FunctionRange | null {
+  let best: FunctionRange | null = null
+  for (const range of ranges) if (range.name && range.start <= index && index < range.end && (!best || range.start >= best.start)) best = range
+  return best
+}
+
+interface ClickPathFile {
+  file: string
+  text: string
+  masked: string
+  ranges: FunctionRange[]
+}
+
+/** One reach of a browser event on a click path: a send itself, or a call of a helper that sends it. */
+interface Reach {
+  tool: InventoryTool
+  event: InventoryEvent
+  file: string
+  line: number
+  index: number
+  /** The helper called, or null for a send written here. */
+  through: string | null
+  /** Where the helper's own send is. */
+  sendAt: { file: string; line: number }
+}
+
+const BROWSER_STEP_EVENTS: ReadonlySet<InventoryEvent> = new Set<InventoryEvent>(["view_item", "add_to_cart"])
+
+/** Every reach of a browser Meta / GA4 / PostHog commerce send, sends first, then the helpers that hold them (3 levels). */
+function clickPathReaches(files: readonly ClickPathFile[]): Reach[] {
+  const reaches: Reach[] = []
+  const helpers = new Map<string, Reach[]>() // helper name → what calling it reaches
+  for (const entry of files) {
+    for (const send of sendsIn(entry.file, entry.text)) {
+      if (send.index === undefined || send.tool === "infinite" || !BROWSER_STEP_EVENTS.has(send.event)) continue
+      const reach: Reach = { tool: send.tool, event: send.event, file: entry.file, line: send.line, index: send.index, through: null, sendAt: { file: entry.file, line: send.line } }
+      reaches.push(reach)
+      const holder = innermostNamed(entry.ranges, send.index)
+      if (holder?.name) helpers.set(holder.name, [...(helpers.get(holder.name) ?? []), reach])
+    }
+  }
+  const seen = new Set<string>()
+  for (let round = 0; round < 3; round += 1) {
+    let grew = false
+    for (const [helper, held] of [...helpers]) {
+      const pattern = new RegExp(`(?<![\\w$.])${helper.replace(/\$/g, "\\$")}\\s*\\(`, "g")
+      for (const entry of files) {
+        for (const match of entry.masked.matchAll(pattern)) {
+          const index = match.index ?? 0
+          // The declaration itself is not a call.
+          if (/\bfunction\s*\*?\s*$/.test(entry.masked.slice(Math.max(0, index - 20), index))) continue
+          const close = closingOf(entry.masked, index + match[0].length - 1)
+          if (close > 0 && /^\s*(?::[^{;=]*)?\{/.test(entry.masked.slice(close + 1, close + 100)) && !/[=(,:?]\s*$/.test(entry.masked.slice(Math.max(0, index - 10), index))) continue
+          for (const inner of held) {
+            const key = `${entry.file}\u0000${index}\u0000${inner.tool}\u0000${inner.event}\u0000${helper}`
+            if (seen.has(key)) continue
+            seen.add(key)
+            const reach: Reach = { tool: inner.tool, event: inner.event, file: entry.file, line: lineNumberAt(entry.text, index), index, through: helper, sendAt: inner.sendAt }
+            reaches.push(reach)
+            const holder = innermostNamed(entry.ranges, index)
+            if (holder?.name && holder.name !== helper) {
+              helpers.set(holder.name, [...(helpers.get(holder.name) ?? []), reach])
+              grew = true
+            }
+          }
+        }
+      }
+    }
+    if (!grew) break
+  }
+  return reaches
+}
+
+function clickPathFiles(input: CommerceCheckInput): ClickPathFile[] {
+  return codeFiles(input.files)
+    .filter(([file, text]) => !isServerFile(file, text))
+    .map(([file, text]) => {
+      const masked = maskCommentsAndStrings(text, true)
+      return { file, text, masked, ranges: functionRanges(masked) }
+    })
+}
+
+/**
+ * P1-A: one click reaches two sends of the same browser event to one tool: the agent put the send inside the site's
+ * helper AND in the handler that calls it (or the handler calls two helpers that both send it). Every such click counts
+ * the event twice in that tool.
+ */
+export function clickPathFindings(input: CommerceCheckInput): CommerceFinding[] {
+  const files = clickPathFiles(input)
+  const reaches = clickPathReaches(files)
+  const findings: CommerceFinding[] = []
+  const reported = new Set<string>()
+  for (const entry of files) {
+    const here = reaches.filter((reach) => reach.file === entry.file)
+    const groups = new Map<string, Reach[]>()
+    for (const reach of here) {
+      const fn = innermost(entry.ranges, reach.index)
+      if (!fn) continue
+      const key = `${fn.start}\u0000${reach.tool}\u0000${reach.event}`
+      groups.set(key, [...(groups.get(key) ?? []), reach])
+    }
+    for (const group of groups.values()) {
+      // Two reaches of distinct sends (the same helper called twice in one handler is the site's own choice).
+      const distinct = [...new Map(group.map((reach) => [`${reach.sendAt.file}:${reach.sendAt.line}`, reach])).values()]
+      if (distinct.length < 2) continue
+      const [first, second] = distinct as [Reach, Reach]
+      const key = `${entry.file}:${first.line}:${first.tool}:${first.event}`
+      if (reported.has(key)) continue
+      reported.add(key)
+      const word = (reach: Reach) => (reach.through ? `through ${reach.through}() (its send at ${where(reach.sendAt.file, reach.sendAt.line)})` : `itself at ${where(reach.file, reach.line)}`)
+      const tool = TOOL_WORDS[first.tool]
+      const name = first.tool === "meta" ? META_EVENT_NAMES[first.event] : first.event
+      findings.push({
+        rule: "sent_twice_on_one_click",
+        state: "problem",
+        file: entry.file,
+        line: Math.min(first.line, second.line),
+        event: first.event,
+        tool: first.tool,
+        message: `One click at ${where(entry.file, Math.min(first.line, second.line))} sends ${tool} ${name} twice: ${word(first)} and ${word(second)}, so every click counts twice in ${tool}. Keep only the send inside the site's helper.`
+      })
+    }
+  }
+  return findings
+}
+
+/** A wait the handler at `fn` gives the send before it leaves. */
+function handlerWaits(masked: string, fn: FunctionRange | null, index: number): boolean {
+  const scope = fn ? masked.slice(fn.start, fn.end) : masked
+  if (/\b(?:infiniteLeaveAfter|infiniteTrackThenNavigate)\s*\(/.test(scope)) return true
+  // `await helper(…)` / `helper(…).then(…)` on the reaching call itself.
+  if (/\bawait\s*$/.test(masked.slice(Math.max(0, index - 12), index))) return true
+  const close = closingOf(masked, masked.indexOf("(", index))
+  return close > 0 && /^\s*\.\s*then\s*\(/.test(masked.slice(close + 1, close + 40))
+}
+
+/**
+ * P1-A: the scan saw these clicks leave with a FULL page load (`InventorySite.navigation`); a browser Meta send they
+ * reach must be waited for (infiniteLeaveAfter around the handler, infiniteTrackThenNavigate, or the returned wait), or
+ * the unload can cancel Meta's request. Read where the handler calls the helper (or sends inline) in its file now.
+ */
+export function leaveFindings(input: CommerceCheckInput): CommerceFinding[] {
+  if (!input.inventory) return []
+  const files = clickPathFiles(input)
+  const reaches = clickPathReaches(files).filter((reach) => reach.tool === "meta")
+  const findings: CommerceFinding[] = []
+  for (const row of input.inventory.rows) {
+    if (!BROWSER_STEP_EVENTS.has(row.event)) continue
+    const leaving = (row.sites ?? []).filter((site) => site.navigation === "full_load")
+    for (const file of [...new Set(leaving.map((site) => site.file))]) {
+      const entry = files.find((candidate) => candidate.file === file)
+      if (!entry) continue
+      const helpers = new Set(leaving.filter((site) => site.file === file && site.via?.startsWith("helper:")).map((site) => site.via!.slice("helper:".length)))
+      const inline = leaving.some((site) => site.file === file && !site.via?.startsWith("helper:"))
+      const here = reaches.filter((reach) => reach.file === file && reach.event === row.event && (reach.through === null ? inline : helpers.has(reach.through)))
+      for (const reach of here) {
+        if (handlerWaits(entry.masked, innermost(entry.ranges, reach.index), reach.index)) continue
+        findings.push({
+          rule: "lost_before_leaving",
+          state: "problem",
+          file,
+          line: reach.line,
+          event: row.event,
+          tool: "meta",
+          message: `${where(file, reach.line)} sends Meta ${META_EVENT_NAMES[row.event]}${reach.through ? ` through ${reach.through}()` : ""} and then leaves with a full page load without waiting, so the page can unload before Meta has it. ${reach.through ? `Have ${reach.through}() return infiniteTrackBeforeLeaving(…) and wrap this handler in infiniteLeaveAfter(() => { …; return ${reach.through}(…) }, () => <its own navigation>).` : "Use infiniteTrackThenNavigate in place of the handler's own navigation."}`
+        })
+        break
+      }
+    }
+    // The helper a full-load caller waits on must return the wait, not a plain infiniteTrack.
+    for (const helper of [...new Set(leaving.filter((site) => site.via?.startsWith("helper:")).map((site) => site.via!.slice("helper:".length)))]) {
+      const at = leaving.find((site) => site.via === `helper:${helper}`)?.helperAt
+      const entry = at ? files.find((candidate) => candidate.file === at.file) : undefined
+      if (!entry) continue
+      const body = entry.ranges.find((range) => range.name === helper)
+      if (!body) continue
+      const scope = entry.masked.slice(body.start, body.end)
+      const metaHere = reaches.some((reach) => reach.file === entry.file && reach.through === null && reach.event === row.event && body.start <= reach.index && reach.index < body.end)
+      if (!metaHere || /\binfiniteTrackBeforeLeaving\s*\(/.test(scope)) continue
+      findings.push({
+        rule: "lost_before_leaving",
+        state: "problem",
+        file: entry.file,
+        line: lineNumberAt(entry.text, body.start),
+        event: row.event,
+        tool: "meta",
+        message: `${helper}() sends Meta ${META_EVENT_NAMES[row.event]} with nothing to wait on, but a caller leaves with a full page load right after it. Return infiniteTrackBeforeLeaving(…) from ${helper}() so that caller can wait.`
+      })
+    }
+  }
+  return findings
+}
+
+// ---- leads (P2-7) ----
+
+/** `reportInfiniteLead` with no `fallbackId` sends nothing until the owner sets LEAD_ID_SECRET (no stable id). */
+export function leadFindings(input: Pick<CommerceCheckInput, "files">): CommerceFinding[] {
+  const findings: CommerceFinding[] = []
+  for (const [file, text] of codeFiles(input.files)) {
+    for (const outcome of outcomesIn(file, text)) {
+      if (outcome.call.name !== "reportInfiniteLead") continue
+      const line = outcome.call.line
+      if (outcome.props === null || [...outcome.props.keys()].some((key) => key.startsWith("..."))) {
+        if (outcome.props?.has("fallbackId")) continue
+        findings.push({ rule: "lead_may_send_nothing", state: "undetermined", file, line, event: outcome.event ?? "lead", message: `${where(file, line)} passes options the wizard cannot read, so whether the lead has a fallbackId (needed until LEAD_ID_SECRET is set) is unknown.` })
+        continue
+      }
+      if (outcome.props.has("fallbackId")) continue
+      findings.push({
+        rule: "lead_may_send_nothing",
+        state: "problem",
+        file,
+        line,
+        event: outcome.event ?? "lead",
+        message: `${where(file, line)} reports the ${outcome.type ?? "lead"} with no fallbackId, so until LEAD_ID_SECRET is set it has no stable id and sends nothing. Pass fallbackId: the stored sign-up's id, or one new random id per submission.`
+      })
+    }
+  }
+  return findings
+}
+
 /** A browser Meta event carries only the event id the server got back from Infinite, never one the page made. */
 export function metaEventIdFindings(input: CommerceCheckInput): CommerceFinding[] {
   const findings: CommerceFinding[] = []
@@ -645,6 +968,9 @@ export function commerceFindings(input: CommerceCheckInput): CommerceFinding[] {
     ...(doubleCountFindings(input) ?? [
       { rule: "double_count" as const, state: "undetermined" as const, message: "The code before this run could not be read, so new sends could not be told apart from the site's own." }
     ]),
+    ...clickPathFindings(input),
+    ...leaveFindings(input),
+    ...leadFindings(input),
     ...metaEventIdFindings(input),
     ...piiFindings(input)
   ]

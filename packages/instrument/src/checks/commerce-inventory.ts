@@ -28,11 +28,23 @@ export interface InventoryCell {
   evidence?: Array<{ file: string; line: number }>
 }
 
+/** A trigger point, with what the scan read there (P1-A): how it fires and how its click leaves the page. */
+export interface InventorySite {
+  file: string
+  line: number
+  /** `helper:<fn>` (through the site's own helper), `gtag`, `posthog.capture`, … */
+  via?: string
+  /** "full_load", "client" or "none"; absent = unknown. */
+  navigation?: "full_load" | "client" | "none"
+  /** Where the `helper:<fn>` helper is defined. */
+  helperAt?: { file: string; line: number }
+}
+
 export interface InventoryRow {
   event: InventoryEvent
   tools: Partial<Record<InventoryTool, InventoryCell>>
   /** Where the event happens in the site's code (the trigger points: a Buy handler, a success branch, an API route). */
-  sites?: Array<{ file: string; line: number }>
+  sites?: InventorySite[]
 }
 
 export interface EventInventory {
@@ -82,7 +94,18 @@ function fromScanShape(events: unknown[]): EventInventory {
       const known = typeof name === "string" ? SCAN_TOOLS[name] : undefined
       if (known && tools[known.tool]?.state !== "already_sent") tools[known.tool] = { state: "will_add", lane: known.lane }
     }
-    const sites = sitesOf(entry.sites)
+    const sites: InventorySite[] = (Array.isArray(entry.sites) ? entry.sites : []).flatMap((raw): InventorySite[] => {
+      if (!raw || typeof raw !== "object" || typeof (raw as { file?: unknown }).file !== "string") return []
+      const site = raw as { file: string; line?: unknown; via?: unknown; navigation?: unknown; helperAt?: unknown }
+      const helperAt = site.helperAt as { file?: unknown; line?: unknown } | undefined
+      return [{
+        file: site.file,
+        line: Number(site.line) || 1,
+        ...(typeof site.via === "string" ? { via: site.via } : {}),
+        ...(site.navigation === "full_load" || site.navigation === "client" || site.navigation === "none" ? { navigation: site.navigation } : {}),
+        ...(helperAt && typeof helperAt.file === "string" ? { helperAt: { file: helperAt.file, line: Number(helperAt.line) || 1 } } : {})
+      }]
+    })
     rows.push({ event: entry.event, tools, ...(sites.length > 0 ? { sites } : {}) })
   }
   return { rows }
