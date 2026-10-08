@@ -10,7 +10,9 @@ import { createInfiniteOsDb, runMigrations, type InfiniteOsDb } from "@infinite-
 import {
   connectorFor,
   probeMetaAdsExtendedReads,
+  syncMetaAdsAdsetBreakdownDaily,
   syncMetaAdsAdsetBreakdownWindow,
+  syncMetaAdsCampaignHourly,
   type MetaAdsCredential,
   type SyncRequest,
 } from "./index.js";
@@ -360,6 +362,170 @@ describe("Meta Ads extended reads against real PGlite", () => {
           .rejects.toThrow(/stored account timezone/);
       });
       expect(seen).toEqual([]);
+    }, 120_000);
+  });
+
+  describe("daily ad set breakdown (0085)", () => {
+    const window = { since: "2026-09-21", until: "2026-09-23" };
+    const json = (data: unknown[], paging: Record<string, unknown> = {}) => new Response(JSON.stringify({ data, paging }), { status: 200 });
+    const deviceRows = [
+      { adset_id: "s1", campaign_id: "c1", date_start: "2026-09-21", date_stop: "2026-09-21", device_platform: "mobile_app", spend: "40", impressions: "900", reach: "700", clicks: "9", inline_link_clicks: "7", actions: [{ action_type: "lead", value: "2" }], account_currency: "GBP" },
+      { adset_id: "s1", campaign_id: "c1", date_start: "2026-09-21", date_stop: "2026-09-21", device_platform: "desktop", spend: "10", impressions: "100", reach: "90", clicks: "1", inline_link_clicks: "1", account_currency: "GBP" },
+      { adset_id: "s1", campaign_id: "c1", date_start: "2026-09-23", date_stop: "2026-09-23", device_platform: "mobile_app", spend: "5", impressions: "80", reach: "70", clicks: "0", inline_link_clicks: "0", account_currency: "GBP" },
+    ];
+
+    it("reads ONE dimension with time_increment=1 and writes the rows + a receipt for EVERY day (empty day = measured none)", async () => {
+      const scope = await primed();
+      const { result, seen } = await withMeta({ day: window.until, insights: () => json(deviceRows) }, () =>
+        syncMetaAdsAdsetBreakdownDaily(db, CREDENTIAL, { ...scope, ...window, dimension: "device_platform", requestBudget: 1 }));
+      expect(seen).toHaveLength(1);
+      const url = seen[0]!.url;
+      expect(url.searchParams.get("breakdowns")).toBe("device_platform");
+      expect(url.searchParams.get("level")).toBe("adset");
+      expect(url.searchParams.get("time_increment")).toBe("1");
+      expect(url.searchParams.get("time_range")).toBe(JSON.stringify(window));
+      expect(result).toMatchObject({ rowCount: 3, rowsByDay: { "2026-09-21": 2, "2026-09-22": 0, "2026-09-23": 1 } });
+      expect(result.telemetry.requestCount).toBe(1);
+      expect(await db.query(
+        "select occurred_on::text as day, dimension_value, parent_value, spend::float8 as spend, reach::int as reach, campaign_id from meta_ads_adset_breakdown_daily where source_id=$1 order by occurred_on, dimension_value",
+        [scope.sourceId],
+      )).toEqual([
+        { day: "2026-09-21", dimension_value: "desktop", parent_value: "", spend: 10, reach: 90, campaign_id: "c1" },
+        { day: "2026-09-21", dimension_value: "mobile_app", parent_value: "", spend: 40, reach: 700, campaign_id: "c1" },
+        { day: "2026-09-23", dimension_value: "mobile_app", parent_value: "", spend: 5, reach: 70, campaign_id: "c1" },
+      ]);
+      expect(await db.query("select occurred_on::text as day, row_count from meta_ads_adset_breakdown_daily_coverage where source_id=$1 and dimension='device_platform' order by occurred_on", [scope.sourceId]))
+        .toEqual([{ day: "2026-09-21", row_count: 2 }, { day: "2026-09-22", row_count: 0 }, { day: "2026-09-23", row_count: 1 }]);
+      // The weekly window tables are untouched.
+      expect(await db.query("select 1 from meta_ads_adset_breakdown_windows where source_id=$1", [scope.sourceId])).toEqual([]);
+    }, 120_000);
+
+    it("platform_position asks for the publisher_platform pair and keeps the platform as parent; re-reads replace only their own days and dimension", async () => {
+      const scope = await primed();
+      const positions = [
+        { adset_id: "s1", date_start: "2026-09-21", date_stop: "2026-09-21", publisher_platform: "facebook", platform_position: "feed", spend: "30", impressions: "500", reach: "400", account_currency: "GBP" },
+        { adset_id: "s1", date_start: "2026-09-21", date_stop: "2026-09-21", publisher_platform: "instagram", platform_position: "feed", spend: "20", impressions: "300", reach: "250", account_currency: "GBP" },
+      ];
+      await withMeta({ day: window.until, insights: () => json(deviceRows) }, () =>
+        syncMetaAdsAdsetBreakdownDaily(db, CREDENTIAL, { ...scope, ...window, dimension: "device_platform", requestBudget: 1 }));
+      const { seen } = await withMeta({ day: window.until, insights: () => json(positions) }, () =>
+        syncMetaAdsAdsetBreakdownDaily(db, CREDENTIAL, { ...scope, since: "2026-09-21", until: "2026-09-21", dimension: "platform_position", requestBudget: 1 }));
+      expect(seen[0]!.url.searchParams.get("breakdowns")).toBe("publisher_platform,platform_position");
+      expect(await db.query("select parent_value, dimension_value from meta_ads_adset_breakdown_daily where source_id=$1 and dimension='platform_position' order by parent_value", [scope.sourceId]))
+        .toEqual([{ parent_value: "facebook", dimension_value: "feed" }, { parent_value: "instagram", dimension_value: "feed" }]);
+      // A one-day re-read of device with nothing replaces day 21 only; days 22-23 keep their rows and receipts.
+      await withMeta({ day: window.until, insights: () => json([]) }, () =>
+        syncMetaAdsAdsetBreakdownDaily(db, CREDENTIAL, { ...scope, since: "2026-09-21", until: "2026-09-21", dimension: "device_platform", requestBudget: 1 }));
+      expect(await db.query("select occurred_on::text as day from meta_ads_adset_breakdown_daily where source_id=$1 and dimension='device_platform'", [scope.sourceId]))
+        .toEqual([{ day: "2026-09-23" }]);
+      expect(await db.query("select dimension, occurred_on::text as day, row_count from meta_ads_adset_breakdown_daily_coverage where source_id=$1 order by dimension, occurred_on", [scope.sourceId]))
+        .toEqual([
+          { dimension: "device_platform", day: "2026-09-21", row_count: 0 },
+          { dimension: "device_platform", day: "2026-09-22", row_count: 0 },
+          { dimension: "device_platform", day: "2026-09-23", row_count: 1 },
+          { dimension: "platform_position", day: "2026-09-21", row_count: 2 },
+        ]);
+    }, 120_000);
+
+    it("never crosses its ceiling and writes nothing when a page is over budget; refuses bad input with 0 calls", async () => {
+      const scope = await primed();
+      const paged = (_level: string, url: URL) => url.searchParams.has("after")
+        ? json([deviceRows[1]])
+        : json([deviceRows[0]], { next: `https://graph.facebook.com/v25.0/${ACCOUNT}/insights?level=adset&after=p2` });
+      const { seen } = await withMeta({ day: window.until, insights: paged }, async () => {
+        await expect(syncMetaAdsAdsetBreakdownDaily(db, CREDENTIAL, { ...scope, ...window, dimension: "device_platform", requestBudget: 1 }))
+          .rejects.toMatchObject({ code: "provider_rate_budget_exhausted" });
+      });
+      expect(seen).toHaveLength(1);
+      expect(await db.query("select 1 from meta_ads_adset_breakdown_daily_coverage where source_id=$1", [scope.sourceId])).toEqual([]);
+      const today = localDay("Europe/London");
+      const refused = await withMeta({ day: today }, async () => {
+        await expect(syncMetaAdsAdsetBreakdownDaily(db, CREDENTIAL, { ...scope, since: today, until: today, dimension: "device_platform", requestBudget: 1 }))
+          .rejects.toThrow(/settled days only/);
+        await expect(syncMetaAdsAdsetBreakdownDaily(db, CREDENTIAL, { ...scope, ...window, dimension: "age" as never, requestBudget: 1 }))
+          .rejects.toThrow(/dimension is not supported/);
+        await expect(syncMetaAdsAdsetBreakdownDaily(db, CREDENTIAL, { ...scope, since: "2026-08-01", until: "2026-09-23", dimension: "device_platform", requestBudget: 1 }))
+          .rejects.toThrow(/1\.\.31 whole days/);
+        const fresh = await seedSource();
+        await expect(syncMetaAdsAdsetBreakdownDaily(db, CREDENTIAL, { ...fresh, ...window, dimension: "device_platform", requestBudget: 1 }))
+          .rejects.toThrow(/stored account timezone/);
+      });
+      expect(refused.seen).toEqual([]);
+    }, 120_000);
+
+    it("refuses a row outside its window or a repeated key (nothing written)", async () => {
+      const scope = await primed();
+      await withMeta({ day: window.until, insights: () => json([{ ...deviceRows[0], date_start: "2026-09-24", date_stop: "2026-09-24" }]) }, async () => {
+        await expect(syncMetaAdsAdsetBreakdownDaily(db, CREDENTIAL, { ...scope, ...window, dimension: "device_platform", requestBudget: 1 }))
+          .rejects.toThrow(/outside its one-day buckets/);
+      });
+      await withMeta({ day: window.until, insights: () => json([deviceRows[0], deviceRows[0]]) }, async () => {
+        await expect(syncMetaAdsAdsetBreakdownDaily(db, CREDENTIAL, { ...scope, ...window, dimension: "device_platform", requestBudget: 1 }))
+          .rejects.toThrow(/twice/);
+      });
+      expect(await db.query("select 1 from meta_ads_adset_breakdown_daily_coverage where source_id=$1", [scope.sourceId])).toEqual([]);
+    }, 120_000);
+  });
+
+  describe("campaign hourly delivery (0085)", () => {
+    // 14:30 UTC on 2026-10-08 is 15:30 in London (BST): the account's today is 2026-10-08, its open hour 15.
+    const now = new Date("2026-10-08T14:30:00.000Z");
+    const json = (data: unknown[]) => new Response(JSON.stringify({ data, paging: {} }), { status: 200 });
+    const hourRow = (day: string, hour: number, spend: string) => ({
+      campaign_id: "c1", date_start: day, date_stop: day, spend, impressions: "100", clicks: "4", inline_link_clicks: "3", account_currency: "GBP",
+      hourly_stats_aggregated_by_advertiser_time_zone: `${String(hour).padStart(2, "0")}:00:00 - ${String(hour).padStart(2, "0")}:59:59`,
+    });
+
+    it("reads today + the restatement window by advertiser-time-zone hour; settled days and the open day get honest receipts", async () => {
+      const scope = await primed();
+      const rows = [hourRow("2026-10-07", 9, "3.5"), hourRow("2026-10-07", 23, "1"), hourRow("2026-10-08", 0, "0.25"), hourRow("2026-10-08", 14, "2")];
+      const { result, seen } = await withMeta({ day: "2026-10-08", insights: () => json(rows) }, () =>
+        syncMetaAdsCampaignHourly(db, CREDENTIAL, { ...scope, since: "2026-10-06", until: "2026-10-08", requestBudget: 1, now }));
+      expect(seen).toHaveLength(1);
+      const url = seen[0]!.url;
+      expect(url.searchParams.get("level")).toBe("campaign");
+      expect(url.searchParams.get("breakdowns")).toBe("hourly_stats_aggregated_by_advertiser_time_zone");
+      expect(url.searchParams.get("time_increment")).toBe("1");
+      expect(url.searchParams.get("fields")).toBe("campaign_id,date_start,date_stop,spend,impressions,clicks,inline_link_clicks,account_currency");
+      expect(result).toMatchObject({ rowCount: 4, observedLocalHour: 15, timeZone: "Europe/London", rowsByDay: { "2026-10-06": 0, "2026-10-07": 2, "2026-10-08": 2 } });
+      expect(result.telemetry.requestCount).toBe(1);
+      expect(await db.query("select occurred_on::text as day, hour, spend::float8 as spend, inline_link_clicks::int as link_clicks from meta_ads_campaign_hourly where source_id=$1 order by occurred_on, hour", [scope.sourceId]))
+        .toEqual([
+          { day: "2026-10-07", hour: 9, spend: 3.5, link_clicks: 3 },
+          { day: "2026-10-07", hour: 23, spend: 1, link_clicks: 3 },
+          { day: "2026-10-08", hour: 0, spend: 0.25, link_clicks: 3 },
+          { day: "2026-10-08", hour: 14, spend: 2, link_clicks: 3 },
+        ]);
+      expect(await db.query("select occurred_on::text as day, row_count, settled, observed_local_hour, timezone_name from meta_ads_campaign_hourly_coverage where source_id=$1 order by occurred_on", [scope.sourceId]))
+        .toEqual([
+          { day: "2026-10-06", row_count: 0, settled: true, observed_local_hour: null, timezone_name: "Europe/London" },
+          { day: "2026-10-07", row_count: 2, settled: true, observed_local_hour: null, timezone_name: "Europe/London" },
+          { day: "2026-10-08", row_count: 2, settled: false, observed_local_hour: 15, timezone_name: "Europe/London" },
+        ]);
+      // A later read of the same open day replaces its hours and moves its receipt forward.
+      const later = new Date("2026-10-08T18:05:00.000Z");
+      await withMeta({ day: "2026-10-08", insights: () => json([hourRow("2026-10-08", 14, "2.4"), hourRow("2026-10-08", 18, "1")]) }, () =>
+        syncMetaAdsCampaignHourly(db, CREDENTIAL, { ...scope, since: "2026-10-08", until: "2026-10-08", requestBudget: 1, now: later }));
+      expect(await db.query("select hour, spend::float8 as spend from meta_ads_campaign_hourly where source_id=$1 and occurred_on='2026-10-08' order by hour", [scope.sourceId]))
+        .toEqual([{ hour: 14, spend: 2.4 }, { hour: 18, spend: 1 }]);
+      expect(await db.query("select observed_local_hour, row_count from meta_ads_campaign_hourly_coverage where source_id=$1 and occurred_on='2026-10-08'", [scope.sourceId]))
+        .toEqual([{ observed_local_hour: 19, row_count: 2 }]);
+    }, 120_000);
+
+    it("refuses a malformed hour bucket, a window after today, or too long a window — nothing written", async () => {
+      const scope = await primed();
+      await withMeta({ day: "2026-10-08", insights: () => json([{ ...hourRow("2026-10-08", 3, "1"), hourly_stats_aggregated_by_advertiser_time_zone: "03:00:00 - 04:59:59" }]) }, async () => {
+        await expect(syncMetaAdsCampaignHourly(db, CREDENTIAL, { ...scope, since: "2026-10-08", until: "2026-10-08", requestBudget: 1, now }))
+          .rejects.toThrow(/whole-hour bucket/);
+      });
+      const refused = await withMeta({ day: "2026-10-08" }, async () => {
+        await expect(syncMetaAdsCampaignHourly(db, CREDENTIAL, { ...scope, since: "2026-10-08", until: "2026-10-09", requestBudget: 1, now }))
+          .rejects.toThrow(/after today/);
+        await expect(syncMetaAdsCampaignHourly(db, CREDENTIAL, { ...scope, since: "2026-09-28", until: "2026-10-08", requestBudget: 1, now }))
+          .rejects.toThrow(/1\.\.8 whole days/);
+      });
+      expect(refused.seen).toEqual([]);
+      expect(await db.query("select 1 from meta_ads_campaign_hourly_coverage where source_id=$1", [scope.sourceId])).toEqual([]);
     }, 120_000);
   });
 

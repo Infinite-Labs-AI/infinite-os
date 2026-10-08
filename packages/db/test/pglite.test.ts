@@ -88,9 +88,9 @@ describe("pglite migration + query path (real WASM Postgres)", () => {
     rmSync(dataDir, { recursive: true, force: true });
   });
 
-  it("applied ALL 84 migrations on first boot and is idempotent on a re-run", async () => {
-    expect(loadMigrations().length).toBe(84);
-    expect(firstRun).toHaveLength(84);
+  it("applied ALL 85 migrations on first boot and is idempotent on a re-run", async () => {
+    expect(loadMigrations().length).toBe(85);
+    expect(firstRun).toHaveLength(85);
     expect(firstRun).toContain("0001_control_plane.sql");
     expect(firstRun).toContain("0006_security_roles.sql");
     expect(firstRun).toContain("0036_chat_sessions_desktop_surface.sql");
@@ -145,13 +145,13 @@ describe("pglite migration + query path (real WASM Postgres)", () => {
     expect(secondRun).toEqual([]);
   });
 
-  it("created the schema_migrations ledger with all 84 rows", async () => {
+  it("created the schema_migrations ledger with all 85 rows", async () => {
     const ledger = await db.query<{ id: string }>(
       "select id from schema_migrations order by id"
     );
-    expect(ledger).toHaveLength(84);
+    expect(ledger).toHaveLength(85);
     expect(ledger[0]?.id).toBe("0001_control_plane.sql");
-    expect(ledger.at(-1)?.id).toBe("0084_meta_local_publishing.sql");
+    expect(ledger.at(-1)?.id).toBe("0085_meta_ads_daily_breakdowns_and_hourly.sql");
   });
 
   it("0083 leaves no X metric or view advertised, keeps the X tables, and re-applies as a no-op", async () => {
@@ -4545,6 +4545,58 @@ describe("0079 + 0080 + 0081 re-applied (the cloud engine's one-call execute_sql
       await pg.exec("insert into meta_ads_breakdown_coverage (workspace_id, source_id, ad_account_id, window_since, window_until, dimension, row_count) values ('w', 's', 'act_1', '2026-09-21', '2026-09-27', 'none', 1)");
       await expect(pg.exec("insert into meta_ads_breakdown_coverage (workspace_id, source_id, ad_account_id, window_since, window_until, dimension, row_count) values ('w', 's', 'act_1', '2026-09-21', '2026-09-27', 'platform_position', 1)"))
         .rejects.toThrow(/dimension_check/);
+    } finally {
+      await pg.close();
+    }
+  });
+});
+
+describe("0085 re-applied (the cloud engine's one-call execute_sql recipe can run a file twice)", () => {
+  it("creates the daily breakdown and hourly tables once, and their checks hold", async () => {
+    const { PGlite } = (await import("@electric-sql/pglite")) as unknown as {
+      PGlite: new () => { exec(sql: string): Promise<unknown>; query<T>(sql: string): Promise<{ rows: T[] }>; close(): Promise<void> };
+    };
+    const pg = new PGlite();
+    try {
+      await pg.exec(
+        "create table workspaces (id text primary key); create table sources (id text primary key);" +
+          "create role growth_os_worker; create role growth_os_tool_agent; create role growth_os_app; create role growth_os_read_api;"
+      );
+      const sql = loadMigrations().find((m) => m.id === "0085_meta_ads_daily_breakdowns_and_hourly.sql")?.sql ?? "";
+      expect(sql).not.toBe("");
+      await pg.exec(sql);
+      await pg.exec(sql);
+      const { rows } = await pg.query<{ table_name: string }>(
+        "select table_name from information_schema.tables where table_name like 'meta_ads_%' order by table_name"
+      );
+      expect(rows.map((row) => row.table_name)).toEqual([
+        "meta_ads_adset_breakdown_daily",
+        "meta_ads_adset_breakdown_daily_coverage",
+        "meta_ads_campaign_hourly",
+        "meta_ads_campaign_hourly_coverage"
+      ]);
+      await pg.exec("insert into workspaces values ('w'); insert into sources values ('s');");
+      const daily = (dimension: string, parent: string, value: string) =>
+        `insert into meta_ads_adset_breakdown_daily (workspace_id, source_id, ad_account_id, adset_id, occurred_on, dimension, parent_value, dimension_value) values ('w', 's', 'act_1', 'as_1', '2026-09-21', '${dimension}', '${parent}', '${value}')`;
+      await pg.exec(daily("device_platform", "", "mobile_app"));
+      await pg.exec(daily("platform_position", "facebook", "feed"));
+      await pg.exec(daily("platform_position", "instagram", "feed"));
+      // A position needs its platform; a single dimension must not carry one; the weekly 'none' total is not a daily dimension.
+      await expect(pg.exec(daily("platform_position", "", "feed"))).rejects.toThrow(/check/);
+      await expect(pg.exec(daily("device_platform", "facebook", "desktop"))).rejects.toThrow(/check/);
+      await expect(pg.exec(daily("none", "", "all"))).rejects.toThrow(/dimension_check/);
+      const hourly = (hour: number) =>
+        `insert into meta_ads_campaign_hourly (workspace_id, source_id, ad_account_id, campaign_id, occurred_on, hour) values ('w', 's', 'act_1', 'c_1', '2026-09-21', ${hour})`;
+      await pg.exec(hourly(0));
+      await pg.exec(hourly(23));
+      await expect(pg.exec(hourly(24))).rejects.toThrow(/hour_check/);
+      const receipt = (day: string, settled: boolean, hour: string) =>
+        `insert into meta_ads_campaign_hourly_coverage (workspace_id, source_id, ad_account_id, occurred_on, row_count, settled, observed_local_hour, timezone_name) values ('w', 's', 'act_1', '${day}', 0, ${settled}, ${hour}, 'Europe/London')`;
+      await pg.exec(receipt("2026-09-20", true, "null"));
+      await pg.exec(receipt("2026-09-21", false, "15"));
+      // An open day must say how far it was observed; a settled day must not.
+      await expect(pg.exec(receipt("2026-09-22", false, "null"))).rejects.toThrow(/check/);
+      await expect(pg.exec(receipt("2026-09-23", true, "4"))).rejects.toThrow(/check/);
     } finally {
       await pg.close();
     }
