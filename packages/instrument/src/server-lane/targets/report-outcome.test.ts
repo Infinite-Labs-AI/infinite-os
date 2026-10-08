@@ -40,6 +40,22 @@ const WIRE_IDS = (
   }
 ).outcomeWireIds.cases
 
+const META_MATCH = (
+  JSON.parse(readFileSync(resolve(here, "../../../contracts/server-lane-v1.vectors.json"), "utf8")) as {
+    metaMatch: {
+      email: { raw: string; normalized: string; sha256: string }
+      externalId: { raw: string; normalized: string; sha256: string }
+      name: { raw: string; normalized: string; sha256: string }
+      city: { raw: string; normalized: string; sha256: string }
+      digitCity: { raw: string; normalized: null }
+      usState: { raw: string; country: string; normalized: string; sha256: string }
+      zip: { raw: string; normalized: string; sha256: string }
+      country: { raw: string; normalized: string; sha256: string }
+      fullName: { raw: string; fn: string; ln: string }
+    }
+  }
+).metaMatch
+
 const BUILD = { siteSourceKey: "site_test", productionHosts: [VECTORS.host] }
 const tempRoots: string[] = []
 
@@ -72,6 +88,38 @@ describe.each(["ts", "js", "node"] as const)("reportInfiniteOutcome (%s helper),
     vi.restoreAllMocks()
     process.env = { ...originalEnv }
     while (tempRoots.length > 0) rmSync(tempRoots.pop()!, { recursive: true, force: true })
+  })
+
+  it("exports Meta's normalization/hash helpers from the generated outcome helper", async () => {
+    const outcome = (await helper(form)) as unknown as {
+      normalizeEmailForMeta: (value: string) => string | null
+      normalizeNameForMeta: (value: string) => string | null
+      normalizeCityForMeta: (value: string) => string | null
+      normalizeStateForMeta: (value: string, country?: string | null) => string | null
+      normalizeZipForMeta: (value: string) => string | null
+      normalizeCountryForMeta: (value: string) => string | null
+      hashEmailForMeta: (value: string) => string | null | Promise<string | null>
+      hashNameForMeta: (value: string) => string | null | Promise<string | null>
+      hashCityForMeta: (value: string) => string | null | Promise<string | null>
+      hashStateForMeta: (value: string, country?: string | null) => string | null | Promise<string | null>
+      hashZipForMeta: (value: string) => string | null | Promise<string | null>
+      hashCountryForMeta: (value: string) => string | null | Promise<string | null>
+      hashExternalId: (value: string) => string | null | Promise<string | null>
+    }
+    expect(outcome.normalizeEmailForMeta(META_MATCH.email.raw)).toBe(META_MATCH.email.normalized)
+    expect(await outcome.hashEmailForMeta(META_MATCH.email.raw)).toBe(META_MATCH.email.sha256)
+    expect(outcome.normalizeNameForMeta(META_MATCH.name.raw)).toBe(META_MATCH.name.normalized)
+    expect(await outcome.hashNameForMeta(META_MATCH.name.raw)).toBe(META_MATCH.name.sha256)
+    expect(outcome.normalizeCityForMeta(META_MATCH.city.raw)).toBe(META_MATCH.city.normalized)
+    expect(await outcome.hashCityForMeta(META_MATCH.city.raw)).toBe(META_MATCH.city.sha256)
+    expect(outcome.normalizeCityForMeta(META_MATCH.digitCity.raw)).toBeNull()
+    expect(outcome.normalizeStateForMeta(META_MATCH.usState.raw, META_MATCH.usState.country)).toBe(META_MATCH.usState.normalized)
+    expect(await outcome.hashStateForMeta(META_MATCH.usState.raw, META_MATCH.usState.country)).toBe(META_MATCH.usState.sha256)
+    expect(outcome.normalizeZipForMeta(META_MATCH.zip.raw)).toBe(META_MATCH.zip.normalized)
+    expect(await outcome.hashZipForMeta(META_MATCH.zip.raw)).toBe(META_MATCH.zip.sha256)
+    expect(outcome.normalizeCountryForMeta(META_MATCH.country.raw)).toBe(META_MATCH.country.normalized)
+    expect(await outcome.hashCountryForMeta(META_MATCH.country.raw)).toBe(META_MATCH.country.sha256)
+    expect(await outcome.hashExternalId(META_MATCH.externalId.raw)).toBe(META_MATCH.externalId.sha256)
   })
 
   it.each(RESPONSES)("$name → the vector's report; postInfiniteOutcome is its .accepted", async (vector) => {
@@ -205,7 +253,7 @@ describe.each(["ts", "js", "node"] as const)("reportInfiniteOutcome (%s helper),
     fetchMock = vi.fn(async () => new Response(RESPONSES[0]!.body, { status: 202 }))
     vi.stubGlobal("fetch", fetchMock)
     const outcome = (await helper(form)) as unknown as Helper & {
-      adMatchFromRequest: (request: unknown, hashed?: Record<string, string>) => Record<string, string>
+      adMatchFromRequest: (request: unknown, match?: Record<string, unknown>) => Promise<Record<string, string>>
       infiniteVisitKey: unknown
     }
     expect(typeof outcome.adMatchFromRequest).toBe("function")
@@ -217,14 +265,32 @@ describe.each(["ts", "js", "node"] as const)("reportInfiniteOutcome (%s helper),
         "x-forwarded-for": "203.0.113.9"
       }
     })
-    const adMatch = outcome.adMatchFromRequest(buyer, { em: "a".repeat(64) })
+    const adMatch = await outcome.adMatchFromRequest(buyer, {
+      trackingAllowed: true,
+      email: META_MATCH.email.raw,
+      externalId: META_MATCH.externalId.raw,
+      fullName: META_MATCH.fullName.raw,
+      city: META_MATCH.city.raw,
+      state: META_MATCH.usState.raw,
+      postcode: META_MATCH.zip.raw,
+      country: META_MATCH.country.raw,
+      ph: "never-send-phone"
+    })
     expect(adMatch).toEqual({
-      em: "a".repeat(64),
+      em: META_MATCH.email.sha256,
+      external_id: META_MATCH.externalId.sha256,
+      fn: META_MATCH.fullName.fn,
+      ln: META_MATCH.fullName.ln,
+      ct: META_MATCH.city.sha256,
+      st: META_MATCH.usState.sha256,
+      zp: META_MATCH.zip.sha256,
+      country: META_MATCH.country.sha256,
       fbc: "fb.1.1800000000000.NEW",
       fbp: "fb.1.1700000000000.123456",
       client_ip_address: "203.0.113.9",
       client_user_agent: "Mozilla/5.0 Buyer"
     })
+    await expect(outcome.adMatchFromRequest(buyer, { trackingAllowed: false, email: META_MATCH.email.raw })).resolves.toEqual({})
     await outcome.reportInfiniteOutcome({ type: "sign_up", eventId: "e7", path: "/signup", adMatch })
     await outcome.reportInfiniteOutcome({ type: "sign_up", eventId: "e8", path: "/signup" })
     const bodies = fetchMock.mock.calls.map((call) => JSON.parse(String((call as [string, RequestInit])[1].body)))

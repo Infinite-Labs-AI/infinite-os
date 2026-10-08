@@ -276,6 +276,21 @@ describe("contracts/server-lane-v1.vectors.json (shared with the receiving side)
     expect(parsed.adMatch.client_ip_address).toBe("203.0.113.9")
     expect(parsed.adMatch.client_user_agent).toBe(VECTORS.userAgent)
     expect(Object.keys(parsed.adMatch).every((key) => (AD_MATCH_KEYS as readonly string[]).includes(key))).toBe(true)
+    expect(AD_MATCH_KEYS).toEqual([
+      "em",
+      "fn",
+      "ln",
+      "ct",
+      "st",
+      "zp",
+      "country",
+      "fbc",
+      "fbp",
+      "external_id",
+      "client_ip_address",
+      "client_user_agent"
+    ])
+    expect(AD_MATCH_KEYS).not.toContain("ph")
     // A raw address never appears in a signed body — the whole point of hashing on the customer side.
     expect(vectors.outcomeAdMatchBody).not.toContain(vectors.outcomeEmail)
   })

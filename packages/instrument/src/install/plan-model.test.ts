@@ -125,7 +125,7 @@ describe("the plan model asks ONLY the three decisions", () => {
     const plan = buildPlanModel(input())
     const text = plan.lines.find((line) => line.id === "server_lane")?.text ?? ""
     expect(text).toContain(SERVER_LANE_PROBE_DISCLOSURE)
-    expect(text).toContain("properties.path")
+    expect(text).toContain("top-level path")
     expect(text).toContain("count every event")
     expect(SERVER_LANE_PROBE_DISCLOSURE).toMatch(/marks it as its own test, so it never counts in your Infinite numbers/)
     expect(SERVER_LANE_PROBE_DISCLOSURE).not.toMatch(/bot-flagged|TWO/)
@@ -528,13 +528,13 @@ it("describes the PR 393 server conversion contract and owner-approved Meta pixe
   const meta = plan.lines.find(line => line.id === "event_delivery:meta")?.text ?? ""
   const infinite = plan.lines.find(line => line.id === "event_delivery:infinite")?.text ?? ""
   expect(meta).toContain("checkout/purchase/lead")
-  expect(meta).toContain("properties.path")
+  expect(meta).toContain("top-level path")
   expect(meta).toContain("server first")
   expect(meta).toContain("returned metaEventId")
   expect(meta).toContain("owner approval")
   expect(meta).toContain("disablePushState")
   expect(infinite).toContain("count every event")
-  expect(infinite).toContain("properties.path")
+  expect(infinite).toContain("top-level path")
 })
 
 it("reports when the existing Meta pixel id comes from a host env var and names the selected Infinite pixel", () => {

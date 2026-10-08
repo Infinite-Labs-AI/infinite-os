@@ -247,8 +247,20 @@ const INFINITE_NON_DOCUMENT_PREFIXES = ${jsStringArray(nonDocumentPrefixes(input
 const INFINITE_REFERRER_HOST = /${REFERRER_HOST_PATTERN.source}/
 
 ${exported}interface InfiniteAdMatch {
-  /** sha256 hex of the lowercased, trimmed email — hashed by YOUR server, never by Infinite. */
+  /** sha256 hex of the Meta-normalized email — hashed by YOUR server, never by Infinite. */
   em?: string
+  /** sha256 hex of the Meta-normalized first name. */
+  fn?: string
+  /** sha256 hex of the Meta-normalized last name. */
+  ln?: string
+  /** sha256 hex of the Meta-normalized city. */
+  ct?: string
+  /** sha256 hex of the Meta-normalized state/region. */
+  st?: string
+  /** sha256 hex of the Meta-normalized postal code. */
+  zp?: string
+  /** sha256 hex of the Meta-normalized two-letter country. */
+  country?: string
   /** Meta's own _fbc first-party cookie on your domain, verbatim. */
   fbc?: string
   /** Meta's own _fbp first-party cookie on your domain, verbatim. */
@@ -603,8 +615,20 @@ export function outcomeHelperSource(
   const t = (typeText: string): string => (ts ? typeText : "")
   const importExample = `../lib/infinite-outcome${ts ? "" : `.${options.extension ?? "js"}`}`
   const interfaceBlock = String.raw`export interface InfiniteAdMatch {
-  /** sha256 hex of the lowercased, trimmed email. */
+  /** sha256 hex of the Meta-normalized email. */
   em?: string
+  /** sha256 hex of the Meta-normalized first name. */
+  fn?: string
+  /** sha256 hex of the Meta-normalized last name. */
+  ln?: string
+  /** sha256 hex of the Meta-normalized city. */
+  ct?: string
+  /** sha256 hex of the Meta-normalized state/region. */
+  st?: string
+  /** sha256 hex of the Meta-normalized postal code. */
+  zp?: string
+  /** sha256 hex of the Meta-normalized two-letter country. */
+  country?: string
   /** Meta's _fbc cookie, verbatim. */
   fbc?: string
   /** Meta's _fbp cookie, verbatim. */
@@ -615,6 +639,22 @@ export function outcomeHelperSource(
   client_ip_address?: string
   /** The BUYER'S BROWSER user agent, from the same request. Meta REQUIRES it for website events. */
   client_user_agent?: string
+}
+
+export interface InfiniteAdMatchInput {
+  /** Explicit consent gate: false returns no match block at all. */
+  trackingAllowed?: boolean
+  email?: string | null
+  externalId?: string | number | null
+  /** First token becomes fn; last token becomes ln. A single token sets fn only. */
+  fullName?: string | null
+  city?: string | null
+  state?: string | null
+  postcode?: string | null
+  country?: string | null
+  /** Back-compat for already-hashed integrations; new code should pass raw fields above. */
+  em?: string
+  external_id?: string
 }
 
 export interface InfiniteVisitKeyInputs {
@@ -652,23 +692,24 @@ export interface InfiniteOutcomeInput {
    * in Infinite -> Site -> Settings and an outcome carrying this is forwarded to Meta's Conversions
    * API at ingest, then the block is DISCARDED: Infinite never stores it.
    *
-   * YOUR server hashes; Infinite never does. em / external_id are sha256 HEX, so a raw email never
-   * leaves this process:
-   *
-   *   import { createHash } from "node:crypto"
-   *   const em = createHash("sha256").update(email.trim().toLowerCase()).digest("hex")
+   * YOUR server hashes; Infinite never does. adMatchFromRequest hashes email, external id, name,
+   * city, state, postcode and country in-process, using Meta's exact normalization rules. Raw
+   * email/name/address never leave your server, are never logged, and are never stored by Infinite.
+   * Phone is never sent in any form.
    *
    * fbc / fbp are Meta's own first-party cookies on your domain (the _fbc / _fbp values), and
    * client_ip_address / client_user_agent are the BUYER'S BROWSER's, from YOUR inbound request --
-   * adMatchFromRequest(request, { em }) fills all four for you. They cannot come from the call to
+   * adMatchFromRequest(request, { trackingAllowed: pageAllowedAdMatch, email, externalId, fullName,
+   * city, state, postcode, country }) fills the match block for you. They cannot come from the call to
    * Infinite: that call is server-to-server, so its ip is your host's egress address and its user
    * agent is "node". Meta REQUIRES client_user_agent for a website event; without it the relay
    * declines to send rather than post something Meta can never match.
    * https://developers.facebook.com/docs/marketing-api/conversions-api/parameters/fbp-and-fbc
    *
-   * Never send a raw email here: a value that is not a 64-character hex digest is rejected with a
-   * 400 rather than forwarded. A malformed cookie, ip or user agent is DROPPED instead, so a
-   * visitor who tampered with their own _fbc can never delete your conversion.
+   * Never hand-build a digest unless you are preserving an older integration: a customer-data value
+   * that is not a 64-character lowercase sha256 hex digest is rejected with a 400 rather than
+   * forwarded. A malformed cookie, ip or user agent is DROPPED instead, so a visitor who tampered
+   * with their own _fbc can never delete your conversion.
    */
   adMatch?: InfiniteAdMatch
   /**
@@ -732,9 +773,10 @@ export interface InfiniteOutcomeReport {
       "//",
       `//   const { metaEventId, metaEventName } = await ${OUTCOME_REPORT_EXPORT}({ type: "sign_up", eventId: user.id, path: "/signup", visitKeyInputs: req })  // sent as "sign_up:<id>"`,
       "//",
-      "// Running Meta ads without PostHog? Add adMatch: adMatchFromRequest(request, { em }) and turn",
+      "// Running Meta ads without PostHog? Add adMatch: await adMatchFromRequest(request, { trackingAllowed: pageAllowedAdMatch, email, externalId, fullName, city, state, postcode, country }) and turn",
       "// the relay on in Infinite -> Site -> Settings; the outcome is forwarded to Meta's Conversions",
-      "// API and the match data is discarded, never stored. You hash the email, Infinite never sees it.",
+      "// API and the match data is discarded, never stored. The helper hashes the customer fields;",
+      "// Infinite never sees raw email, name or address, and phone is never sent.",
       "//",
       `// Secrets come from the environment only: ${SERVER_LANE_SECRET_ENV} + ${SERVER_LANE_SOURCE_KEY_ENV}.`
     ],
@@ -765,6 +807,118 @@ async function infiniteHmacHex(secret${t(": string")}, message${t(": string")})$
   return Array.from(new Uint8Array(signature))
     .map((byte) => byte.toString(16).padStart(2, "0"))
     .join("")
+}
+
+export async function sha256Hex(value${t(": string")})${t(": Promise<string>")} {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value))
+  return Array.from(new Uint8Array(digest))
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("")
+}
+
+function splitEmail(value${t(": string")})${t(": { local: string; domain: string } | null")} {
+  const at = value.lastIndexOf("@")
+  if (at <= 0 || at === value.length - 1) return null
+  return { local: value.slice(0, at), domain: value.slice(at + 1) }
+}
+
+/** Meta's rule: trim + lowercase. Null when the result is not shaped like an email. */
+export function normalizeEmailForMeta(email${t(": string")})${t(": string | null")} {
+  const normalized = email.trim().toLowerCase()
+  return splitEmail(normalized) ? normalized : null
+}
+
+export async function hashEmailForMeta(email${t(": string")})${t(": Promise<string | null>")} {
+  const normalized = normalizeEmailForMeta(email)
+  return normalized ? sha256Hex(normalized) : null
+}
+
+/** Meta \`external_id\` — hashing is recommended; the advertiser id keeps its case. */
+export async function hashExternalId(id${t(": string")})${t(": Promise<string | null>")} {
+  const trimmed = id.trim()
+  return trimmed ? sha256Hex(trimmed) : null
+}
+
+/** Meta's \`zp\`: lowercase, whitespace and hyphens removed; US ZIP+4 is cut to five. */
+export function normalizeZipForMeta(zip${t(": string")})${t(": string | null")} {
+  const compact = zip.replace(/[\s-]+/g, "").toLowerCase()
+  if (!compact) return null
+  if (/^\d{9}$/.test(compact)) return compact.slice(0, 5)
+  return compact.slice(0, 32)
+}
+
+/** Meta's \`country\`: ISO 3166-1 alpha-2, lowercased. */
+export function normalizeCountryForMeta(country${t(": string")})${t(": string | null")} {
+  const normalized = country.trim().toLowerCase()
+  return /^[a-z]{2}$/.test(normalized) ? normalized : null
+}
+
+const META_WHITESPACE_AND_PUNCTUATION = /[!"#$%&'()*+,\-./:;<=>?@ [\]^_\`{|}~\s]+/g
+const META_NON_LATIN_ALPHANUMERIC = /[^a-zA-Z0-9]+/g
+
+/** Meta's \`fn\` / \`ln\`: lowercase, no punctuation or whitespace. */
+export function normalizeNameForMeta(name${t(": string")})${t(": string | null")} {
+  const normalized = name.toLowerCase().replace(META_WHITESPACE_AND_PUNCTUATION, "")
+  return normalized ? normalized.slice(0, 64) : null
+}
+
+/** Meta's \`ct\`: lowercase, no non-latin alphanumerics, and must start with a latin letter. */
+export function normalizeCityForMeta(city${t(": string")})${t(": string | null")} {
+  const normalized = city.toLowerCase().replace(META_NON_LATIN_ALPHANUMERIC, "")
+  return /^[a-z]/.test(normalized) ? normalized.slice(0, 64) : null
+}
+
+const US_STATE_CODES = {
+  alabama: "al", alaska: "ak", arizona: "az", arkansas: "ar", california: "ca", colorado: "co",
+  connecticut: "ct", delaware: "de", florida: "fl", georgia: "ga", hawaii: "hi", idaho: "id",
+  illinois: "il", indiana: "in", iowa: "ia", kansas: "ks", kentucky: "ky", louisiana: "la",
+  maine: "me", maryland: "md", massachusetts: "ma", michigan: "mi", minnesota: "mn",
+  mississippi: "ms", missouri: "mo", montana: "mt", nebraska: "ne", nevada: "nv",
+  newhampshire: "nh", newjersey: "nj", newmexico: "nm", newyork: "ny", northcarolina: "nc",
+  northdakota: "nd", ohio: "oh", oklahoma: "ok", oregon: "or", pennsylvania: "pa",
+  rhodeisland: "ri", southcarolina: "sc", southdakota: "sd", tennessee: "tn", texas: "tx",
+  utah: "ut", vermont: "vt", virginia: "va", washington: "wa", westvirginia: "wv",
+  wisconsin: "wi", wyoming: "wy",
+  districtofcolumbia: "dc", washingtondc: "dc",
+  puertorico: "pr", guam: "gu", americansamoa: "as", usvirginislands: "vi", virginislands: "vi",
+  northernmarianaislands: "mp", unitedstatesminoroutlyingislands: "um",
+  armedforcesamericas: "aa", armedforceseurope: "ae", armedforcespacific: "ap"
+}
+const US_STATE_CODE_SET = new Set(Object.values(US_STATE_CODES))
+
+export function normalizeStateForMeta(state${t(": string")}, country${t("?: string | null")})${t(": string | null")} {
+  const normalized = state.toLowerCase().replace(META_NON_LATIN_ALPHANUMERIC, "")
+  if (!normalized) return null
+  if (country && normalizeCountryForMeta(country) === "us") {
+    if (US_STATE_CODE_SET.has(normalized)) return normalized
+    return US_STATE_CODES[normalized] ?? null
+  }
+  return normalized.slice(0, 64)
+}
+
+export async function hashZipForMeta(zip${t(": string")})${t(": Promise<string | null>")} {
+  const normalized = normalizeZipForMeta(zip)
+  return normalized ? sha256Hex(normalized) : null
+}
+
+export async function hashCountryForMeta(country${t(": string")})${t(": Promise<string | null>")} {
+  const normalized = normalizeCountryForMeta(country)
+  return normalized ? sha256Hex(normalized) : null
+}
+
+export async function hashNameForMeta(name${t(": string")})${t(": Promise<string | null>")} {
+  const normalized = normalizeNameForMeta(name)
+  return normalized ? sha256Hex(normalized) : null
+}
+
+export async function hashCityForMeta(city${t(": string")})${t(": Promise<string | null>")} {
+  const normalized = normalizeCityForMeta(city)
+  return normalized ? sha256Hex(normalized) : null
+}
+
+export async function hashStateForMeta(state${t(": string")}, country${t("?: string | null")})${t(": Promise<string | null>")} {
+  const normalized = normalizeStateForMeta(state, country)
+  return normalized ? sha256Hex(normalized) : null
 }
 
 /**
@@ -885,6 +1039,25 @@ function infiniteFbp(header${t(": string")})${t(": string | undefined")} {
   return first && INFINITE_FB_COOKIE.test(first) ? first : undefined
 }
 
+function infiniteNonEmptyString(value${t(": unknown")})${t(": string | null")} {
+  if (typeof value !== "string") return null
+  const trimmed = value.trim()
+  return trimmed ? trimmed : null
+}
+
+const INFINITE_SHA256_HEX = /^[a-f0-9]{64}$/i
+
+async function infiniteAddDigest(
+  output${t(": InfiniteAdMatch")},
+  key${t(": keyof InfiniteAdMatch")},
+  value${t(": string | null | undefined")},
+  hasher${t(": (value: string) => Promise<string | null>")}
+)${t(": Promise<void>")} {
+  if (!value) return
+  const digest = await hasher(value)
+  if (digest) output[key] = digest
+}
+
 /**
  * Build an adMatch block from the BUYER'S OWN request — the browser request your route is handling.
  *
@@ -896,18 +1069,15 @@ function infiniteFbp(header${t(": string")})${t(": string | undefined")} {
  * never match.
  *
  * PASS THE BROWSER'S REQUEST. In a webhook (Stripe, for example) the incoming request is the
- * PROVIDER'S, not your buyer's — capture the block during the checkout request instead and carry it
- * to the webhook, or report the outcome from the browser-facing route.
+ * PROVIDER'S, not your buyer's — capture the cookies/ip/UA during the checkout request and then add
+ * the confirmed buyer email/name/address from the provider object in the webhook. Never put raw
+ * email, name or address in Stripe metadata and never log them.
  *
- * You supply em / external_id yourself, already hashed. em is trimmed AND lowercased; external_id is
- * trimmed ONLY (an id keeps its case, exactly as the browser pixel's matching helper hashes it):
- *   adMatchFromRequest(request, {
- *     em: createHash("sha256").update(email.trim().toLowerCase()).digest("hex"),
- *     // only when the buyer has an account id; String() so a numeric id cannot throw
- *     ...(user?.id != null ? { external_id: createHash("sha256").update(String(user.id).trim()).digest("hex") } : {})
- *   })
+ * You supply raw customer fields only after the page explicitly signalled consent. The helper
+ * normalizes and hashes them for Meta; phone is deliberately ignored even if a caller passes it.
  */
-export function adMatchFromRequest(request${t(": InfiniteVisitKeyRequest")}, hashed${t(": { em?: string; external_id?: string }")} = {})${t(": InfiniteAdMatch")} {
+export async function adMatchFromRequest(request${t(": InfiniteVisitKeyRequest")}, match${t(": InfiniteAdMatchInput")} = {})${t(": Promise<InfiniteAdMatch>")} {
+  if (match.trackingAllowed !== true) return {}
   // A WHATWG Headers (edge, newer Vercel) OR a plain object (req.headers on a Vercel Node function,
   // Express, Node http): both are read correctly.
   const headers = request.headers
@@ -916,14 +1086,38 @@ export function adMatchFromRequest(request${t(": InfiniteVisitKeyRequest")}, has
   const userAgent = infiniteHeaderValue(headers, "user-agent")
   const fbc = infiniteNewestFbc(cookie)
   const fbp = infiniteFbp(cookie)
-  return {
-    ...(hashed.em ? { em: hashed.em } : {}),
-    ...(hashed.external_id ? { external_id: hashed.external_id } : {}),
+  const output${t(": InfiniteAdMatch")} = {
     ...(fbc ? { fbc } : {}),
     ...(fbp ? { fbp } : {}),
     ...(clientIp ? { client_ip_address: clientIp } : {}),
     ...(userAgent ? { client_user_agent: userAgent } : {})
   }
+
+  await infiniteAddDigest(output, "em", infiniteNonEmptyString(match.email), hashEmailForMeta)
+  if (!output.em && typeof match.em === "string" && INFINITE_SHA256_HEX.test(match.em)) {
+    output.em = match.em.toLowerCase()
+  }
+
+  const externalId = match.externalId == null ? null : String(match.externalId)
+  await infiniteAddDigest(output, "external_id", infiniteNonEmptyString(externalId), hashExternalId)
+  if (!output.external_id && typeof match.external_id === "string" && INFINITE_SHA256_HEX.test(match.external_id)) {
+    output.external_id = match.external_id.toLowerCase()
+  }
+
+  const fullName = infiniteNonEmptyString(match.fullName)
+  if (fullName) {
+    const tokens = fullName.split(/\s+/).filter(Boolean)
+    if (tokens[0]) await infiniteAddDigest(output, "fn", tokens[0], hashNameForMeta)
+    if (tokens.length > 1) await infiniteAddDigest(output, "ln", tokens[tokens.length - 1], hashNameForMeta)
+  }
+
+  const country = infiniteNonEmptyString(match.country)
+  await infiniteAddDigest(output, "ct", infiniteNonEmptyString(match.city), hashCityForMeta)
+  await infiniteAddDigest(output, "st", infiniteNonEmptyString(match.state), (state) => hashStateForMeta(state, country))
+  await infiniteAddDigest(output, "zp", infiniteNonEmptyString(match.postcode), hashZipForMeta)
+  await infiniteAddDigest(output, "country", country, hashCountryForMeta)
+
+  return output
 }
 
 const INFINITE_NO_REPORT${t(": InfiniteOutcomeReport")} = { accepted: false, duplicate: false, metaEventId: null, metaEventName: null, status: null }

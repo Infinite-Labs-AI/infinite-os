@@ -323,6 +323,115 @@ function infiniteVisitKeyInputsOf(input) {
   return input
 }
 
+export function sha256Hex(value) {
+  return createHash("sha256").update(value, "utf8").digest("hex")
+}
+
+function splitEmail(value) {
+  const at = value.lastIndexOf("@")
+  if (at <= 0 || at === value.length - 1) return null
+  return { local: value.slice(0, at), domain: value.slice(at + 1) }
+}
+
+/** Meta's rule: trim + lowercase. Null when the result is not shaped like an email. */
+export function normalizeEmailForMeta(email) {
+  const normalized = email.trim().toLowerCase()
+  return splitEmail(normalized) ? normalized : null
+}
+
+export function hashEmailForMeta(email) {
+  const normalized = normalizeEmailForMeta(email)
+  return normalized ? sha256Hex(normalized) : null
+}
+
+/** Meta \`external_id\` — hashing is recommended; the advertiser id keeps its case. */
+export function hashExternalId(id) {
+  const trimmed = id.trim()
+  return trimmed ? sha256Hex(trimmed) : null
+}
+
+/** Meta's \`zp\`: lowercase, whitespace and hyphens removed; US ZIP+4 is cut to five. */
+export function normalizeZipForMeta(zip) {
+  const compact = zip.replace(/[\s-]+/g, "").toLowerCase()
+  if (!compact) return null
+  if (/^\d{9}$/.test(compact)) return compact.slice(0, 5)
+  return compact.slice(0, 32)
+}
+
+/** Meta's \`country\`: ISO 3166-1 alpha-2, lowercased. */
+export function normalizeCountryForMeta(country) {
+  const normalized = country.trim().toLowerCase()
+  return /^[a-z]{2}$/.test(normalized) ? normalized : null
+}
+
+const META_WHITESPACE_AND_PUNCTUATION = /[!"#$%&'()*+,\-./:;<=>?@ [\]^_\`{|}~\s]+/g
+const META_NON_LATIN_ALPHANUMERIC = /[^a-zA-Z0-9]+/g
+
+/** Meta's \`fn\` / \`ln\`: lowercase, no punctuation or whitespace. */
+export function normalizeNameForMeta(name) {
+  const normalized = name.toLowerCase().replace(META_WHITESPACE_AND_PUNCTUATION, "")
+  return normalized ? normalized.slice(0, 64) : null
+}
+
+/** Meta's \`ct\`: lowercase, no non-latin alphanumerics, and must start with a latin letter. */
+export function normalizeCityForMeta(city) {
+  const normalized = city.toLowerCase().replace(META_NON_LATIN_ALPHANUMERIC, "")
+  return /^[a-z]/.test(normalized) ? normalized.slice(0, 64) : null
+}
+
+const US_STATE_CODES = {
+  alabama: "al", alaska: "ak", arizona: "az", arkansas: "ar", california: "ca", colorado: "co",
+  connecticut: "ct", delaware: "de", florida: "fl", georgia: "ga", hawaii: "hi", idaho: "id",
+  illinois: "il", indiana: "in", iowa: "ia", kansas: "ks", kentucky: "ky", louisiana: "la",
+  maine: "me", maryland: "md", massachusetts: "ma", michigan: "mi", minnesota: "mn",
+  mississippi: "ms", missouri: "mo", montana: "mt", nebraska: "ne", nevada: "nv",
+  newhampshire: "nh", newjersey: "nj", newmexico: "nm", newyork: "ny", northcarolina: "nc",
+  northdakota: "nd", ohio: "oh", oklahoma: "ok", oregon: "or", pennsylvania: "pa",
+  rhodeisland: "ri", southcarolina: "sc", southdakota: "sd", tennessee: "tn", texas: "tx",
+  utah: "ut", vermont: "vt", virginia: "va", washington: "wa", westvirginia: "wv",
+  wisconsin: "wi", wyoming: "wy",
+  districtofcolumbia: "dc", washingtondc: "dc",
+  puertorico: "pr", guam: "gu", americansamoa: "as", usvirginislands: "vi", virginislands: "vi",
+  northernmarianaislands: "mp", unitedstatesminoroutlyingislands: "um",
+  armedforcesamericas: "aa", armedforceseurope: "ae", armedforcespacific: "ap"
+}
+const US_STATE_CODE_SET = new Set(Object.values(US_STATE_CODES))
+
+export function normalizeStateForMeta(state, country) {
+  const normalized = state.toLowerCase().replace(META_NON_LATIN_ALPHANUMERIC, "")
+  if (!normalized) return null
+  if (country && normalizeCountryForMeta(country) === "us") {
+    if (US_STATE_CODE_SET.has(normalized)) return normalized
+    return US_STATE_CODES[normalized] ?? null
+  }
+  return normalized.slice(0, 64)
+}
+
+export function hashZipForMeta(zip) {
+  const normalized = normalizeZipForMeta(zip)
+  return normalized ? sha256Hex(normalized) : null
+}
+
+export function hashCountryForMeta(country) {
+  const normalized = normalizeCountryForMeta(country)
+  return normalized ? sha256Hex(normalized) : null
+}
+
+export function hashNameForMeta(name) {
+  const normalized = normalizeNameForMeta(name)
+  return normalized ? sha256Hex(normalized) : null
+}
+
+export function hashCityForMeta(city) {
+  const normalized = normalizeCityForMeta(city)
+  return normalized ? sha256Hex(normalized) : null
+}
+
+export function hashStateForMeta(state, country) {
+  const normalized = normalizeStateForMeta(state, country)
+  return normalized ? sha256Hex(normalized) : null
+}
+
 /**
  * Sign and POST one outcome. Resolves true when Infinite acknowledged it; never throws, so a failed
  * report can never fail the checkout, sign-up, or download it describes.
@@ -332,7 +441,8 @@ function infiniteVisitKeyInputsOf(input) {
  * eventId       stable per outcome (order id, signup id) so retries dedupe
  * accountKey    opaque account or order id; Infinite hashes it at rest
  * visitKeyInputs a Node/WHATWG request OR { clientIp, userAgent }, for same-lane attribution
- * adMatch       adMatchFromRequest(buyerRequest, { em }) — what lets Infinite send the Meta server event
+ * adMatch       await adMatchFromRequest(buyerRequest, { trackingAllowed: pageAllowedAdMatch, email, externalId, fullName, city, state, postcode, country })
+ *               — hashed Meta match data, never a phone
  */
 const INFINITE_CAMPAIGN_PROVENANCE = ["tab", "cookie", "none"]
 const INFINITE_BROWSER_CONTEXT = ["facebook_app", "instagram_app", "other_in_app", "browser", "unknown"]
@@ -411,28 +521,65 @@ function infiniteFbp(header) {
   return first && INFINITE_FB_COOKIE.test(first) ? first : undefined
 }
 
+function infiniteNonEmptyString(value) {
+  if (typeof value !== "string") return null
+  const trimmed = value.trim()
+  return trimmed ? trimmed : null
+}
+
+const INFINITE_SHA256_HEX = /^[a-f0-9]{64}$/i
+
+function infiniteAddDigest(output, key, value, hasher) {
+  if (!value) return
+  const digest = hasher(value)
+  if (digest) output[key] = digest
+}
+
 /**
  * Build an adMatch block from the BUYER'S OWN request (a Node req with a plain-object .headers, or a
  * WHATWG Request) — the same block the edge helper builds. In a webhook the request is the PROVIDER'S:
- * build it at checkout, store it with the order, and pass it from the webhook. You supply em /
- * external_id yourself, already hashed (em trimmed AND lowercased; external_id trimmed only). Never a
- * phone number.
+ * capture the cookies/ip/UA during checkout after explicit page consent, then add the confirmed email/name/address from the
+ * payment provider object in the webhook. Never put raw email, name or address in Stripe metadata,
+ * never log them, and never send a phone.
  */
-export function adMatchFromRequest(request, hashed = {}) {
+export async function adMatchFromRequest(request, match = {}) {
+  if (match.trackingAllowed !== true) return {}
   const headers = request.headers
   const cookie = infiniteHeaderValue(headers, "cookie")
   const clientIp = infiniteClientIpFrom(headers)
   const userAgent = infiniteHeaderValue(headers, "user-agent")
   const fbc = infiniteNewestFbc(cookie)
   const fbp = infiniteFbp(cookie)
-  return {
-    ...(hashed.em ? { em: hashed.em } : {}),
-    ...(hashed.external_id ? { external_id: hashed.external_id } : {}),
+  const output = {
     ...(fbc ? { fbc } : {}),
     ...(fbp ? { fbp } : {}),
     ...(clientIp ? { client_ip_address: clientIp } : {}),
     ...(userAgent ? { client_user_agent: userAgent } : {})
   }
+
+  infiniteAddDigest(output, "em", infiniteNonEmptyString(match.email), hashEmailForMeta)
+  if (!output.em && typeof match.em === "string" && INFINITE_SHA256_HEX.test(match.em)) output.em = match.em.toLowerCase()
+
+  const externalId = match.externalId == null ? null : String(match.externalId)
+  infiniteAddDigest(output, "external_id", infiniteNonEmptyString(externalId), hashExternalId)
+  if (!output.external_id && typeof match.external_id === "string" && INFINITE_SHA256_HEX.test(match.external_id)) {
+    output.external_id = match.external_id.toLowerCase()
+  }
+
+  const fullName = infiniteNonEmptyString(match.fullName)
+  if (fullName) {
+    const tokens = fullName.split(/\s+/).filter(Boolean)
+    if (tokens[0]) infiniteAddDigest(output, "fn", tokens[0], hashNameForMeta)
+    if (tokens.length > 1) infiniteAddDigest(output, "ln", tokens[tokens.length - 1], hashNameForMeta)
+  }
+
+  const country = infiniteNonEmptyString(match.country)
+  infiniteAddDigest(output, "ct", infiniteNonEmptyString(match.city), hashCityForMeta)
+  infiniteAddDigest(output, "st", infiniteNonEmptyString(match.state), (state) => hashStateForMeta(state, country))
+  infiniteAddDigest(output, "zp", infiniteNonEmptyString(match.postcode), hashZipForMeta)
+  infiniteAddDigest(output, "country", country, hashCountryForMeta)
+
+  return output
 }
 
 // Checkout code computes the visit key from the buyer's request and carries it to the webhook.

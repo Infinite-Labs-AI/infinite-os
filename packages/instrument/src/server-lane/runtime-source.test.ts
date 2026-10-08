@@ -298,6 +298,14 @@ describe("generated sources (static)", () => {
     expect(source).toContain('process.env.INFINITE_SITE_SOURCE_KEY || ""')
   })
 
+  it("the generated ad match contract includes every relay-supported Meta match field except phone", () => {
+    const source = buildServerLaneModuleSource()
+    expect(source).toContain(
+      "adMatch?: { em?: string; external_id?: string; fn?: string; ln?: string; ct?: string; st?: string; zp?: string; country?: string; fbc?: string; fbp?: string; client_ip_address?: string; client_user_agent?: string }"
+    )
+    expect(source).not.toContain("ph?:")
+  })
+
   it("the created middleware uses the standard document matcher inside the fence", () => {
     const source = buildCreatedMiddlewareSource({ moduleImportPath: "./lib/infinite-server-lane" })
     expect(source).toContain(SERVER_LANE_FENCE_START)

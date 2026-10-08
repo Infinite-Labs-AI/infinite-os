@@ -44,6 +44,53 @@
   },
   "outcomeExternalIdMixedCase": "  Acct_991_MixedCase \n",
   "outcomeExternalIdMixedCaseHash": "44076829909a24ae9bc8e44643c31d149866ebd99ac80ddc78f1a49e5cfe8485",
+  "metaMatch": {
+    "email": {
+      "raw": " John@Example.COM ",
+      "normalized": "john@example.com",
+      "sha256": "855f96e983f1f8e8be944692b6f719fd54329826cb62e98015efee8e2e071dd4"
+    },
+    "externalId": {
+      "raw": "  Acct_991_MixedCase \n",
+      "normalized": "Acct_991_MixedCase",
+      "sha256": "44076829909a24ae9bc8e44643c31d149866ebd99ac80ddc78f1a49e5cfe8485"
+    },
+    "name": {
+      "raw": "Mary-Jane",
+      "normalized": "maryjane",
+      "sha256": "f08f448a5e7a9dc3619bb7c129f6a7d5fc6af002cea17ad71dfdc1c68f4d4e0e"
+    },
+    "city": {
+      "raw": "New York",
+      "normalized": "newyork",
+      "sha256": "350c754ba4d38897693aa077ef43072a859d23f613443133fecbbd90a3512ca5"
+    },
+    "digitCity": {
+      "raw": "2nd City",
+      "normalized": null
+    },
+    "usState": {
+      "raw": "California",
+      "country": "US",
+      "normalized": "ca",
+      "sha256": "6959097001d10501ac7d54c0bdb8db61420f658f2922cc26e46d536119a31126"
+    },
+    "zip": {
+      "raw": "94107-1234",
+      "normalized": "94107",
+      "sha256": "c884a209ebe08750a7d13db63bd02233b375bd79786cbe329ab11586cc35dead"
+    },
+    "country": {
+      "raw": "US",
+      "normalized": "us",
+      "sha256": "79adb2a2fce5c6ba215fe5f27f532d4e7edbac4b6a5e09e1ef3a08084a904621"
+    },
+    "fullName": {
+      "raw": "Mary-Jane Watson",
+      "fn": "f08f448a5e7a9dc3619bb7c129f6a7d5fc6af002cea17ad71dfdc1c68f4d4e0e",
+      "ln": "3f8d40ad6a1d0038b8c334303fe06e70df25a1b78220855f6acc3aec951ffb3b"
+    }
+  },
   "outcomeResponses": {
     "$comment": "The 202 the server-events route answers (build plan section 3j.1), and what reportInfiniteOutcome resolves for each. metaEventId is non-null ONLY for an accepted, first-time outcome the relay will send AND a named Meta event; a duplicate, a relay that is off, or an unreadable reply resolves null, so the browser never mirrors.",
     "cases": [

@@ -158,10 +158,11 @@ export interface DocumentRequestEventInput {
  * needs none of it — PostHog ships its own Meta destination, and two senders for one conversion is
  * a double count.
  *
- * YOUR SERVER HASHES; INFINITE NEVER DOES. `em` and `external_id` are sha256 hex you compute
- * (`hashInfiniteEmail` below is exactly that recipe), so a raw email never leaves your process. A
- * value that is not a 64-character hex digest is REJECTED at ingest with a 400 — deliberately, so
- * an integration mistake surfaces now rather than as a mysteriously empty match rate later.
+ * YOUR SERVER HASHES; INFINITE NEVER DOES. `em`, `external_id`, name and address fields are sha256
+ * hex you compute (`hashInfiniteEmail` below is exactly the email recipe), so raw email, name and
+ * address never leave your process. Phone is never accepted. A value that is not a 64-character hex
+ * digest is REJECTED at ingest with a 400 — deliberately, so an integration mistake surfaces now
+ * rather than as a mysteriously empty match rate later.
  *
  * `fbc` and `fbp` are Meta's OWN first-party cookies on your domain, readable by your server:
  * https://developers.facebook.com/docs/marketing-api/conversions-api/parameters/fbp-and-fbc
@@ -182,8 +183,20 @@ export interface DocumentRequestEventInput {
  * The block rides INSIDE the signed body, so nobody without your secret can inject one.
  */
 export interface InfiniteAdMatch {
-  /** sha256 hex of the lowercased, trimmed email. Use `hashInfiniteEmail`. */
+  /** sha256 hex of the Meta-normalized email. Use the generated helper's `hashEmailForMeta`. */
   em?: string
+  /** sha256 hex of the Meta-normalized first name. Never send the raw name. */
+  fn?: string
+  /** sha256 hex of the Meta-normalized last name. Never send the raw name. */
+  ln?: string
+  /** sha256 hex of the Meta-normalized city. Never send the raw address. */
+  ct?: string
+  /** sha256 hex of the Meta-normalized state/region. Never send the raw address. */
+  st?: string
+  /** sha256 hex of the Meta-normalized postal/ZIP code. Never send the raw address. */
+  zp?: string
+  /** sha256 hex of the Meta-normalized country. Never send the raw address. */
+  country?: string
   /** Meta's `_fbc` cookie, verbatim. */
   fbc?: string
   /** Meta's `_fbp` cookie, verbatim. */
@@ -203,6 +216,12 @@ export interface InfiniteAdMatch {
 /** The only keys an adMatch block may carry — anything else is rejected as a malformed envelope. */
 export const AD_MATCH_KEYS = [
   "em",
+  "fn",
+  "ln",
+  "ct",
+  "st",
+  "zp",
+  "country",
   "fbc",
   "fbp",
   "external_id",

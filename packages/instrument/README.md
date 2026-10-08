@@ -572,23 +572,39 @@ it is ingested and **discards the match data**: it is never stored, never writte
 never logged. Neither half works alone — no block, nothing to forward; no toggle, nothing is sent.
 
 ```ts
-import { createHash } from "node:crypto"
 import { adMatchFromRequest, infiniteVisitKey, postInfiniteOutcome } from "../lib/infinite-outcome"
 
 // 1. At CHECKOUT, from the BUYER'S browser request: their _fbc/_fbp cookies, ip and user agent,
-//    saved together (one device) with the checkout. Your later call to Infinite is server-to-server
-//    and carries none of them.
-const adMatch = adMatchFromRequest(request, {
-  em: createHash("sha256").update(email.trim().toLowerCase()).digest("hex"),
-  // Only when the buyer has an account id (a guest has none). Trimmed only: never lowercase an id.
-  ...(user?.id != null ? { external_id: createHash("sha256").update(String(user.id).trim()).digest("hex") } : {})
-})
-const infinite_visit_key = await infiniteVisitKey({ clientIp: adMatch.client_ip_address, userAgent: adMatch.client_user_agent })
-const session = await stripe.checkout.sessions.create({ /* … */ metadata: { infinite_visit_key } })
-await saveCheckoutAdMatch(session.id, adMatch)   // e.g. a column on your order row
+//    saved together (one device) with the checkout. Do not put email, name, address or phone in
+//    Stripe metadata; hash confirmed customer fields later, in the webhook.
+const infiniteConfigured = Boolean(process.env.INFINITE_SITE_SOURCE_KEY && process.env.INFINITE_SERVER_EVENT_SECRET)
+const pageAllowedAdMatch = body.adMatch === true  // explicitly signalled consent; never inferred from cookies
+const adMatch = infiniteConfigured && pageAllowedAdMatch ? await adMatchFromRequest(request, { trackingAllowed: true }) : null
+const infinite_visit_key = adMatch ? await infiniteVisitKey({ clientIp: adMatch.client_ip_address, userAgent: adMatch.client_user_agent }) : undefined
+const session = await stripe.checkout.sessions.create({ /* … */ metadata: { ...(infinite_visit_key ? { infinite_visit_key } : {}) } })
+if (adMatch) await saveCheckoutAdMatch(session.id, adMatch)   // e.g. a column on your order row
 
-// 2. In the PAYMENT WEBHOOK, once the payment is real. Report the purchase HERE and only here
-//    (not also from a checkout-status route), and never with a browser fbq('track', 'Purchase').
+// 2. In the PAYMENT WEBHOOK, once the payment is real. Read confirmed buyer fields from Stripe
+//    and hash them in-process; never store them and never log them.
+const address = session.customer_details.address ?? session.collected_information?.shipping_details?.address ?? session.shipping_details?.address
+const submittedEmail = session.customer_details.email
+const leadId = submittedEmail ? hmacSha256(LEAD_ID_SECRET, submittedEmail.trim().toLowerCase()) : undefined
+const checkoutAdMatch = await loadCheckoutAdMatch(session.id)
+const adMatchForMeta = checkoutAdMatch ? {
+  ...checkoutAdMatch,
+  ...await adMatchFromRequest({ headers: {} }, {
+    trackingAllowed: true,
+    email: submittedEmail,
+    externalId: leadId,
+    fullName: session.customer_details.name,
+    city: address?.city,
+    state: address?.state,
+    postcode: address?.postal_code,
+    country: address?.country
+  })
+} : null
+// Report the purchase HERE and only here (not also from a checkout-status route), and never
+// with a browser fbq('track', 'Purchase').
 await postInfiniteOutcome({
   type: "purchase",
   path: "/checkout",                   // Meta requires event_source_url
@@ -598,17 +614,23 @@ await postInfiniteOutcome({
     content_ids: (await productIdsForSession(session.id)).join(","),   // product ids / line items from Stripe
     visitKey: session.metadata.infinite_visit_key   // carried from checkout: same-lane attribution
   },
-  adMatch: await loadCheckoutAdMatch(session.id)
+  adMatch: adMatchForMeta ?? undefined
 })
 ```
 
-- **You hash; Infinite never does.** `em` is sha256 hex of the email, trimmed and lowercased.
-  `external_id` is sha256 hex of your own account id, **trimmed only — its case is kept**: the
-  browser accessor hashes the same id the same way, and an id hashed two different ways reaches Meta
-  as two different people. A raw email never leaves your server. A value that is not a 64-character
-  hex digest is rejected with a `400` instead of being forwarded, so a mistake shows up at
-  integration time rather than as an empty match rate three months later. Never hash an
-  already-hashed value.
+- **Your generated helper hashes; Infinite never does.** `adMatchFromRequest` emits sha256 hex for
+  `em`, `external_id`, `fn`, `ln`, `ct`, `st`, `zp` and `country` using Meta's normalization rules.
+  For Stripe purchases, read them from the confirmed object
+  (`session.customer_details.email`, `session.customer_details.name`,
+  `session.customer_details.address`, falling back to `session.collected_information.shipping_details`
+  / `session.shipping_details`) and hash in-process. For leads, use the submitted email. Never store
+  email/name/address anywhere new, never put them in Stripe metadata, never log them, and never send
+  phone.
+- **`external_id` is one stable per-person id shared by that person's lead and purchase.** A good
+  lead-to-purchase bridge is a lead-id HMAC under a site-only secret, for example
+  `HMAC-SHA256(LEAD_ID_SECRET, submittedEmail.trim().toLowerCase())`. It is **trimmed only — its case
+  is kept** once chosen: the browser accessor hashes the same id the same way, and an id hashed two
+  different ways reaches Meta as two different people.
 - **`fbc` / `fbp` are Meta's own cookies** on your domain
   ([fbp and fbc](https://developers.facebook.com/docs/marketing-api/conversions-api/parameters/fbp-and-fbc)).
   A visitor can set them to anything, so a malformed one is **dropped** and your outcome is still

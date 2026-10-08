@@ -2,7 +2,7 @@
 // imported for real (vitest transforms the .ts on the way in), then driven against the fixed
 // vectors in helpers.test.ts — the same vectors the receiving side proves. A lane that would post
 // a different envelope than the Node recipe fails here, not in a customer's production traffic.
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 import { pathToFileURL } from "node:url"
@@ -38,6 +38,19 @@ const tempRoots: string[] = []
 /** Infinite's real 202 (§3j.1, as answered today: no Meta instruction). */
 const acceptedResponse = () => new Response(JSON.stringify({ accepted: true, duplicate: false }), { status: 202 })
 const BUILD = { siteSourceKey: "site_test", productionHosts: [VECTORS.host] }
+const META_MATCH = (
+  JSON.parse(readFileSync(new URL("../../../contracts/server-lane-v1.vectors.json", import.meta.url), "utf8")) as {
+    metaMatch: {
+      email: { raw: string; sha256: string }
+      externalId: { raw: string; sha256: string }
+      city: { raw: string; sha256: string }
+      usState: { raw: string; country: string; sha256: string }
+      zip: { raw: string; sha256: string }
+      country: { raw: string; sha256: string }
+      fullName: { raw: string; fn: string; ln: string }
+    }
+  }
+).metaMatch
 
 afterEach(() => {
   while (tempRoots.length > 0) rmSync(tempRoots.pop()!, { recursive: true, force: true })
@@ -551,21 +564,37 @@ describe("the outcome helper, executed", () => {
     const helper = (await loadGenerated(outcomeHelperSource(BUILD))) as {
       adMatchFromRequest: (
         request: { headers: Headers },
-        hashed?: { em?: string; external_id?: string }
-      ) => Record<string, string>
+        match?: Record<string, unknown>
+      ) => Promise<Record<string, string>>
       postInfiniteOutcome: (input: Record<string, unknown>) => Promise<boolean>
     }
-    const em = hashInfiniteEmail("founder@example.com")
-    const block = helper.adMatchFromRequest(
+    const block = await helper.adMatchFromRequest(
       documentRequest({
         headers: {
           cookie: "_ga=GA1.1.x; _fbp=fb.1.1755500000123.987654321; _fbc=fb.1.1755500000123.IwAR0abc; other=1"
         }
       }),
-      { em }
+      {
+        trackingAllowed: true,
+        email: META_MATCH.email.raw,
+        externalId: META_MATCH.externalId.raw,
+        fullName: META_MATCH.fullName.raw,
+        city: META_MATCH.city.raw,
+        state: META_MATCH.usState.raw,
+        postcode: META_MATCH.zip.raw,
+        country: META_MATCH.country.raw,
+        ph: "never-send-phone"
+      }
     )
     expect(block).toEqual({
-      em,
+      em: META_MATCH.email.sha256,
+      external_id: META_MATCH.externalId.sha256,
+      fn: META_MATCH.fullName.fn,
+      ln: META_MATCH.fullName.ln,
+      ct: META_MATCH.city.sha256,
+      st: META_MATCH.usState.sha256,
+      zp: META_MATCH.zip.sha256,
+      country: META_MATCH.country.sha256,
       fbc: "fb.1.1755500000123.IwAR0abc",
       fbp: "fb.1.1755500000123.987654321",
       // First hop of x-forwarded-for — the buyer, not the proxy chain.
@@ -576,14 +605,23 @@ describe("the outcome helper, executed", () => {
 
   it("adMatchFromRequest omits what the request did not carry, and never invents a value", async () => {
     const helper = (await loadGenerated(outcomeHelperSource(BUILD))) as {
-      adMatchFromRequest: (request: { headers: Headers }) => Record<string, string>
+      adMatchFromRequest: (request: { headers: Headers }, match?: Record<string, unknown>) => Promise<Record<string, string>>
     }
-    const bare = helper.adMatchFromRequest({ headers: new Headers({ "user-agent": VECTORS.userAgent }) })
-    expect(bare).toEqual({ client_user_agent: VECTORS.userAgent })
+    const bare = await helper.adMatchFromRequest({ headers: new Headers({ "user-agent": VECTORS.userAgent }) })
+    expect(bare).toEqual({})
+    await expect(
+      helper.adMatchFromRequest({ headers: new Headers({ "user-agent": VECTORS.userAgent }) }, { trackingAllowed: true })
+    ).resolves.toEqual({ client_user_agent: VECTORS.userAgent })
+    await expect(
+      helper.adMatchFromRequest({ headers: new Headers({ "user-agent": VECTORS.userAgent }) }, { trackingAllowed: false, email: META_MATCH.email.raw })
+    ).resolves.toEqual({})
     // An empty cookie value is absent, not an empty string Meta would have to reject.
-    const emptyCookie = helper.adMatchFromRequest({
-      headers: new Headers({ cookie: "_fbp=; _fbc=fb.1.1.abc", "user-agent": "ua" })
-    })
+    const emptyCookie = await helper.adMatchFromRequest(
+      {
+        headers: new Headers({ cookie: "_fbp=; _fbc=fb.1.1.abc", "user-agent": "ua" })
+      },
+      { trackingAllowed: true }
+    )
     expect(emptyCookie).toEqual({ fbc: "fb.1.1.abc", client_user_agent: "ua" })
   })
 
@@ -949,7 +987,7 @@ describe("the outcome helper module format (TS vs JS)", () => {
         "js"
       )) as {
         postInfiniteOutcome: (input: Record<string, unknown>) => Promise<boolean>
-        adMatchFromRequest: (request: { headers: Headers }, hashed?: { em?: string }) => Record<string, string>
+        adMatchFromRequest: (request: { headers: Headers }, match?: Record<string, unknown>) => Promise<Record<string, string>>
       }
       await expect(
         helper.postInfiniteOutcome({
@@ -966,11 +1004,16 @@ describe("the outcome helper module format (TS vs JS)", () => {
       expect(body.properties).toEqual({ path: "/checkout", visitKey: VECTORS.visitKey })
       expect(posted.headers.get(SERVER_LANE_SOURCE_KEY_HEADER)).toBe("site_test")
 
-      const block = helper.adMatchFromRequest(
+      const block = await helper.adMatchFromRequest(
         documentRequest({ headers: { cookie: "_fbp=fb.1.1.987; _fbc=fb.1.1.abc" } }),
-        { em: hashInfiniteEmail("founder@example.com") }
+        { trackingAllowed: true, email: "founder@example.com" }
       )
-      expect(block).toMatchObject({ fbc: "fb.1.1.abc", fbp: "fb.1.1.987", client_user_agent: VECTORS.userAgent })
+      expect(block).toMatchObject({
+        em: hashInfiniteEmail("founder@example.com"),
+        fbc: "fb.1.1.abc",
+        fbp: "fb.1.1.987",
+        client_user_agent: VECTORS.userAgent
+      })
     })
   })
 })
@@ -988,29 +1031,29 @@ describe.each([
   const FIRST_CLICK = "fb.1.1790645529960.TEST_NOT_REAL_FIRST"
   const SECOND_CLICK = "fb.1.1790645538268.TEST_NOT_REAL_SECOND"
   type AdMatchHelper = {
-    adMatchFromRequest: (request: { headers: unknown }, hashed?: { em?: string }) => Record<string, string>
+    adMatchFromRequest: (request: { headers: unknown }, match?: Record<string, unknown>) => Promise<Record<string, string>>
   }
   const helper = async (): Promise<AdMatchHelper> =>
     (await loadGenerated(outcomeHelperSource(BUILD, { language, extension }), extension)) as AdMatchHelper
   const withCookie = (cookie: string) => ({ headers: new Headers({ cookie, "user-agent": "ua" }) })
 
   it("sends the SECOND click when the older first click is listed first (the live 09-29 capture)", async () => {
-    const block = (await helper()).adMatchFromRequest(withCookie(`_fbc=${FIRST_CLICK}; _fbc=${SECOND_CLICK}`))
+    const block = await (await helper()).adMatchFromRequest(withCookie(`_fbc=${FIRST_CLICK}; _fbc=${SECOND_CLICK}`), { trackingAllowed: true })
     expect(block.fbc).toBe(SECOND_CLICK)
     expect(block.fbc).not.toBe(FIRST_CLICK)
   })
 
   it("picks by timestamp, not by position: the same answer whichever order the browser lists them", async () => {
-    const block = (await helper()).adMatchFromRequest(withCookie(`_fbc=${SECOND_CLICK}; _fbc=${FIRST_CLICK}`))
+    const block = await (await helper()).adMatchFromRequest(withCookie(`_fbc=${SECOND_CLICK}; _fbc=${FIRST_CLICK}`), { trackingAllowed: true })
     expect(block.fbc).toBe(SECOND_CLICK)
   })
 
   it("a malformed first _fbc cannot hide a valid later one, and is never forwarded itself", async () => {
     const bad = "fb.1.notms.IwAR0bad"
     const h = await helper()
-    expect(h.adMatchFromRequest(withCookie(`_fbc=${bad}; _fbc=${FIRST_CLICK}`)).fbc).toBe(FIRST_CLICK)
+    expect((await h.adMatchFromRequest(withCookie(`_fbc=${bad}; _fbc=${FIRST_CLICK}`), { trackingAllowed: true })).fbc).toBe(FIRST_CLICK)
     // Negative: only malformed values → no fbc at all, never the bad bytes.
-    const onlyBad = h.adMatchFromRequest(withCookie(`_fbc=${bad}; _fbc=fb.1.1790645538268.has space`))
+    const onlyBad = await h.adMatchFromRequest(withCookie(`_fbc=${bad}; _fbc=fb.1.1790645538268.has space`), { trackingAllowed: true })
     expect(onlyBad).not.toHaveProperty("fbc")
     expect(JSON.stringify(onlyBad)).not.toContain("IwAR0bad")
   })
@@ -1018,14 +1061,14 @@ describe.each([
   it("keeps the fbclid byte for byte (Meta's _fbc is case-sensitive), and ties keep the first listed", async () => {
     const h = await helper()
     const mixedCase = "fb.2.1790645538268.IwAR0aBc-DeF_9.x"
-    expect(h.adMatchFromRequest(withCookie(`_fbc=${mixedCase}`)).fbc).toBe(mixedCase)
+    expect((await h.adMatchFromRequest(withCookie(`_fbc=${mixedCase}`), { trackingAllowed: true })).fbc).toBe(mixedCase)
     const tieA = "fb.1.1790645538268.TEST_NOT_REAL_A"
     const tieB = "fb.1.1790645538268.TEST_NOT_REAL_B"
-    expect(h.adMatchFromRequest(withCookie(`_fbc=${tieA}; _fbc=${tieB}`)).fbc).toBe(tieA)
+    expect((await h.adMatchFromRequest(withCookie(`_fbc=${tieA}; _fbc=${tieB}`), { trackingAllowed: true })).fbc).toBe(tieA)
   })
 
   it("reads a plain-object headers bag (Vercel Node functions, Express) as well as Headers", async () => {
-    const block = (await helper()).adMatchFromRequest(
+    const block = await (await helper()).adMatchFromRequest(
       {
         headers: {
           Cookie: `_fbp=fb.1.1755500000123.987654321; _fbc=${FIRST_CLICK}; _fbc=${SECOND_CLICK}`,
@@ -1033,7 +1076,7 @@ describe.each([
           "x-forwarded-for": `${VECTORS.clientIp}, 10.0.0.1`
         }
       },
-      { em: hashInfiniteEmail("founder@example.com") }
+      { trackingAllowed: true, email: "founder@example.com" }
     )
     expect(block).toEqual({
       em: hashInfiniteEmail("founder@example.com"),
@@ -1047,10 +1090,10 @@ describe.each([
   it("_fbp is a browser id, not a click: first listed, and dropped when it lacks Meta's shape", async () => {
     const h = await helper()
     expect(
-      h.adMatchFromRequest(withCookie("_fbp=fb.1.1755500000123.111; _fbp=fb.1.1790645538268.222")).fbp
+      (await h.adMatchFromRequest(withCookie("_fbp=fb.1.1755500000123.111; _fbp=fb.1.1790645538268.222"), { trackingAllowed: true })).fbp
     ).toBe("fb.1.1755500000123.111")
     // Negative: an oversized or malformed _fbp is absent, never forwarded.
-    expect(h.adMatchFromRequest(withCookie(`_fbp=fb.1.1725350400000.${"A".repeat(513)}`))).not.toHaveProperty("fbp")
-    expect(h.adMatchFromRequest(withCookie("_fbp=garbage"))).not.toHaveProperty("fbp")
+    await expect(h.adMatchFromRequest(withCookie(`_fbp=fb.1.1725350400000.${"A".repeat(513)}`), { trackingAllowed: true })).resolves.not.toHaveProperty("fbp")
+    await expect(h.adMatchFromRequest(withCookie("_fbp=garbage"), { trackingAllowed: true })).resolves.not.toHaveProperty("fbp")
   })
 })

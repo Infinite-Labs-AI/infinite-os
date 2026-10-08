@@ -14,7 +14,6 @@ import {
   serverLaneCopy,
   serverLaneWizardCopy
 } from "./copy.js"
-import { outcomeHelperSource } from "./targets/shared.js"
 import { createScanner } from "../review/scan.js"
 
 describe("the agent brief", () => {
@@ -83,15 +82,30 @@ describe("the agent brief", () => {
     // The audience gate is stated first, because the wrong founder double-counts by adding it.
     expect(brief).toContain("Meta ads and do not use PostHog")
     expect(brief).toContain("Send outcomes to Meta Conversions API")
-    // The hashing recipe is spelled out, so nobody has to guess Meta's normalisation.
-    expect(brief).toContain('createHash("sha256").update(email.trim().toLowerCase()).digest("hex")')
-    // ONE external_id rule, the browser accessor's: trimmed only, case kept. Never "lowercased".
-    expect(brief).toContain('external_id: createHash("sha256").update(String(user.id).trim()).digest("hex")')
+    expect(brief).toContain("trackingAllowed: true")
+    expect(brief).toContain("explicitly signalled consent")
+    // The hashing recipe is spelled out from confirmed webhook/submission data, so nobody has to
+    // guess Meta's normalisation or persist raw PII at checkout.
+    expect(brief).toContain("email: submittedEmail")
+    expect(brief).toContain("`fn`, `ln`, `ct`, `st`, `zp` and `country`")
+    expect(brief).toContain("`session.customer_details.email`, `session.customer_details.name`, `session.customer_details.address`")
+    expect(brief).toContain("`session.collected_information.shipping_details` / `session.shipping_details`")
+    expect(brief).toContain("For leads, use the submitted email")
+    expect(brief).toContain("Never store email/name/address anywhere new")
+    expect(brief).toContain("never put them in Stripe metadata")
+    expect(brief).toContain("never log them")
+    expect(brief).toContain("never send phone")
+    // ONE external_id rule: a stable per-person id shared by lead and purchase, then trimmed only.
+    expect(brief).toContain("one stable per-person id shared by that person's lead and purchase")
+    expect(brief).toContain("HMAC-SHA256(LEAD_ID_SECRET, submittedEmail.trim().toLowerCase())")
+    expect(brief).toContain("externalId: leadId")
     expect(brief).toContain("**trimmed only — its case is kept**")
-    expect(brief).not.toMatch(/external_id[^\n]*\.toLowerCase\(\)/)
+    expect(brief).not.toMatch(/external_id:\s*createHash[^\n]*\.toLowerCase\(\)/)
     expect(brief).not.toMatch(/`em` and `external_id` are sha256 hex of the trimmed, lowercased/)
+    expect(brief).not.toMatch(/address\?\.(?:city|state|postal_code|country)[^\n]*createHash/)
+    expect(brief).toContain("adMatchForMeta = checkoutAdMatch ?")
     expect(brief).toContain("discarded")
-    expect(brief).toContain("64-character hex digest is rejected")
+    expect(brief).toContain("A malformed hash is a 400")
     // eventId is Infinite's idempotency key; Infinite decides the event_id Meta receives (it derives
     // one for account- and visitor-deduped conversions), so the page must never build a Meta event ID.
     expect(brief).toContain("**`eventId` is Infinite's idempotency key, not Meta's event ID.**")
@@ -107,6 +121,7 @@ describe("the agent brief", () => {
     expect(brief).not.toMatch(/fbq\([^)]*\{\s*eventID/)
     // The not-yet-built server-instructed mirror is never promised.
     expect(brief).not.toContain("metaEventId")
+    expect(brief).not.toContain("never an email, name or phone")
     // The buyer's browser pair, and WHY it cannot come from the call to Infinite.
     expect(brief).toContain("the IP address of the browser")
     expect(brief).toContain("server-to-server")
@@ -176,7 +191,11 @@ describe("the README's Meta advice", () => {
     const readme = readFileSync(fileURLToPath(new URL("../../README.md", import.meta.url)), "utf8")
     expect(readme).toContain("**`eventId` is Infinite's idempotency key, not Meta's event ID.**")
     expect(readme).toContain("**Purchases are server events only.**")
-    expect(readme).toContain("**trimmed only — its case is kept**")
+    expect(readme).toContain("trimmed only")
+    expect(readme).toContain("`session.customer_details.email`, `session.customer_details.name`")
+    expect(readme).toContain("For leads, use the submitted email")
+    expect(readme).toContain("Never store")
+    expect(readme).toContain("never send")
     expect(readme).not.toContain("Meta gets the same event_id")
     expect(readme).not.toContain("becomes Meta's `event_id`")
     expect(readme).not.toMatch(/eventID:\s*"purchase:/)
@@ -185,9 +204,8 @@ describe("the README's Meta advice", () => {
   })
 })
 
-// Review fixes F1/F2/F5 on the Meta forwarding example. Every place a customer (or their agent)
-// copies the recipe from: the brief in both languages, the README, and the generated helper's own
-// doc comment.
+// Review fixes F1/F2/F5 on the Meta forwarding example. Every place this slice owns and a customer
+// (or their agent) copies the recipe from: the brief in both languages and the README.
 const README = readFileSync(fileURLToPath(new URL("../../README.md", import.meta.url)), "utf8")
 const BRIEF_TS = renderServerLaneBrief({ status: { kind: "other-stack", framework: "Express" } })
 const BRIEF_JS = renderServerLaneBrief({
@@ -195,12 +213,6 @@ const BRIEF_JS = renderServerLaneBrief({
   outcomeImportSpecifier: "../lib/infinite-outcome.js",
   outcomeLanguage: "js"
 })
-const HELPER_TS = outcomeHelperSource({ siteSourceKey: "site_test", productionHosts: ["example.com"] })
-const HELPER_JS = outcomeHelperSource(
-  { siteSourceKey: "site_test", productionHosts: ["example.com"] },
-  { language: "js", extension: "js" }
-)
-const RECIPE_SOURCES = { BRIEF_TS, BRIEF_JS, README, HELPER_TS, HELPER_JS }
 
 /** Every distinct `X` in `eventId: "purchase:" + X` — one purchase must be reported under one id. */
 function purchaseEventIdSources(text: string): Set<string> {
@@ -220,10 +232,6 @@ function runExternalIdLine(line: string, user: unknown): Record<string, unknown>
   return runInNewContext(`({ ${entry} })`, { createHash, user }) as Record<string, unknown>
 }
 
-function externalIdLines(text: string): string[] {
-  return text.split("\n").filter((line) => /external_id: createHash\(/.test(line))
-}
-
 const sha = (value: string) => createHash("sha256").update(value).digest("hex")
 
 describe("the Meta forwarding example: one purchase, one eventId (review F1)", () => {
@@ -234,7 +242,7 @@ describe("the Meta forwarding example: one purchase, one eventId (review F1)", (
     // The Meta webhook call carries the visit key from checkout next to its adMatch block.
     expect(text).toMatch(/visitKey: session\.metadata\.infinite_visit_key\s+\/\/ carried from checkout/)
     expect(text).toContain("content_ids: (await productIdsForSession(session.id)).join")
-    expect(text).toContain("adMatch: await loadCheckoutAdMatch(session.id)")
+    expect(text).toContain("adMatch: adMatchForMeta")
     expect(text).toContain("the SAME id every time this purchase is reported")
   })
 
@@ -256,24 +264,11 @@ describe("the Meta forwarding example: one purchase, one eventId (review F1)", (
 })
 
 describe("the external_id recipe is safe to paste into a checkout route (review F2)", () => {
-  const users: Array<[string, unknown, string | undefined]> = [
-    ["a string id with capitals and spaces", { id: "  Acct_AbC-42 " }, sha("Acct_AbC-42")],
-    ["a numeric id", { id: 42 }, sha("42")],
-    ["a guest (no user)", undefined, undefined],
-    ["a guest (null user)", null, undefined],
-    ["a user without an id", {}, undefined]
-  ]
-
-  it.each(Object.entries(RECIPE_SOURCES))("%s: never throws, trims only, keeps case, skips guests", (_name, text) => {
-    const lines = externalIdLines(text)
-    expect(lines.length).toBeGreaterThan(0)
-    for (const line of lines) {
-      expect(line).not.toContain("user.id.trim()")
-      for (const [label, user, expected] of users) {
-        const result = runExternalIdLine(line, user)
-        expect(result.external_id, label).toBe(expected)
-      }
-    }
+  it.each(Object.entries({ BRIEF_TS, BRIEF_JS, README }))("%s: lead-to-purchase external_id is one stable per-person id", (_name, text) => {
+    expect(text).toContain("one stable per-person id shared by")
+    expect(text).toContain("HMAC-SHA256(LEAD_ID_SECRET, submittedEmail.trim().toLowerCase())")
+    expect(text).toContain("externalId: leadId")
+    expect(text).not.toMatch(/external_id:\s*createHash[^\n]*\.toLowerCase\(\)/)
   })
 
   it("negative: the old recipe line throws on a numeric id and on a guest", () => {
@@ -312,7 +307,7 @@ describe("the plain installer's server-lane copy stays pinned", () => {
   it("hashes to the pre-wizard value", () => {
     const text = JSON.stringify(serialise(serverLaneCopy))
     expect(createHash("sha256").update(text).digest("hex")).toBe(
-      "8dd22186c109026ebcbfc2f9ce9281a07a26a906e16a3ae0a78ac0571390697c"
+      "e9bada21be5c59884c077c13c41b0d3f5e69fffbcbf6bd6c33e3265c750a9370"
     )
     expect(createHash("sha256").update(serverLaneCopy.status.targetPackages(["@vercel/functions"])).digest("hex")).toBe(
       "9b0fbf1256ca539e699938d069961dc145855359f994b43133afa58d89add7ec"
@@ -371,6 +366,12 @@ describe("the wizard's recipes", () => {
     expect(webhook).toContain("eventId: session.id")
     expect(webhook).toContain("helper sends it as purchase:<id>")
     expect(webhook).toContain("content_ids: session.metadata.infinite_skus")
+    expect(webhook).toContain("session.customer_details.email")
+    expect(webhook).toContain("session.customer_details.name")
+    expect(webhook).toContain("session.customer_details.address")
+    expect(webhook).toContain("session.collected_information?.shipping_details")
+    expect(webhook).toContain("hash them in-process")
+    expect(webhook).toContain("never send phone")
     expect(webhook).not.toMatch(/\bph\b|phone_number|infiniteMetaMirror\(/)
   })
 
