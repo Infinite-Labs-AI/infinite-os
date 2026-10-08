@@ -24,12 +24,12 @@ import {
 
 import { cloudflarePagesMiddlewareSource } from "./cloudflare.js"
 import { NETLIFY_EXCLUDED_ASSET_EXTENSIONS, netlifyEdgeFunctionSource } from "./netlify.js"
-import { nodeLaneModuleSource, nodeOutcomeHelperSource } from "./node.js"
+import { nodeLaneModuleSource, nodeTarget } from "./node.js"
+import { outcomeHelperSource } from "./outcome-helper.js"
 import {
   detectServerLaneHelperLanguage,
   edgeLaneCoreSource,
   nonDocumentPrefixes,
-  outcomeHelperSource,
   outcomeHelperTarget
 } from "./shared.js"
 import { vercelLaneModuleSource, vercelMiddlewareSource } from "./vercel-any.js"
@@ -499,10 +499,10 @@ describe("the outcome helper, executed", () => {
 
   it("posts a purchase with a stable event id, the path, and the SAME visit key as the page view", async () => {
     const helper = (await loadGenerated(outcomeHelperSource(BUILD))) as {
-      postInfiniteOutcome: (input: Record<string, unknown>) => Promise<boolean>
+      reportInfiniteOutcome: (input: Record<string, unknown>) => Promise<number | null>
     }
     await expect(
-      helper.postInfiniteOutcome({
+      helper.reportInfiniteOutcome({
         type: "purchase",
         path: "/checkout",
         eventId: "purchase:cs_test_123",
@@ -510,7 +510,7 @@ describe("the outcome helper, executed", () => {
         occurredAt: new Date(VECTORS.nowMs),
         visitKeyInputs: documentRequest()
       })
-    ).resolves.toBe(true)
+    ).resolves.toBe(202)
 
     const posted = postedBody(fetchMock)
     const body = JSON.parse(posted.body) as {
@@ -533,7 +533,7 @@ describe("the outcome helper, executed", () => {
 
   it("carries an adMatch block VERBATIM inside the signed body (the Meta CAPI relay)", async () => {
     const helper = (await loadGenerated(outcomeHelperSource(BUILD))) as {
-      postInfiniteOutcome: (input: Record<string, unknown>) => Promise<boolean>
+      reportInfiniteOutcome: (input: Record<string, unknown>) => Promise<number | null>
     }
     const adMatch = {
       em: hashInfiniteEmail("founder@example.com"),
@@ -542,7 +542,7 @@ describe("the outcome helper, executed", () => {
       client_ip_address: VECTORS.clientIp,
       client_user_agent: VECTORS.userAgent
     }
-    await helper.postInfiniteOutcome({
+    await helper.reportInfiniteOutcome({
       type: "purchase",
       path: "/checkout",
       eventId: "purchase:cs_test_123",
@@ -564,9 +564,9 @@ describe("the outcome helper, executed", () => {
     const helper = (await loadGenerated(outcomeHelperSource(BUILD))) as {
       adMatchFromRequest: (
         request: { headers: Headers },
-        match?: Record<string, unknown>
-      ) => Promise<Record<string, string>>
-      postInfiniteOutcome: (input: Record<string, unknown>) => Promise<boolean>
+        match: Record<string, unknown>
+      ) => Promise<Record<string, string> | undefined>
+      reportInfiniteOutcome: (input: Record<string, unknown>) => Promise<number | null>
     }
     const block = await helper.adMatchFromRequest(
       documentRequest({
@@ -576,14 +576,16 @@ describe("the outcome helper, executed", () => {
       }),
       {
         trackingAllowed: true,
-        email: META_MATCH.email.raw,
-        externalId: META_MATCH.externalId.raw,
-        fullName: META_MATCH.fullName.raw,
-        city: META_MATCH.city.raw,
-        state: META_MATCH.usState.raw,
-        postcode: META_MATCH.zip.raw,
-        country: META_MATCH.country.raw,
-        ph: "never-send-phone"
+        person: {
+          email: META_MATCH.email.raw,
+          externalId: META_MATCH.externalId.raw,
+          name: META_MATCH.fullName.raw,
+          city: META_MATCH.city.raw,
+          state: META_MATCH.usState.raw,
+          postcode: META_MATCH.zip.raw,
+          country: META_MATCH.country.raw,
+          phone: "never-send-phone"
+        }
       }
     )
     expect(block).toEqual({
@@ -605,16 +607,17 @@ describe("the outcome helper, executed", () => {
 
   it("adMatchFromRequest omits what the request did not carry, and never invents a value", async () => {
     const helper = (await loadGenerated(outcomeHelperSource(BUILD))) as {
-      adMatchFromRequest: (request: { headers: Headers }, match?: Record<string, unknown>) => Promise<Record<string, string>>
+      adMatchFromRequest: (request: { headers: Headers }, match: Record<string, unknown>) => Promise<Record<string, string> | undefined>
     }
-    const bare = await helper.adMatchFromRequest({ headers: new Headers({ "user-agent": VECTORS.userAgent }) })
-    expect(bare).toEqual({})
+    // No page signal, no match data: undefined, never an empty block.
+    const bare = await helper.adMatchFromRequest({ headers: new Headers({ "user-agent": VECTORS.userAgent }) }, { trackingAllowed: false })
+    expect(bare).toBeUndefined()
     await expect(
       helper.adMatchFromRequest({ headers: new Headers({ "user-agent": VECTORS.userAgent }) }, { trackingAllowed: true })
     ).resolves.toEqual({ client_user_agent: VECTORS.userAgent })
     await expect(
-      helper.adMatchFromRequest({ headers: new Headers({ "user-agent": VECTORS.userAgent }) }, { trackingAllowed: false, email: META_MATCH.email.raw })
-    ).resolves.toEqual({})
+      helper.adMatchFromRequest({ headers: new Headers({ "user-agent": VECTORS.userAgent }) }, { trackingAllowed: false, person: { email: META_MATCH.email.raw } })
+    ).resolves.toBeUndefined()
     // An empty cookie value is absent, not an empty string Meta would have to reject.
     const emptyCookie = await helper.adMatchFromRequest(
       {
@@ -627,23 +630,24 @@ describe("the outcome helper, executed", () => {
 
   it("omits adMatch entirely when the caller sends none — the block is opt-in per outcome", async () => {
     const helper = (await loadGenerated(outcomeHelperSource(BUILD))) as {
-      postInfiniteOutcome: (input: Record<string, unknown>) => Promise<boolean>
+      reportInfiniteOutcome: (input: Record<string, unknown>) => Promise<number | null>
     }
-    await helper.postInfiniteOutcome({ type: "sign_up", eventId: "signup:1", path: "/signup" })
+    await helper.reportInfiniteOutcome({ type: "sign_up", eventId: "signup:1", path: "/signup" })
     expect(postedBody(fetchMock).body).not.toContain("adMatch")
   })
 
-  it("accepts raw visit-key inputs, and mints a random event id when none is given", async () => {
+  it("accepts raw visit-key inputs, and sends the caller's stable id as <type>:<id>", async () => {
     const helper = (await loadGenerated(outcomeHelperSource(BUILD))) as {
-      postInfiniteOutcome: (input: Record<string, unknown>) => Promise<boolean>
+      reportInfiniteOutcome: (input: Record<string, unknown>) => Promise<number | null>
     }
-    await helper.postInfiniteOutcome({
+    await helper.reportInfiniteOutcome({
       type: "sign_up",
+      eventId: "acct_1",
       path: "/signup",
       visitKeyInputs: { clientIp: VECTORS.clientIp, userAgent: VECTORS.userAgent }
     })
     const body = JSON.parse(postedBody(fetchMock).body) as { eventId: string; properties: Record<string, string> }
-    expect(body.eventId).toMatch(/^[0-9a-f-]{36}$/)
+    expect(body.eventId).toBe("sign_up:acct_1")
     expect(body.properties.visitKey).toBe(VECTORS.visitKey)
   })
 
@@ -651,7 +655,7 @@ describe("the outcome helper, executed", () => {
     // Regression: req.headers on a Vercel Node function is a plain object, so headers.get(...) threw
     // and the whole outcome was swallowed as false — no visit key, no purchase posted.
     const helper = (await loadGenerated(outcomeHelperSource(BUILD))) as {
-      postInfiniteOutcome: (input: Record<string, unknown>) => Promise<boolean>
+      reportInfiniteOutcome: (input: Record<string, unknown>) => Promise<number | null>
     }
     const nodeReq = {
       headers: {
@@ -660,14 +664,14 @@ describe("the outcome helper, executed", () => {
       }
     }
     await expect(
-      helper.postInfiniteOutcome({
+      helper.reportInfiniteOutcome({
         type: "purchase",
         path: "/checkout",
         eventId: "purchase:node_1",
         occurredAt: new Date(VECTORS.nowMs),
         visitKeyInputs: nodeReq
       })
-    ).resolves.toBe(true)
+    ).resolves.toBe(202)
     const body = JSON.parse(postedBody(fetchMock).body) as { properties: Record<string, string> }
     // A real key from the plain object — never false/empty, and the IP itself still never leaves.
     expect(body.properties.visitKey).toBe(VECTORS.visitKey)
@@ -677,7 +681,7 @@ describe("the outcome helper, executed", () => {
   it("exports infiniteVisitKey so a checkout can compute the key and a webhook can carry it", async () => {
     const helper = (await loadGenerated(outcomeHelperSource(BUILD))) as {
       infiniteVisitKey: (inputs: { clientIp?: string; userAgent?: string; nowMs?: number }) => Promise<string>
-      postInfiniteOutcome: (input: Record<string, unknown>) => Promise<boolean>
+      reportInfiniteOutcome: (input: Record<string, unknown>) => Promise<number | null>
     }
     // 1. At CHECKOUT, from the buyer's request — same recipe as the page-view lane.
     const visitKey = await helper.infiniteVisitKey({
@@ -688,7 +692,7 @@ describe("the outcome helper, executed", () => {
     expect(visitKey).toBe(VECTORS.visitKey)
     // 2. In the WEBHOOK, carried via properties.visitKey (the request there is the provider's) — the
     //    helper skips its own derivation and keeps the carried key verbatim.
-    await helper.postInfiniteOutcome({
+    await helper.reportInfiniteOutcome({
       type: "purchase",
       path: "/success",
       eventId: "purchase:cs_1",
@@ -700,41 +704,42 @@ describe("the outcome helper, executed", () => {
 
   it("a carried properties.visitKey wins over visitKeyInputs — no re-derivation", async () => {
     const helper = (await loadGenerated(outcomeHelperSource(BUILD))) as {
-      postInfiniteOutcome: (input: Record<string, unknown>) => Promise<boolean>
+      reportInfiniteOutcome: (input: Record<string, unknown>) => Promise<number | null>
     }
-    await helper.postInfiniteOutcome({
+    await helper.reportInfiniteOutcome({
       type: "purchase",
       path: "/success",
       eventId: "purchase:cs_2",
       occurredAt: new Date(VECTORS.nowMs),
-      properties: { visitKey: "carried_from_checkout" },
+      properties: { visitKey: "c".repeat(64) },
       // A different request that WOULD derive a different key — it must be ignored.
       visitKeyInputs: { clientIp: "198.51.100.7", userAgent: "someone-else" }
     })
-    expect(JSON.parse(postedBody(fetchMock).body).properties.visitKey).toBe("carried_from_checkout")
+    expect(JSON.parse(postedBody(fetchMock).body).properties.visitKey).toBe("c".repeat(64))
   })
 
   it("falls back to the baked source key, takes explicit credentials, and stays silent with no secret", async () => {
     const helper = (await loadGenerated(outcomeHelperSource(BUILD))) as {
-      postInfiniteOutcome: (input: Record<string, unknown>) => Promise<boolean>
+      reportInfiniteOutcome: (input: Record<string, unknown>) => Promise<number | null>
     }
     delete process.env.INFINITE_SITE_SOURCE_KEY
-    await helper.postInfiniteOutcome({ type: "download", path: "/download" })
+    await helper.reportInfiniteOutcome({ type: "download", eventId: "d1", path: "/download" })
     expect(postedBody(fetchMock).headers.get(SERVER_LANE_SOURCE_KEY_HEADER)).toBe("site_test")
 
     fetchMock.mockClear()
     delete process.env.INFINITE_SERVER_EVENT_SECRET
-    await expect(helper.postInfiniteOutcome({ type: "download", path: "/download" })).resolves.toBe(false)
+    await expect(helper.reportInfiniteOutcome({ type: "download", eventId: "d1", path: "/download" })).resolves.toBeNull()
     expect(fetchMock).not.toHaveBeenCalled()
 
     // Cloudflare Workers have no process.env: the caller passes its binding values instead.
     await expect(
-      helper.postInfiniteOutcome({
+      helper.reportInfiniteOutcome({
         type: "download",
+        eventId: "d2",
         path: "/download",
         credentials: { secret: VECTORS.secret, sourceKey: "site_worker" }
       })
-    ).resolves.toBe(true)
+    ).resolves.toBe(202)
     expect(postedBody(fetchMock).headers.get(SERVER_LANE_SOURCE_KEY_HEADER)).toBe("site_worker")
   })
 
@@ -746,61 +751,20 @@ describe("the outcome helper, executed", () => {
       })
     )
     const helper = (await loadGenerated(outcomeHelperSource(BUILD))) as {
-      postInfiniteOutcome: (input: Record<string, unknown>) => Promise<boolean>
+      reportInfiniteOutcome: (input: Record<string, unknown>) => Promise<number | null>
     }
-    await expect(helper.postInfiniteOutcome({ type: "purchase", path: "/checkout" })).resolves.toBe(false)
+    vi.spyOn(console, "warn").mockImplementation(() => undefined)
+    await expect(helper.reportInfiniteOutcome({ type: "purchase", eventId: "cs_9", path: "/checkout" })).resolves.toBeNull()
   })
 
-  it("the Node twin posts the same shape on top of the generated Node module", async () => {
+  it("the Node target ships this same helper (one API on every host), never a Node-only twin", () => {
     const dir = mkdtempSync(join(tmpdir(), "instrument-lane-node-outcome-"))
     tempRoots.push(dir)
-    writeFileSync(join(dir, "infinite-server-lane.js"), nodeLaneModuleSource(BUILD))
-    const outcomePath = join(dir, "infinite-outcome.js")
-    writeFileSync(outcomePath, nodeOutcomeHelperSource())
-    const helper = (await import(pathToFileURL(outcomePath).href)) as {
-      postInfiniteOutcome: (input: Record<string, unknown>) => Promise<boolean>
-    }
-
-    await expect(
-      helper.postInfiniteOutcome({
-        type: "purchase",
-        path: "/checkout",
-        eventId: "purchase:1",
-        occurredAt: new Date(VECTORS.nowMs),
-        visitKeyInputs: { clientIp: VECTORS.clientIp, userAgent: VECTORS.userAgent }
-      })
-    ).resolves.toBe(true)
-    const body = JSON.parse(postedBody(fetchMock).body) as { properties: Record<string, string> }
-    expect(body.properties).toEqual({ path: "/checkout", visitKey: VECTORS.visitKey })
-  })
-
-  it("the Node twin derives the SAME visit key from a plain-object req as from explicit inputs", async () => {
-    // Regression: the Node outcome helper used to spread `{ ...visitKeyInputs, nowMs }`, so a Node
-    // `req` became `{ headers, nowMs }` — clientIp/userAgent empty — and it derived a DIFFERENT key,
-    // breaking same-lane attribution for Node users who followed the guide's `visitKeyInputs: req`.
-    const dir = mkdtempSync(join(tmpdir(), "instrument-lane-node-req-"))
-    tempRoots.push(dir)
-    writeFileSync(join(dir, "infinite-server-lane.js"), nodeLaneModuleSource(BUILD))
-    const outcomePath = join(dir, "infinite-outcome.js")
-    writeFileSync(outcomePath, nodeOutcomeHelperSource())
-    const helper = (await import(pathToFileURL(outcomePath).href)) as {
-      postInfiniteOutcome: (input: Record<string, unknown>) => Promise<boolean>
-    }
-
-    await expect(
-      helper.postInfiniteOutcome({
-        type: "purchase",
-        path: "/checkout",
-        eventId: "purchase:node_req",
-        occurredAt: new Date(VECTORS.nowMs),
-        // A Node request: .headers is a PLAIN OBJECT, exactly as Express / node:http hand it over.
-        visitKeyInputs: { headers: { "x-forwarded-for": `${VECTORS.clientIp}, 10.0.0.1`, "user-agent": VECTORS.userAgent } }
-      })
-    ).resolves.toBe(true)
-    const body = JSON.parse(postedBody(fetchMock).body) as { properties: Record<string, string> }
-    // The shared helper's vector — the Node twin must derive the identical key, and never leak the IP.
-    expect(body.properties.visitKey).toBe(VECTORS.visitKey)
-    expect(postedBody(fetchMock).body).not.toContain(VECTORS.clientIp)
+    writeFileSync(join(dir, "package.json"), JSON.stringify({ type: "module", dependencies: { express: "4" } }))
+    writeFileSync(join(dir, "tsconfig.json"), "{}")
+    const built = nodeTarget.build(BUILD, dir)
+    expect(Object.keys(built).sort()).toEqual(["lib/infinite-outcome.js", "lib/infinite-server-lane.js"])
+    expect(built["lib/infinite-outcome.js"]).toBe(outcomeHelperSource(BUILD, { language: "js", extension: "js", background: "bounded" }))
   })
 })
 
@@ -986,11 +950,11 @@ describe("the outcome helper module format (TS vs JS)", () => {
         outcomeHelperSource(BUILD, { language: "js", extension: "js" }),
         "js"
       )) as {
-        postInfiniteOutcome: (input: Record<string, unknown>) => Promise<boolean>
-        adMatchFromRequest: (request: { headers: Headers }, match?: Record<string, unknown>) => Promise<Record<string, string>>
+        reportInfiniteOutcome: (input: Record<string, unknown>) => Promise<number | null>
+        adMatchFromRequest: (request: { headers: Headers }, match: Record<string, unknown>) => Promise<Record<string, string> | undefined>
       }
       await expect(
-        helper.postInfiniteOutcome({
+        helper.reportInfiniteOutcome({
           type: "purchase",
           path: "/checkout",
           eventId: "purchase:cs_test_123",
@@ -998,7 +962,7 @@ describe("the outcome helper module format (TS vs JS)", () => {
           occurredAt: new Date(VECTORS.nowMs),
           visitKeyInputs: documentRequest()
         })
-      ).resolves.toBe(true)
+      ).resolves.toBe(202)
       const posted = postedBody(fetchMock)
       const body = JSON.parse(posted.body) as { properties: Record<string, string> }
       expect(body.properties).toEqual({ path: "/checkout", visitKey: VECTORS.visitKey })
@@ -1006,7 +970,7 @@ describe("the outcome helper module format (TS vs JS)", () => {
 
       const block = await helper.adMatchFromRequest(
         documentRequest({ headers: { cookie: "_fbp=fb.1.1.987; _fbc=fb.1.1.abc" } }),
-        { trackingAllowed: true, email: "founder@example.com" }
+        { trackingAllowed: true, person: { email: "founder@example.com" } }
       )
       expect(block).toMatchObject({
         em: hashInfiniteEmail("founder@example.com"),
@@ -1076,7 +1040,7 @@ describe.each([
           "x-forwarded-for": `${VECTORS.clientIp}, 10.0.0.1`
         }
       },
-      { trackingAllowed: true, email: "founder@example.com" }
+      { trackingAllowed: true, person: { email: "founder@example.com" } }
     )
     expect(block).toEqual({
       em: hashInfiniteEmail("founder@example.com"),

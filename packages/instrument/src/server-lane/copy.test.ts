@@ -25,7 +25,7 @@ describe("the agent brief", () => {
   it("keeps generated source-reference examples publishable through the real secret scanner", () => {
     const guide = renderServerLaneBrief({ status: { kind: "created", middlewarePath: "middleware.ts", modulePath: "lib/infinite-server-lane.ts" }, siteSourceKey: "site_fixture", productionHosts: ["example.test"] })
     const scanner = createScanner({ literals: [], allowedIds: [] })
-    expect(guide).toContain("visitKey: session.metadata.infinite_visit_key")
+    expect(guide).toContain("contextMetadata(context, { contentIds, numItems })")
     expect(scanner.redact(guide).hits).toEqual([])
     expect(scanner.findInCommit([{ path: "docs/infinite-server-lane.md", added: guide.split("\n").map((text, index) => ({ text, line: index + 1 })) }], () => false)).toEqual([])
   })
@@ -77,63 +77,63 @@ describe("the agent brief", () => {
     expect(brief).toContain("- [ ] ")
   })
 
-  it("documents adMatch as OPT-IN, customer-hashed, and never stored", () => {
+  it("documents the relay as THE Meta path (PostHog or not), customer-hashed, payer-only, and never stored", () => {
     expect(brief).toContain(`### ${serverLaneCopy.adMatchHeading}`)
-    // The audience gate is stated first, because the wrong founder double-counts by adding it.
-    expect(brief).toContain("Meta ads and do not use PostHog")
+    // Gap 6 / P1-10: the relay is the default; PostHog's own Meta destination is the one turned off.
+    expect(brief).toContain("for every site, with or without PostHog")
+    expect(brief).toContain("turn that destination off for these events")
+    expect(brief).not.toContain("do not use PostHog")
+    expect(brief).not.toMatch(/(?<!with or )without PostHog/)
     expect(brief).toContain("Send outcomes to Meta Conversions API")
-    expect(brief).toContain("trackingAllowed: true")
-    expect(brief).toContain("explicitly signalled consent")
-    // The hashing recipe is spelled out from confirmed webhook/submission data, so nobody has to
-    // guess Meta's normalisation or persist raw PII at checkout.
-    expect(brief).toContain("email: submittedEmail")
+    // Match data needs the page's explicit signal.
+    expect(brief).toContain("trackingAllowed: body.adMatch === true")
+    expect(brief).toContain("never inferred from cookies")
     expect(brief).toContain("`fn`, `ln`, `ct`, `st`, `zp` and `country`")
-    expect(brief).toContain("`session.customer_details.email`, `session.customer_details.name`, `session.customer_details.address`")
-    expect(brief).toContain("`session.collected_information.shipping_details` / `session.shipping_details`")
-    expect(brief).toContain("For leads, use the submitted email")
+    // P1-1: the name split, in words.
+    expect(brief).toContain("the first word is `fn`, every later word together is `ln`")
+    // P1-2: the payer, never the recipient; the address whole from one place.
+    expect(brief).toContain("**The payer, never the recipient.**")
+    expect(brief).toContain("the address WHOLE from one place")
+    expect(brief).toContain("only when billing has no city and the shipping name is the payer's own")
+    expect(brief).toContain("stripeCheckoutPayer(session)")
+    expect(brief).not.toMatch(/customer_details\.address \?\? session\.(collected_information|shipping_details)/)
     expect(brief).toContain("Never store email/name/address anywhere new")
     expect(brief).toContain("never put them in Stripe metadata")
     expect(brief).toContain("never log them")
-    expect(brief).toContain("never send phone")
+    expect(brief).toContain("never send a phone number")
     // ONE external_id rule: a stable per-person id shared by lead and purchase, then trimmed only.
     expect(brief).toContain("one stable per-person id shared by that person's lead and purchase")
-    expect(brief).toContain("HMAC-SHA256(LEAD_ID_SECRET, submittedEmail.trim().toLowerCase())")
-    expect(brief).toContain("externalId: leadId")
-    expect(brief).toContain("**trimmed only — its case is kept**")
+    expect(brief).toContain("HMAC-SHA256(LEAD_ID_SECRET, email.trim().toLowerCase())")
+    expect(brief).toContain("**trimmed only, its case kept**")
     expect(brief).not.toMatch(/external_id:\s*createHash[^\n]*\.toLowerCase\(\)/)
-    expect(brief).not.toMatch(/`em` and `external_id` are sha256 hex of the trimmed, lowercased/)
-    expect(brief).not.toMatch(/address\?\.(?:city|state|postal_code|country)[^\n]*createHash/)
-    expect(brief).toContain("adMatchForMeta = checkoutAdMatch ?")
+    expect(brief).toContain("personMatch(context.adMatch, await stripeCheckoutPayer(session))")
     expect(brief).toContain("discarded")
     expect(brief).toContain("A malformed hash is a 400")
-    // eventId is Infinite's idempotency key; Infinite decides the event_id Meta receives (it derives
-    // one for account- and visitor-deduped conversions), so the page must never build a Meta event ID.
     expect(brief).toContain("**`eventId` is Infinite's idempotency key, not Meta's event ID.**")
     expect(brief).toContain("Infinite derives a different id, which your pages never see")
-    // Purchases are server events only, from the payment webhook; no browser twin; never on a click.
     expect(brief).toContain("**Purchases are server events only.**")
-    expect(brief).toContain("// 2. In the PAYMENT WEBHOOK")
     expect(brief).toContain("**Never build a Meta event ID in the page, and never fire a Meta conversion")
-    // Negative: the old, wrong advice is gone everywhere in the brief.
     expect(brief).not.toContain("Meta gets the same event_id")
     expect(brief).not.toContain("becomes Meta's `event_id`")
     expect(brief).not.toMatch(/eventID:\s*\\?"purchase:/)
     expect(brief).not.toMatch(/fbq\([^)]*\{\s*eventID/)
-    // The not-yet-built server-instructed mirror is never promised.
-    expect(brief).not.toContain("metaEventId")
-    expect(brief).not.toContain("never an email, name or phone")
-    // The buyer's browser pair, and WHY it cannot come from the call to Infinite.
+    // No undefined helper names in any recipe (review P2).
+    for (const undefinedName of ["hmacSha256(", "saveCheckoutAdMatch(", "loadCheckoutAdMatch(", "checkoutAdMatchMetadata(", "productIdsForSession("]) {
+      expect(brief).not.toContain(undefinedName)
+    }
+    // No new dependency in any recipe (review P2).
+    expect(brief).not.toContain('import { waitUntil } from "@vercel/functions"')
     expect(brief).toContain("the IP address of the browser")
     expect(brief).toContain("server-to-server")
     expect(brief).toContain("adMatchFromRequest(request")
-    // A visitor's tampered cookie must never be able to delete a founder's conversion.
     expect(brief).toContain("a tampered cookie can never delete your purchase")
-    // Meta's four required-parameter skips, and the verified-domain precondition.
     expect(brief).toContain("declines rather than sending a broken one")
     expect(brief).toContain("7-day window")
-    expect(brief).toContain("verified in Meta Events Manager")
-    // And the contract section lists it as an optional, outcome-only key.
+    expect(brief).toContain("zero-decimal currencies")
     expect(brief).toContain("`adMatch` is OPTIONAL and outcome-only")
+    expect(brief).toContain("Send it on every server conversion the visitor allowed tracking for, PostHog or not.")
+    // P1-5: path is optional for Infinite, required for Meta, said plainly.
+    expect(brief).toContain("`properties.path` is optional for Infinite: an outcome without one is recorded. It is required for Meta")
   })
 
   it("sets the SPA expectation, states DNT/GPC is honored, and shows the checkout→webhook carry", () => {
@@ -144,12 +144,11 @@ describe("the agent brief", () => {
     // Task C: DNT / Global-Privacy-Control are documented as honored.
     expect(brief).toContain("Do-Not-Track")
     expect(brief).toContain("Global-Privacy-Control")
-    // Task A: the webhook carry pattern (compute at checkout, carry via metadata, pass properties.visitKey).
-    expect(brief).toContain("infiniteVisitKey")
-    expect(brief).toContain("metadata: { infinite_visit_key }")
-    expect(brief).toContain("properties: { visitKey: session.metadata.infinite_visit_key }")
-    // Task A: plain-object requests are read, not swallowed.
-    expect(brief).toContain("plain object")
+    // Gap 7: the checkout → webhook carry (device data on the session's metadata, one field per value).
+    expect(brief).toContain("const context = await buyerContext(req, { trackingAllowed })")
+    expect(brief).toContain("metadata: { ...params.metadata, ...contextMetadata(context, { contentIds, numItems }) }")
+    expect(brief).toContain("reportStripeCheckoutPurchase(event, { path: \"/success\" })")
+    expect(brief).toContain("one metadata field each")
   })
 
   it("never contains a secret value or a raw-IP field", () => {
@@ -188,12 +187,16 @@ describe("the README's Meta advice", () => {
   it("matches the brief, and the old wrong advice is gone", async () => {
     const { readFileSync } = await import("node:fs")
     const { fileURLToPath } = await import("node:url")
-    const readme = readFileSync(fileURLToPath(new URL("../../README.md", import.meta.url)), "utf8")
+    const readme = readFileSync(fileURLToPath(new URL("../../README.md", import.meta.url)), "utf8").replace(/\n\s*/g, " ")
     expect(readme).toContain("**`eventId` is Infinite's idempotency key, not Meta's event ID.**")
     expect(readme).toContain("**Purchases are server events only.**")
     expect(readme).toContain("trimmed only")
-    expect(readme).toContain("`session.customer_details.email`, `session.customer_details.name`")
+    expect(readme).toContain("Email and name come from `session.customer_details`")
+    expect(readme).toContain("only when billing has no city and the shipping name is the payer's own")
     expect(readme).toContain("For leads, use the submitted email")
+    expect(readme).toContain("with or without PostHog")
+    expect(readme).not.toContain("do not use PostHog")
+    expect(readme).toContain("Infinite records an outcome without one, but Meta needs it")
     expect(readme).toContain("Never store")
     expect(readme).toContain("never send")
     expect(readme).not.toContain("Meta gets the same event_id")
@@ -235,23 +238,11 @@ function runExternalIdLine(line: string, user: unknown): Record<string, unknown>
 const sha = (value: string) => createHash("sha256").update(value).digest("hex")
 
 describe("the Meta forwarding example: one purchase, one eventId (review F1)", () => {
-  it.each(Object.entries({ BRIEF_TS, BRIEF_JS, README }))("%s reports every purchase under the same eventId", (_name, text) => {
-    const ids = purchaseEventIdSources(text)
-    expect(ids.size).toBeGreaterThan(0)
-    expect([...ids]).toEqual(["session.id"])
-    // The Meta webhook call carries the visit key from checkout next to its adMatch block.
-    expect(text).toMatch(/visitKey: session\.metadata\.infinite_visit_key\s+\/\/ carried from checkout/)
-    expect(text).toContain("content_ids: (await productIdsForSession(session.id)).join")
-    expect(text).toContain("adMatch: adMatchForMeta")
-    expect(text).toContain("the SAME id every time this purchase is reported")
-  })
-
-  it("tells the agent to MOVE the purchase report to the webhook, not to add a second one", () => {
-    for (const brief of [BRIEF_TS, BRIEF_JS]) {
-      expect(brief).toContain("report the purchase from your PAYMENT WEBHOOK INSTEAD of")
-      expect(brief).toContain("and delete this call, so one purchase is")
-    }
-    expect(README).toContain("Report the purchase HERE and only here")
+  it.each(Object.entries({ BRIEF_TS, BRIEF_JS, README }))("%s reports the purchase from the webhook only, under the session id", (_name, text) => {
+    // The purchase is reported by the helper's webhook function, keyed on the session id; no hand-built id.
+    expect(text).toContain("reportStripeCheckoutPurchase(event, { path: \"/success\" })")
+    expect(purchaseEventIdSources(text).size).toBe(0)
+    expect(text).not.toMatch(/eventId:\s*\\?"purchase:/)
   })
 
   it("negative: the old copy reported one purchase under two different ids", () => {
@@ -263,11 +254,11 @@ describe("the Meta forwarding example: one purchase, one eventId (review F1)", (
   })
 })
 
-describe("the external_id recipe is safe to paste into a checkout route (review F2)", () => {
+describe("the external_id recipe is safe to paste into a route (review F2)", () => {
   it.each(Object.entries({ BRIEF_TS, BRIEF_JS, README }))("%s: lead-to-purchase external_id is one stable per-person id", (_name, text) => {
     expect(text).toContain("one stable per-person id shared by")
-    expect(text).toContain("HMAC-SHA256(LEAD_ID_SECRET, submittedEmail.trim().toLowerCase())")
-    expect(text).toContain("externalId: leadId")
+    expect(text).toContain("HMAC-SHA256(LEAD_ID_SECRET, email.trim().toLowerCase())")
+    expect(text).toContain("infiniteLeadId(email)")
     expect(text).not.toMatch(/external_id:\s*createHash[^\n]*\.toLowerCase\(\)/)
   })
 
@@ -293,7 +284,7 @@ describe("the event-ID copy uses the app's own dedupe labels and the real reason
 
 // The plain installer keeps its decision boundary: `install --server-lane` still installs nothing and
 // says so, while the wizard has its own strings for decision 5 and the reportInfiniteOutcome / mirror
-// recipes. The hash pins the current public copy, including Round 2's product-id handoff.
+// recipes. The hash pins the current public copy (the outcome helper API, the relay as the Meta path for every site).
 describe("the plain installer's server-lane copy stays pinned", () => {
   function serialise(value: unknown): unknown {
     if (typeof value === "function") return "fn:" + value.toString()
@@ -307,7 +298,7 @@ describe("the plain installer's server-lane copy stays pinned", () => {
   it("hashes to the pre-wizard value", () => {
     const text = JSON.stringify(serialise(serverLaneCopy))
     expect(createHash("sha256").update(text).digest("hex")).toBe(
-      "e9bada21be5c59884c077c13c41b0d3f5e69fffbcbf6bd6c33e3265c750a9370"
+      "39a42f51ebc0512e8f1bdd7b02f4a34da0a3cd3e365034c178422d54f617069c"
     )
     expect(createHash("sha256").update(serverLaneCopy.status.targetPackages(["@vercel/functions"])).digest("hex")).toBe(
       "9b0fbf1256ca539e699938d069961dc145855359f994b43133afa58d89add7ec"
@@ -340,55 +331,46 @@ describe("the wizard's recipes", () => {
   const report = serverLaneWizardCopy.reportOutcomeRecipe().join("\n")
   const webhook = serverLaneWizardCopy.webhookCaptureRecipe().join("\n")
 
-  it("report from the awaited request with a stable eventId, and mirror only the returned id", () => {
-    expect(report).toContain("reportInfiniteOutcome({")
-    // B16: the raw stable id; the helper namespaces it as "<type>:<id>" on the wire
-    expect(report).toMatch(/eventId: user\.id,/)
-    expect(report).toContain('"sign_up:<id>"')
+  it("leads: one call after the row is stored, a stable per-person id, and a mirror only of the returned id", () => {
+    expect(report).toContain("await reportInfiniteLead(req, {")
+    expect(report).toContain("trackingAllowed: body.adMatch === true")
+    expect(report).toContain("reportInfiniteOutcomeForMirror({")
+    expect(report).toContain("eventId: personId ?? stableId")
     expect(report).toContain("infiniteMetaMirror(data.metaEventName, data.metaEventId)")
+    expect(report).toContain("`lead:<id>`")
     expect(report).not.toMatch(/eventID:|fbq\(/)
   })
 
-  it("tells visitor-facing routes to use waitUntil, consented match data, stable lead ids, and the browser Meta guards", () => {
-    expect(report).toContain('import { waitUntil } from "@vercel/functions"')
-    expect(report).toContain("waitUntil(reportInfiniteOutcome({")
+  it("visitor-facing routes never add a dependency; consented match data; the browser Meta guards", () => {
+    expect(report).not.toContain("@vercel/functions")
+    expect(webhook).not.toContain("@vercel/functions")
+    expect(report).toContain("waits at most 800 ms")
     expect(report).toContain("LEAD_ID_SECRET")
-    expect(report).toContain("site-held secret")
-    expect(report).toContain("explicitly signalled consent")
-    expect(report).toContain("facebook.com/tr")
+    expect(report).toContain("never inferred from cookies")
     expect(report).toContain("400 ms")
     expect(report).toContain("disablePushState")
   })
 
-  it("capture fbc, fbp, user agent and ip from one device at checkout; purchases from the webhook only", () => {
-    expect(webhook).toContain("adMatchFromRequest(request")
-    expect(webhook).toMatch(/one device/i)
-    expect(webhook).toContain("eventId: session.id")
-    expect(webhook).toContain("helper sends it as purchase:<id>")
-    expect(webhook).toContain("content_ids: session.metadata.infinite_skus")
-    expect(webhook).toContain("session.customer_details.email")
-    expect(webhook).toContain("session.customer_details.name")
-    expect(webhook).toContain("session.customer_details.address")
-    expect(webhook).toContain("session.collected_information?.shipping_details")
-    expect(webhook).toContain("hash them in-process")
-    expect(webhook).toContain("never send phone")
+  it("checkout saves the device data with the cart; the purchase comes from the webhook only, for the payer", () => {
+    expect(webhook).toContain("const context = await buyerContext(req, { trackingAllowed })")
+    expect(webhook).toContain("contextMetadata(context, { contentIds, numItems })")
+    expect(webhook).toContain("await reportStripeCheckoutStarted(session, { path: \"/cart\" })")
+    expect(webhook).toContain("export const config = { api: { bodyParser: false } }")
+    expect(webhook).toContain("stripe.webhooks.constructEvent(await rawBody(req)")
+    expect(webhook).toContain("reportStripeCheckoutPurchase(event, { path: \"/success\" })")
+    expect(webhook).toContain("`checkout.session.completed` and `checkout.session.async_payment_succeeded`")
+    expect(webhook).toContain("only live (`livemode`")
+    expect(webhook).toContain("**The payer, never the recipient:**")
+    expect(webhook).toContain("never send a phone number")
     expect(webhook).not.toMatch(/\bph\b|phone_number|infiniteMetaMirror\(/)
   })
 
-  it("prints the PR #393 webhook retry and commerce payload handoff rules", () => {
-    expect(webhook).toContain("const RETRYABLE_INFINITE_STATUSES = new Set([401, 403, 429])")
-    expect(webhook).toContain("status === null || status >= 500 || RETRYABLE_INFINITE_STATUSES.has(status)")
-    expect(webhook).toContain("return Response.json({ received: true, reported: false }, { status: 500 })")
-    expect(webhook).toContain("return Response.json({ received: true }, { status: 200 })")
-    expect(webhook).toContain("await reportInfiniteOutcome({")
-    expect(webhook).toContain("const { status } = await reportInfiniteOutcome({")
-    expect(webhook).toContain("metadata.infinite_skus")
-    expect(webhook).toContain("one comma-joined token")
-    expect(webhook).toContain("amount charged after tax and discounts")
-    expect(webhook).toContain("count every event")
+  it("prints the retry rule and the commerce payload rules", () => {
+    expect(webhook).toContain("answers 500 (so Stripe retries) only when the report was not delivered or Infinite answered 5xx, 401, 403 or 429")
+    expect(webhook).toContain("Before Infinite is configured, and for every refusal a retry cannot fix, it answers 200")
+    expect(webhook).toContain("zero-decimal currencies such as JPY and KRW are not divided")
+    expect(webhook).toContain("capped at 120 characters by dropping whole ids")
     expect(webhook).toContain("begin_checkout")
-    expect(webhook).toContain("add_to_cart")
-    expect(webhook).toContain("view_item")
   })
 
   it("speaks the JS helper's import specifier when the helper is .mjs", () => {

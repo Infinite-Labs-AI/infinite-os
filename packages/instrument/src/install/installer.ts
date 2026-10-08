@@ -10,7 +10,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFile
 import { recordGeneratedApi } from "../jobs/generated-api.js"
 import { previewOwnerWiring, type OwnerWiringPreview } from "../frameworks/owner-wiring-preview.js"
 import { planManagedCapture, applyManagedCapture, type ManagedCapturePlan } from "./managed-capture.js"
-import { join } from "node:path"
+import { dirname, join } from "node:path"
 
 import { restoreSnapshot, snapshotFiles, type FileSnapshot } from "../apply.js"
 import { frameworkAdapters, isSupportedFramework } from "../frameworks/index.js"
@@ -36,7 +36,7 @@ import {
   writeInstallManifest
 } from "../manifest.js"
 import { packageInstallCommandLine, type CommandSpawner } from "../package-manager.js"
-import { planServerLane, serverLaneTargetForMode, SERVER_LANE_MODULE_IMPORT_PATH } from "../server-lane/install.js"
+import { buildServerLaneFiles, planServerLane, SERVER_LANE_MODULE_IMPORT_PATH } from "../server-lane/install.js"
 import type {
   DeferredConfigRewrite,
   ImproveLine,
@@ -69,10 +69,11 @@ import { applyImproveEdit, detectAdoptedFacts, improveLinesFor, withSensitivePat
 import { artifactsFromKeys, manifestIdsFor, posthogProxyFor, withConversionHelpers, wizardInstallWorkspaceId, type WizardInstallArtifacts } from "./keys-adapter.js"
 import { buildCreatedMiddlewareSource, buildServerLaneModuleSource } from "../server-lane/runtime-source.js"
 import { SERVER_LANE_GUIDE_FILE } from "../server-lane/copy.js"
-import { normalizeAppRelativePath, writeFileAtomic } from "../frameworks/shared.js"
+import { renderServerEventsHandoff, SERVER_EVENTS_HANDOFF_FILE, serverConversionsOf, withHandoffInReceipt } from "../server-lane/handoff.js"
+import { hasDependency, normalizeAppRelativePath, writeFileAtomic } from "../frameworks/shared.js"
 import { DEFAULT_POSTHOG_PROXY_PATH, INFINITE_API_ORIGIN, infiniteCollectDestination } from "../workspace-artifacts.js"
 import { buildManualNextConfigInstruction, hasExactNextConfigRewrites, type ManagedProxySpec } from "../frameworks/vercel-config.js"
-import { buildAnalyticsModuleSource, buildClientComponentSource, isManagedInfiniteFile } from "../frameworks/managed-files.js"
+import { buildAnalyticsModuleSource, buildClientComponentSource, hasExistingUnmanagedFile, isManagedInfiniteFile } from "../frameworks/managed-files.js"
 import { findLockfile, runNpmJob } from "./npm.js"
 import { proofFileBlockedText, proofFileTarget } from "./proof-file.js"
 import {
@@ -227,6 +228,7 @@ function gitShow(root: string, rev: string, path: string): string | null {
 }
 
 const repoRelative = (appRoot: string, file: string): string => (appRoot === "." ? file : `${appRoot}/${file}`)
+const toAppRelativePath = (appRoot: string, file: string): string => (appRoot === "." || !file.startsWith(`${appRoot}/`) ? file : file.slice(appRoot.length + 1))
 
 /** The D17 detector's routes (`detectSensitivePages`) over the app's own source: login, checkout, … pages. */
 export function sensitiveRoutesOf(appRootAbsolute: string): string[] {
@@ -554,7 +556,7 @@ export class WizardInstaller implements Installer {
     const capturePlan = codeImprove.some(entry => entry.kind === "capture_beside_adopted_pixel") ? planManagedCapture({ root, appRoot: scan.appRoot, framework: scan.framework, pixels: scan.facts.meta, htmlPages: scan.inspect.detectedFiles.filter(file => /\.html?$/i.test(file)) }) : undefined
     const carriedFiles = [...new Set(carriedEdits.map((edit) => edit.file))]
     const snapshot: FileSnapshot[] = snapshotFiles(root, [
-      ...new Set([...p.files, ...laneFiles, installManifestRelativePath, ...improveFiles, ...npmFiles, ...carriedFiles, ...(capturePlan ? [capturePlan.module, ...capturePlan.entrypoints] : [])])
+      ...new Set([...p.files, ...laneFiles, repoRelative(scan.appRoot, SERVER_EVENTS_HANDOFF_FILE), installManifestRelativePath, ...improveFiles, ...npmFiles, ...carriedFiles, ...(capturePlan ? [capturePlan.module, ...capturePlan.entrypoints] : [])])
     ])
     const rollback = (): boolean => {
       try {
@@ -674,6 +676,10 @@ export class WizardInstaller implements Installer {
         const files = [...new Set([...receipt.files, managedCapture.module, ...managedCapture.entrypoints])]
         writeInstallManifest(root, { ...receipt, managedCapture, files, contentHashes: { ...receipt.contentHashes, ...computeContentHashes(root, files) } })
       }
+      // 6. P0-6: the owner's steps for server conversions, as a file in the pull request. The agent writes the
+      // server code either way; it stays inert until the owner does these steps.
+      const handoff = p.serverLane ? this.writeServerEventsHandoff(root, scan, keys, artifacts, answers.conversions) : null
+      if (handoff) changedFiles.push(handoff)
       return {
         ok: true,
         rolledBack: false,
@@ -693,6 +699,41 @@ export class WizardInstaller implements Installer {
       const restored = rollback()
       return this.failed(artifacts, warnings, error instanceof Error ? error.message : String(error), restored)
     }
+  }
+
+  /**
+   * Write `docs/infinite-server-events.md` (the owner's steps) when the plan reports conversions from the
+   * server, and record it in the receipt as a lane-created file (committed with the lane, removed by
+   * uninstall only while unedited). Never overwrites a file Infinite does not manage. Returns its path.
+   */
+  private writeServerEventsHandoff(
+    root: string,
+    scan: WizardScanResult,
+    keys: TagKeys,
+    artifacts: WizardInstallArtifacts,
+    conversionNames: readonly string[]
+  ): string | null {
+    const conversions = serverConversionsOf(conversionNames)
+    if (conversions.length === 0) return null
+    const appRootAbsolute = join(root, scan.appRoot)
+    if (hasExistingUnmanagedFile(appRootAbsolute, SERVER_EVENTS_HANDOFF_FILE)) return null
+    const receipt = readInstallManifest(root)
+    if (!receipt) return null
+    const contents = renderServerEventsHandoff({
+      conversions,
+      productionHost: artifacts.infinite?.productionHosts?.[0] ?? keys.infinite.productionHosts[0] ?? null,
+      siteSourceKey: artifacts.infinite?.siteSourceKey || keys.infinite.siteSourceKey || null,
+      envSetByInfinite: keys.serverLane.envWriteGranted,
+      metaConnected: keys.meta.status === "connected",
+      usesStripe: hasDependency(appRootAbsolute, "stripe"),
+      usesPosthog: artifacts.posthog !== undefined || scan.detected.some((entry) => entry.provider === "posthog"),
+      webhookUrlPath: "/api/stripe-webhook"
+    })
+    const path = repoRelative(scan.appRoot, SERVER_EVENTS_HANDOFF_FILE)
+    mkdirSync(dirname(join(root, path)), { recursive: true })
+    writeFileAtomic(join(root, path), contents)
+    writeInstallManifest(root, withHandoffInReceipt(receipt, path, contents))
+    return path
   }
 
   /** Re-render whole owned modules only. Entry points, npm and improve edits are never replayed. */
@@ -722,9 +763,10 @@ export class WizardInstaller implements Installer {
       if (lane.modulePath && previous.serverLane?.module === lane.modulePath) expected.set(lane.modulePath, buildServerLaneModuleSource(options))
       if (lane.middleware && previous.configOwnership?.[lane.middleware.path]?.kind === "created") expected.set(lane.middleware.path, buildCreatedMiddlewareSource({ moduleImportPath: SERVER_LANE_MODULE_IMPORT_PATH }))
     }
-    const target = lane ? serverLaneTargetForMode(lane.mode) : null
-    if (target) {
-      const built = target.build(options, join(root, scan.appRoot))
+    if (lane?.created && lane.created.length > 0) {
+      // Every whole file the lane wrote, Next's and the brief-only outcome helper included.
+      const appRootAbsolute = join(root, scan.appRoot)
+      const built = buildServerLaneFiles(lane.mode, options, appRootAbsolute, lane.created.map((entry) => toAppRelativePath(scan.appRoot, entry.path)))
       for (const [file, source] of Object.entries(built)) {
         const path = normalizeAppRelativePath(scan.appRoot, file)
         if (previous.serverLane?.created?.includes(path) && previous.configOwnership?.[path]?.kind === "created") expected.set(path, source)

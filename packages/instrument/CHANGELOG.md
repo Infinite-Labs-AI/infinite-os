@@ -3,6 +3,33 @@
 All notable changes to the `infinite-tag` npm package (`packages/instrument`). Versions before
 0.5.0 are recorded in git history only (`git log -- packages/instrument`).
 
+## Unreleased
+
+### One outcome helper on every host, with Stripe and lead reports built in
+
+- Next.js sites (Pages and App Router), and sites with no known host, now get the same `lib/infinite-outcome` helper
+  as Vercel, Netlify, Cloudflare Pages and Node. The Next module no longer exports its own `sendInfiniteServerEvent`,
+  and the Node target no longer ships a separate twin: one API everywhere. The `.ts` helper passes `tsc --strict`
+  (with `noUncheckedIndexedAccess` too) and the lint presets a Next site runs.
+- `reportInfiniteOutcome(outcome)` resolves Infinite's HTTP status, or `null` when nothing reached Infinite; it
+  never throws (an outcome with no `type` or `eventId` resolves `400` without a send). `reportInfiniteOutcomeForMirror`
+  resolves the full answer (`metaEventId`, `metaEventName`) for a page that mirrors. `postInfiniteOutcome` is gone.
+- New: `reportStripeCheckoutStarted`, `reportStripeCheckoutPurchase` (the webhook's answer: 500 only when a retry
+  can deliver the report; test-mode events, other integrations' sessions and anything before setup answer 200),
+  `reportInfiniteLead`, `reportInfiniteOutcomeInBackground` (the site's own `waitUntil` or Next `after()`, else a
+  bounded 800 ms wait; no dependency is ever added), `buyerContext` / `contextMetadata` / `contextFromMetadata`
+  (the buyer's device data carried from checkout to the webhook on the session's metadata, one field per value),
+  `personMatch`, `stripeCheckoutPayer`, `stripeAmountToMajor`, `infiniteContentIds`, `infiniteLeadId`.
+- `ln` is every word after the first, joined, as Infinite's own sender splits a name. A Stripe buyer's address is
+  the payer's, taken whole from one place: the shipping address only when billing has no city and it is addressed
+  to the payer by name. Zero-decimal currencies are no longer divided by 100. `content_ids` is capped to Infinite's
+  120-character value limit by dropping whole ids; any other value Infinite would refuse drops itself instead of
+  losing the outcome. `path` is optional for recording (only Meta needs it), a query string is cut.
+- Infinite's relay is the Meta path for server conversions with or without PostHog; turn PostHog's own Meta
+  destination off for those events.
+- The wizard writes the site owner's steps for server conversions into the pull request
+  (`docs/infinite-server-events.md` and a section of the description).
+
 ## 0.12.2 — 2026-10-05
 
 ### Page views carry the Meta ad they came from

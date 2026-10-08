@@ -553,103 +553,105 @@ where the site is **hosted** (`vercel.json` / `.vercel/project.json` / `@vercel/
 | **Netlify** | Creates `netlify/edge-functions/infinite-server-lane.ts`, declared [in-file](https://docs.netlify.com/build/edge-functions/declarations/) with `export const config` — `netlify.toml` is never edited. Assets are excluded per extension (Netlify's own `["/*.css", "/*.js"]` shape); a blanket `/*.*` would over-exclude, because URLPattern's wildcard is greedy across `/`. |
 | **Cloudflare Pages** | Creates [`functions/_middleware.ts`](https://developers.cloudflare.com/pages/functions/middleware/), reading its secret from `context.env`. A plain Worker (a `wrangler` config with a `main` entrypoint) gets the brief's Worker snippet instead — there is no file of ours to add safely. |
 | **Express / any Node server** | Creates `lib/infinite-server-lane.js`. Nothing auto-wires your server file: the brief names the exact `app.use(infiniteServerLane())` line and where it goes. |
-| No host signal | Writes the agent brief only; `server-lane --brief > INSTALL-SERVER-LANE.md` saves it anywhere. |
+| No host signal | Writes the agent brief and the outcome helper (no page-view lane); `server-lane --brief > INSTALL-SERVER-LANE.md` saves the brief anywhere. |
 
-Every target also writes **`lib/infinite-outcome`**, exporting `postInfiniteOutcome({ type, path,
-eventId, accountKey, visitKeyInputs, adMatch })` (plus `adMatchFromRequest`), so any server route — a Vercel `api/` function
-confirming a paid Stripe session, a webhook, a job — reports an outcome in three lines and carries
-the same `visitKey` as the page view that produced it. Report outcomes from where they become real
-(a committed row, a captured payment, a served file), never from a click.
+Every target (Next.js included, and the brief-only fallback) also writes the same outcome helper,
+**`lib/infinite-outcome`** (`.ts`, or `.js` / `.mjs` in a JavaScript project), so any server route
+reports a conversion with one API. It does nothing until its environment variables are set.
 
-#### `adMatch` — forwarding the conversion to Meta
+| Export | What it does |
+| --- | --- |
+| `reportInfiniteOutcome(outcome)` | Sends one outcome; resolves Infinite's HTTP status (`202`), or `null` when nothing reached Infinite (not configured yet, network error, the 2 s timeout). An outcome it refuses before sending (no `type` or `eventId`) resolves `400`. Never throws. |
+| `reportInfiniteOutcomeForMirror(outcome)` | The same send, resolving `{ status, accepted, duplicate, metaEventId, metaEventName }` for a route that hands the page Infinite's Meta id (`infiniteMetaMirror`). |
+| `reportInfiniteOutcomeInBackground(outcome)` | For routes a visitor waits on: hands the send to the site's own `waitUntil` (only when the site already depends on `@vercel/functions`) or Next's `after()`; otherwise waits at most 800 ms. Never adds a dependency. |
+| `reportStripeCheckoutStarted(session, { path })` | `begin_checkout` from a just-created Checkout Session, in the background. |
+| `reportStripeCheckoutPurchase(event, { path })` | The purchase from a VERIFIED Stripe event; resolves the status the webhook answers. |
+| `reportInfiniteLead(request, { email, trackingAllowed, ... })` | A lead or sign-up with one stable id per person, in the background. |
+| `adMatchFromRequest(req, { trackingAllowed, person? })`, `personMatch(adMatch, person)` | Meta match data: the buyer's cookies, ip and user agent plus the person's hashed details, only with `trackingAllowed`. |
+| `buyerContext(req, { trackingAllowed })`, `contextMetadata(context, cart)`, `contextFromMetadata(metadata)` | Carry the buyer's device data from the checkout request to the webhook on the Checkout Session's metadata, one field per value. |
+| `stripeCheckoutPayer(session)`, `stripeAmountToMajor(amount, currency)`, `infiniteContentIds(ids)`, `infiniteLeadId(email)`, `infinitePagePath(req, fallback)`, `infiniteConfigured()` | The pieces those use, exported for routes that need their own shape. |
 
-Only for founders who **run Meta ads and do not use PostHog**. PostHog already ships its own Meta
-destination, and two senders for one conversion is a double count.
+`path` is the page an outcome belongs to (`"/success"`). Infinite records an outcome without one,
+but Meta needs it (`event_source_url`), so every server conversion should send it. A query string or
+fragment is cut off; anything that is not a plain path is dropped. A property value Infinite would
+refuse (free text, more than 120 characters, a 17th property) drops itself instead of costing the
+whole outcome, and `content_ids` is capped to 120 characters by dropping whole ids.
 
-Add an `adMatch` block to the outcome and turn the relay on in Infinite → Site → Settings → *Send
-outcomes to Meta Conversions API*. Infinite then forwards that outcome to Meta's Conversions API as
-it is ingested and **discards the match data**: it is never stored, never written to your ledger,
-never logged. Neither half works alone — no block, nothing to forward; no toggle, nothing is sent.
+#### Sending conversions to Meta
+
+Infinite is the Meta path for server conversions, for every site, with or without PostHog. Turn the
+relay on in Infinite → Site Analytics → Settings → *Send outcomes to Meta Conversions API* (Meta
+connected in Infinite → Connections), and every outcome carrying an `adMatch` block is forwarded to
+Meta's Conversions API as it is ingested; Infinite then **discards the match data**: it is never
+stored, never written to your ledger, never logged. **If PostHog also sends events to Meta** (a Meta
+Ads destination in PostHog's data pipelines), turn that destination off for these events: its copy
+shares no event id with the pixel and carries no browser cookies, ip or user agent, and two senders
+count every conversion twice.
+
+A Stripe store, end to end (the checkout route keeps its own parameters; `contentIds` and `numItems`
+are its cart):
 
 ```ts
-import { adMatchFromRequest, infiniteVisitKey, postInfiniteOutcome } from "../lib/infinite-outcome"
+import { buyerContext, contextMetadata, reportStripeCheckoutStarted, reportStripeCheckoutPurchase } from "../lib/infinite-outcome"
 
-// 1. At CHECKOUT, from the BUYER'S browser request: their _fbc/_fbp cookies, ip and user agent,
-//    saved together (one device) with the checkout. Do not put email, name, address or phone in
-//    Stripe metadata; hash confirmed customer fields later, in the webhook.
-const infiniteConfigured = Boolean(process.env.INFINITE_SITE_SOURCE_KEY && process.env.INFINITE_SERVER_EVENT_SECRET)
-const pageAllowedAdMatch = body.adMatch === true  // explicitly signalled consent; never inferred from cookies
-const adMatch = infiniteConfigured && pageAllowedAdMatch ? await adMatchFromRequest(request, { trackingAllowed: true }) : null
-const infinite_visit_key = adMatch ? await infiniteVisitKey({ clientIp: adMatch.client_ip_address, userAgent: adMatch.client_user_agent }) : undefined
-const session = await stripe.checkout.sessions.create({ /* … */ metadata: { ...(infinite_visit_key ? { infinite_visit_key } : {}) } })
-if (adMatch) await saveCheckoutAdMatch(session.id, adMatch)   // e.g. a column on your order row
-
-// 2. In the PAYMENT WEBHOOK, once the payment is real. Read confirmed buyer fields from Stripe
-//    and hash them in-process; never store them and never log them.
-const address = session.customer_details.address ?? session.collected_information?.shipping_details?.address ?? session.shipping_details?.address
-const submittedEmail = session.customer_details.email
-const leadId = submittedEmail ? hmacSha256(LEAD_ID_SECRET, submittedEmail.trim().toLowerCase()) : undefined
-const checkoutAdMatch = await loadCheckoutAdMatch(session.id)
-const adMatchForMeta = checkoutAdMatch ? {
-  ...checkoutAdMatch,
-  ...await adMatchFromRequest({ headers: {} }, {
-    trackingAllowed: true,
-    email: submittedEmail,
-    externalId: leadId,
-    fullName: session.customer_details.name,
-    city: address?.city,
-    state: address?.state,
-    postcode: address?.postal_code,
-    country: address?.country
-  })
-} : null
-// Report the purchase HERE and only here (not also from a checkout-status route), and never
-// with a browser fbq('track', 'Purchase').
-await postInfiniteOutcome({
-  type: "purchase",
-  path: "/checkout",                   // Meta requires event_source_url
-  eventId: "purchase:" + session.id,   // the SAME id every time this purchase is reported: counted once
-  properties: {
-    value: session.amount_total / 100, currency: session.currency.toUpperCase(),   // required for a Purchase
-    content_ids: (await productIdsForSession(session.id)).join(","),   // product ids / line items from Stripe
-    visitKey: session.metadata.infinite_visit_key   // carried from checkout: same-lane attribution
-  },
-  adMatch: adMatchForMeta ?? undefined
+// 1. CHECKOUT ROUTE. The page adds ad_match=1 only when the visitor allowed tracking.
+const context = await buyerContext(req, { trackingAllowed: req.query.ad_match === "1" })
+const session = await stripe.checkout.sessions.create({
+  ...params,
+  // The cart and the buyer's device data ride to the webhook. Never an email, a name or an address.
+  metadata: { ...params.metadata, ...contextMetadata(context, { contentIds, numItems }) }
 })
+await reportStripeCheckoutStarted(session, { path: "/cart" })   // begin_checkout → Meta InitiateCheckout
+
+// 2. PAYMENT WEBHOOK (events checkout.session.completed + checkout.session.async_payment_succeeded),
+//    after stripe.webhooks.constructEvent on the RAW body:
+return res.status(await reportStripeCheckoutPurchase(event, { path: "/success" })).json({ received: true })
 ```
 
-- **Your generated helper hashes; Infinite never does.** `adMatchFromRequest` emits sha256 hex for
-  `em`, `external_id`, `fn`, `ln`, `ct`, `st`, `zp` and `country` using Meta's normalization rules.
-  For Stripe purchases, read them from the confirmed object
-  (`session.customer_details.email`, `session.customer_details.name`,
-  `session.customer_details.address`, falling back to `session.collected_information.shipping_details`
-  / `session.shipping_details`) and hash in-process. For leads, use the submitted email. Never store
-  email/name/address anywhere new, never put them in Stripe metadata, never log them, and never send
-  phone.
-- **`external_id` is one stable per-person id shared by that person's lead and purchase.** A good
-  lead-to-purchase bridge is a lead-id HMAC under a site-only secret, for example
-  `HMAC-SHA256(LEAD_ID_SECRET, submittedEmail.trim().toLowerCase())`. It is **trimmed only — its case
-  is kept** once chosen: the browser accessor hashes the same id the same way, and an id hashed two
-  different ways reaches Meta as two different people.
+- **What the webhook reports.** Only a paid, live (`livemode`) session that this site's checkout
+  created (Payment Links and other integrations on the same Stripe account are skipped, and so is
+  everything before Infinite is configured), once per session id: both Stripe events for one session
+  and every retry count once. `value` is in major units (zero-decimal currencies such as JPY and KRW
+  are not divided), `currency` is uppercase, with `content_ids` and `num_items` from the checkout.
+- **No retry storm.** It answers 500 (so Stripe retries) only when the report was not delivered, or
+  Infinite answered 5xx, 401, 403 or 429. Before setup, and for every refusal a retry cannot fix, it
+  answers 200.
+- **The payer, never the recipient.** Email and name come from `session.customer_details`. The
+  address comes WHOLE from one place: the billing address (`session.customer_details.address`), or
+  the shipping address (`session.collected_information.shipping_details` /
+  `session.shipping_details`) only when billing has no city and the shipping name is the payer's own
+  (trimmed, any case). A gift shipped to someone else never lends its address or its name. For leads,
+  use the submitted email. Never store email/name/address anywhere new, never put them in Stripe
+  metadata, never log them, and never send a phone number.
+- **Your generated helper hashes; Infinite never does.** `personMatch` / `adMatchFromRequest` emit
+  sha256 hex for `em`, `external_id`, `fn`, `ln`, `ct`, `st`, `zp` and `country` using Meta's
+  normalization rules, byte for byte Infinite's own. The name splits as Infinite's sender does: the
+  first word is `fn`, every later word together is `ln`.
+- **`external_id` is one stable per-person id shared by that person's lead and purchase:**
+  `infiniteLeadId(email)` = `HMAC-SHA256(LEAD_ID_SECRET, email.trim().toLowerCase())` under a secret
+  only your site holds, then hashed once for Meta. It is **trimmed only** (its case is kept): the
+  browser accessor hashes the same id the same way, and an id hashed two different ways reaches Meta
+  as two different people. The same id is the lead's event id (`lead:<id>`), so a re-submit counts once.
+- **Match data needs the page's signal.** The page sends `ad_match=1` (or `adMatch: true` in a JSON
+  body) only when the visitor allowed tracking; never inferred from cookies. Without it the helpers
+  return no match data at all.
 - **`fbc` / `fbp` are Meta's own cookies** on your domain
   ([fbp and fbc](https://developers.facebook.com/docs/marketing-api/conversions-api/parameters/fbp-and-fbc)).
   A visitor can set them to anything, so a malformed one is **dropped** and your outcome is still
-  recorded — a tampered cookie can never delete your purchase. The same holds for the ip and user
-  agent; only `em`/`external_id`, which your own code computes, are strict enough to reject.
+  recorded — a tampered cookie can never delete your purchase. When a browser holds two `_fbc`
+  cookies, the newest ad click is sent.
 - **`client_ip_address` / `client_user_agent` are the BUYER'S BROWSER'S.** Meta's spec calls them
   "the IP address of the browser" and "the user agent for the browser … **required** for website
-  events shared using the Conversions API". Your call to Infinite is server-to-server — its ip is
-  your host's egress address and its user agent is `node` — so `adMatchFromRequest` reads them from
-  *your* inbound request. In a webhook the incoming request is the provider's, not your buyer's:
-  that is why the example captures the block at checkout and carries it to the webhook. When a
-  browser holds two `_fbc` cookies, `adMatchFromRequest` sends the newest ad click.
-- **`eventId` is Infinite's idempotency key, not Meta's event ID.** Make it stable per outcome, and
-  use the SAME one every time the same outcome is reported (`"purchase:" + session.id` everywhere):
-  Infinite counts an `eventId` once, so a retried webhook is counted once, but two reports of one
-  purchase with two different ids count it twice. Infinite decides the `event_id` Meta receives. For
-  a conversion set to *Every event* or *Once per session* in Infinite → Conversions it is this value;
-  for *Once per account*, and for *Once per visitor (TTL)* when the outcome carries a `visitKey`,
-  Infinite derives a different id, which your pages never see.
+  events shared using the Conversions API". Your call to Infinite is server-to-server, so the helpers
+  read them from *your* inbound request; in a webhook the request is Stripe's, which is why the
+  checkout saves them on the session (one metadata field each, a value over Stripe's 500-character
+  limit left out) and the webhook reads them back.
+- **`eventId` is Infinite's idempotency key, not Meta's event ID.** Make it stable per outcome; the
+  helper sends `<type>:<eventId>` (unless it already starts with `<type>:`), so a retried webhook is
+  counted once. Infinite decides the `event_id` Meta receives. For a conversion set to *Every event* or
+  *Once per session* in Infinite → Conversions it is this value; for *Once per account*, and for *Once
+  per visitor (TTL)* when the outcome carries a `visitKey`, Infinite derives a different id, which
+  your pages never see.
 - **Purchases are server events only.** Report them from the payment webhook and do not also fire
   `fbq('track', 'Purchase')` on a thank-you page. The page never builds a Meta event ID, so a
   browser Purchase has no server event to be deduplicated against, and Meta can count the purchase
@@ -660,10 +662,15 @@ await postInfiniteOutcome({
 - **The relay declines rather than sending a broken event.** It skips — and says which, in Site
   Settings — when there is no `event_source_url` (send `path`), no `client_user_agent`, a Purchase
   with no `value` + `currency`, or an `occurredAt` older than Meta's 7-day `event_time` window. Your
-  site's domain must also be verified in Meta Events Manager, or Meta accepts the events and
-  discounts them.
+  site's domain must also be verified in Meta, or Meta accepts the events and discounts them.
 - `adMatch` rides inside the **signed** body, so nobody without your secret can inject one, and it is
   never valid on a document request.
+
+When the wizard wires server conversions it also writes `docs/infinite-server-events.md` into the
+pull request (and the same steps into its description): what the site owner does in Infinite
+(declare the conversions from *Your server*, generate the server-event secret), in their hosting
+(the environment variables, including their own `LEAD_ID_SECRET`), in Stripe (the webhook endpoint
+and its two events) and in Meta (connect it, verify the domain).
 
 If a file it would create already exists and Infinite does not manage it, that file is left alone
 and its exact content goes into the brief; an unmanaged `lib/infinite-server-lane.*` is a planning

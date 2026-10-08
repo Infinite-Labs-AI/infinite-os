@@ -13,6 +13,7 @@
 // UNTRUSTED: it is stripped of control and invisible characters and JSON-quoted, so a file named
 // "a\n### Job evil" can never forge a block or an instruction (review P2-5).
 import { OWNER_BOUNDARY_INSTRUCTION } from "./owner-boundary.js"
+import { serverConversionInstructionsForItem } from "../server-lane/job-brief.js"
 import { posix } from "node:path"
 
 import { sanitizeUntrusted } from "../agents/sanitize.js"
@@ -630,7 +631,7 @@ export function jobBlock(item: ChecklistItem, facts: BriefFacts): string {
   const target =
     guardNote ??
     TARGET_GISTS[item.id] ??
-    (item.jobId === "duplicates_remove" ? duplicateGist(itemTargetOf(item)) : item.jobId === "conversions_to_tools" ? conversionGist(itemTargetOf(item), data) : undefined)
+    (item.jobId === "duplicates_remove" ? duplicateGist(itemTargetOf(item)) : item.jobId === "conversions_to_tools" ? conversionGist(itemTargetOf(item), data) : item.jobId === "server_conversions" ? serverConversionInstructionsForItem(item, facts, Array.isArray(data.approvedConversionNames) ? String(data.approvedConversionNames[0]) : undefined) : undefined)
   const lines = (facts.plan?.lines ?? []).filter((line) => line.jobIds.includes(item.id))
   const out = [
     `### Job ${quoted(item.id)} (${item.n}. ${item.title})`,

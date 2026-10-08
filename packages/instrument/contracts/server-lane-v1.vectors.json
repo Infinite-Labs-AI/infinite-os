@@ -89,6 +89,12 @@
       "raw": "Mary-Jane Watson",
       "fn": "f08f448a5e7a9dc3619bb7c129f6a7d5fc6af002cea17ad71dfdc1c68f4d4e0e",
       "ln": "3f8d40ad6a1d0038b8c334303fe06e70df25a1b78220855f6acc3aec951ffb3b"
+    },
+    "fullNameMultiWord": {
+      "$comment": "fn = the first word; ln = EVERY later word joined, then normalized (Infinite's stripe-billing-match split), never only the last word.",
+      "raw": "Juan Carlos de la Cruz",
+      "fn": "ed08c290d7e22f7bb324b15cbadce35b0b348564fd2d5f95752388d86d71bcca",
+      "ln": "68ea557766752b2cf5ae6a508076c5203eddb29c4daabbcebea844b12656e12f"
     }
   },
   "outcomeResponses": {
@@ -193,7 +199,7 @@
     ]
   },
   "outcomeWireIds": {
-    "$comment": "reportInfiniteOutcome sends the wire eventId \"<type>:<eventId>\" (build plan section 3z.10, B16); once that passes 160 characters it sends \"<type>:\" + the sha256 hex of the eventId. One stable id reused for two outcome types never collides. The echoed metaEventId is the wire id.",
+    "$comment": "reportInfiniteOutcome sends the wire eventId \"<type>:<eventId>\" (build plan section 3z.10, B16); once that passes 160 characters it sends \"<type>:\" + the sha256 hex of the eventId. An eventId that already starts with \"<type>:\" is sent as is (never \"purchase:purchase:...\"). One stable id reused for two outcome types never collides. The echoed metaEventId is the wire id.",
     "cases": [
       {
         "type": "sign_up",
@@ -204,6 +210,11 @@
         "type": "trial",
         "eventId": "acct_991",
         "wire": "trial:acct_991"
+      },
+      {
+        "type": "purchase",
+        "eventId": "purchase:cs_live_a1B2c3",
+        "wire": "purchase:cs_live_a1B2c3"
       },
       {
         "type": "lead",

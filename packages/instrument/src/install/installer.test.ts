@@ -28,6 +28,7 @@ import { computeContentHash, readInstallManifest, writeInstallManifest } from ".
 import type { BuildResult, PlanModel } from "../wizard/contracts/jobs.js"
 
 import { makeEditRecord } from "./edits.js"
+import { reverseServerLane } from "../server-lane/install.js"
 import { WizardInstaller, type InstallerOptions, type WizardApplyResult } from "./installer.js"
 import type { WizardBeforeFacts } from "./plan-model.js"
 import { ownerLayoutJobs } from "../wizard/steps/install.js"
@@ -580,6 +581,42 @@ describe("review fixes (O7 fix round)", () => {
     expect(exists(root, "middleware.ts")).toBe(false)
     expect(read(root, "index.html")).toBe(STATIC_HTML)
     expect(read(root, "vercel.json")).toBe("{}\n")
+  })
+
+  it("P0-6: server conversions in the plan → the owner's steps are written into the PR as a lane file, and uninstall removes it", async () => {
+    const root = makeSite({ "index.html": STATIC_HTML, "vercel.json": "{}\n", "package.json": '{"name":"shop","dependencies":{"stripe":"16.0.0"}}\n' })
+    const subject = installer()
+    const scan = await subject.scan({ root, hosting: fakeHosting() })
+    const candidates = [
+      candidate("server_conversions", "purchase", { allow: { files: ["api/checkout.js"], create: [] } }),
+      candidate("server_conversions", "lead", { allow: { files: ["api/lead.js"], create: [] } })
+    ]
+    const plan = subject.buildPlan(scan, fakeKeys(), fakeBefore(), candidates)
+    expect(plan.lines.some((line) => line.id === "server_lane")).toBe(true)
+    const answer = approveAll(plan)
+    const result = await subject.apply(plan, { ...answer, approved: answer.approved.filter((id) => id !== "npm_install") })
+    expect(result.ok).toBe(true)
+    const handoff = read(root, "docs/infinite-server-events.md")
+    expect(handoff).toContain("# Turn on server conversions")
+    expect(handoff).toMatch(/add `purchase` and `lead`, each with the source \*\*Your server\*\*/)
+    expect(handoff).toContain("Stripe → Developers → Webhooks")
+    expect(result.changedFiles).toContain("docs/infinite-server-events.md")
+    const receipt = readInstallManifest(root)!
+    expect(receipt.serverLane?.created).toContain("docs/infinite-server-events.md")
+    expect(receipt.configOwnership?.["docs/infinite-server-events.md"]).toMatchObject({ kind: "created", installedHash: computeContentHash(handoff) })
+    // Uninstall reverses it with the rest of the lane (hash-gated: only while unedited).
+    expect(reverseServerLane({ root, manifest: receipt, dryRun: true }).removedFiles).toContain("docs/infinite-server-events.md")
+  })
+
+  it("P0-6: no server conversion in the plan → no hand-off file", async () => {
+    const root = makeSite({ "index.html": STATIC_HTML, "vercel.json": "{}\n" })
+    const subject = installer()
+    const scan = await subject.scan({ root, hosting: fakeHosting() })
+    const plan = subject.buildPlan(scan, fakeKeys(), fakeBefore(), [])
+    const answer = approveAll(plan)
+    const result = await subject.apply(plan, { ...answer, approved: answer.approved.filter((id) => id !== "npm_install") })
+    expect(result.ok).toBe(true)
+    expect(exists(root, "docs/infinite-server-events.md")).toBe(false)
   })
 
   it("P3-22: a receipt that parses but fails the shape check is never overwritten by a rebuild", async () => {
