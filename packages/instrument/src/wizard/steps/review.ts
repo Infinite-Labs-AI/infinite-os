@@ -107,13 +107,32 @@ async function writeReviewInputs(session: Session, dir: string, diff: string, fr
         }
       : null,
     consentMode: state.plan?.answers.consentMode ?? null,
-    approvedConversions: state.plan?.answers.conversions ?? []
+    approvedConversions: state.plan?.answers.conversions ?? [],
+    // The event × tool inventory: what the site already sends each tool, what this run promised to add, the pages that
+    // post to the site's own routes and the site's tracking-signal reader (R2, R8, R10 are judged against it).
+    eventInventory: (() => {
+      try {
+        return jobStaticRunContext(ctx.root, state.runId).eventInventory ?? null
+      } catch {
+        return null
+      }
+    })()
   }
   const checks = {
-    jobs: state.jobs.map((job) => ({ id: job.id, title: job.title, state: job.state, checks: job.checks.map((check) => ({ id: check.id, tier: check.tier, state: check.state })) })),
+    // The wizard's own checks with their reasons, and each job's review questions with the review agent's earlier
+    // answers (the jobs' review, right after the agent's turns): step 9 confirms or refutes them from the code.
+    jobs: state.jobs.map((job) => ({
+      id: job.id,
+      title: job.title,
+      state: job.state,
+      checks: job.checks.map((check) => ({ id: check.id, tier: check.tier, state: check.state, reason: check.reason ?? null })),
+      review: job.review
+        ? { state: job.review.state, reason: job.review.reason ?? null, questions: job.review.questions.map((question) => ({ question: question.text, answer: question.answer, note: question.note ?? null, evidence: question.evidence ?? [] })) }
+        : null
+    })),
     inPr: state.report.in_pr ? Object.fromEntries(Object.entries(state.report.in_pr.finishLine).map(([id, cell]) => [id, cell?.state ?? null])) : null,
-    // Review r3: what the plan promised each tool against the whole change (missing Meta events, outcomes without
-    // match data or money, a second send of an event a tool already gets, personal data), in plain words.
+    // The hard rules' findings over the whole change (a purchase without its money, a page-made Meta event id, personal
+    // data or any phone in an outcome or the Stripe metadata), in plain words.
     commerce: await reviewCommerceFindings(session, dir, diff, fromSha)
   }
   const names = { diff: `${REVIEW_INPUT_DIR}/diff.patch`, plan: `${REVIEW_INPUT_DIR}/plan.json`, checks: `${REVIEW_INPUT_DIR}/checks.json` }
