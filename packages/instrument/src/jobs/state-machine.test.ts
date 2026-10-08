@@ -205,3 +205,30 @@ describe("notes redact before storage and display limits", () => {
     expect(output.note).toContain("redacted")
   })
 })
+
+describe("a proof visit the site's own cookie banner kept silent", () => {
+  const liveSince = "2026-10-02T08:50:00.000Z"
+  const commerce = (): ChecklistItem => ({
+    ...claimedAt(item("meta_improve", "waiting_deploy"), CLAIM_AT),
+    id: "meta_improve:commerce_events",
+    checks: [
+      { id: "commerce_promises_met", tier: "S", state: "pass", runId: RUN, at: AT },
+      { id: "meta_seen_leaving", tier: "PV", state: "not_run" }
+    ]
+  })
+
+  it("is not measured, never failed, and the note says why in plain words", () => {
+    const held = { ...result("meta_seen_leaving", "PV", "undetermined"), reason: "held_by_consent — your cookie banner keeps every tool off until a visitor accepts; real visitors who accept are measured from their own visits" }
+    const next = applyResults(commerce(), [held], RUN, { budgetLeft: true, liveSince, afterDeploy: true })
+    expect(next.item.state).not.toBe("failed")
+    expect(next.item.note).toBe("Not measured after the deploy: your cookie banner keeps every tool off until a visitor accepts; real visitors who accept are measured from their own visits")
+    expect(next.item.note).not.toMatch(/\/tr|2xx|Failed/)
+  })
+
+  it("negative: a real miss still fails, in plain words", () => {
+    const missed = { ...result("meta_seen_leaving", "PV", "problem"), reason: "not_seen_leaving — no Meta request left the page and was accepted" }
+    const next = applyResults(commerce(), [missed], RUN, { budgetLeft: true, liveSince, afterDeploy: true })
+    expect(next.item.state).toBe("failed")
+    expect(next.item.note).toBe("Failed after the deploy: Meta on the real visit (no Meta request left the page and was accepted)")
+  })
+})

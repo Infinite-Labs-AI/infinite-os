@@ -22,7 +22,7 @@
 // an item back to `pending` with the failure (budget left) or to `failed` (budget spent), like a local one.
 import { CONSENT_LEFT_FOR_YOU } from "./owner-boundary.js"
 import { CAPTURE_WAITING } from "../install/consent-handoff.js"
-import { checkWords } from "./check-words.js"
+import { checkWords, heldByBanner, NOT_MEASURED_BEHIND_BANNER } from "./check-words.js"
 import { sanitizeUntrusted } from "../agents/sanitize.js"
 import { redactDisplayText } from "../review/display.js"
 import { createScanner, type Scanner } from "../review/scan.js"
@@ -245,7 +245,9 @@ export function applyResults(item: ChecklistItem, results: readonly CheckResult[
     } else if (undecided.length > 0 || advanced.item.state === "waiting_deploy") {
       const local = checksIn(advanced.item, LOCAL_TIERS)
       advanced.item.state = advanced.item.state !== "claimed" && local.length > 0 && allPass(local, runId) ? "done_in_code" : "claimed"
-      advanced.note = undecided.length > 0 ? `Not checked after the deploy: ${checkWords(undecided)}` : `Checked, but not tied to this deploy: ${checkWords(live)}`
+      // The site's own banner kept the proof visit silent: said as not measured, with the reason, never as a failure.
+      const behindBanner = undecided.length > 0 && undecided.every(check => check.runId === runId && heldByBanner(check))
+      advanced.note = behindBanner ? NOT_MEASURED_BEHIND_BANNER : undecided.length > 0 ? `Not checked after the deploy: ${checkWords(undecided)}` : `Checked, but not tied to this deploy: ${checkWords(live)}`
     } else if (advanced.item.state === "proven") delete advanced.item.note
     if (advanced.note) withNote(advanced.item, advanced.note, scanner)
   }

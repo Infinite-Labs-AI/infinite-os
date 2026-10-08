@@ -18,7 +18,10 @@ import { gradeTestRunFull } from "../../checks/grade-test-run.js"
 import type { ChecklistItem } from "../contracts/jobs.js"
 import type { TestRunRequest } from "../contracts/test-engine.js"
 import { createRunState } from "../run-state.js"
-import { PROVE_LIMITS, buildProvenColumn, ownReceipt, step } from "./prove.js"
+import { HELD_BY_BANNER } from "../../checks/grade-test-run.js"
+import { FINISH_LINE_IDS, FINISH_LINE_SOURCES, type Cell } from "../contracts/report.js"
+import { computeVerdict } from "../verdict.js"
+import { PROVE_LIMITS, buildProvenColumn, keepsTrackersBehindBanner, ownReceipt, step } from "./prove.js"
 
 function mergedState() {
   const state = createRunState({ tagVersion: "0.12.0", root: "/repo", appRoot: ".", now: new Date("2026-10-02T09:00:00Z"), displayId: "r-7f3c" })
@@ -251,6 +254,48 @@ describe("prove: consent-held or unobserved tools are UNKNOWN, never problems (O
     expect(column.cells.posthog_route).toMatchObject({ value: null, display: "—", state: "undetermined", reason: "held_by_consent" })
     expect(column.finishLine.survives_ad_blockers!.state).not.toBe("problem")
     expect(JSON.stringify(column)).not.toContain("sent directly")
+  })
+})
+
+describe("prove: a site whose own cookie banner keeps every tool off (the proof visit never accepts it)", () => {
+  const at = "2026-10-02T09:43:00.000Z"
+  const all4 = { ga4: ["G-ACME000001"], posthog: { projectKey: "phc_x", apiHost: "https://us.i.posthog.com" }, meta: ["1234567890123456"], infinite: { siteSourceKey: "s", collectPath: "/c" } }
+
+  it("knows the site gates its trackers: the tag follows the site's own pixels, or the scan found a banner", () => {
+    const census = (owner: "adopted" | "managed") => ({ entries: [{ tool: "ga4" as const, owner, ids: [], evidence: [] }], envSourcedIds: [], identify: { identifyCalls: [], resetCalls: [] } }) as never
+    expect(keepsTrackersBehindBanner({ census: census("adopted"), consentMode: "not_required", staticCmp: null })).toBe(true)
+    expect(keepsTrackersBehindBanner({ census: null, consentMode: "not_required", staticCmp: "other" })).toBe(true)
+    expect(keepsTrackersBehindBanner({ census: census("managed"), consentMode: "not_required", staticCmp: null })).toBe(false)
+    expect(keepsTrackersBehindBanner({ census: census("adopted"), consentMode: "required", staticCmp: null })).toBe(false)
+  })
+
+  it("a visit where nothing sent is 'not measured' with the banner named: no problem cell, and the verdict says so", () => {
+    const result = realVisitResult()
+    result.ga4.events = []
+    result.posthog.events = []
+    result.meta.tr = []
+    result.infinite.events = []
+    const context = { cmpDetected: null, envSourcedIds: [], consentMode: "not_required" as const, installedTools: ["infinite", "ga4", "posthog", "meta"] as const, metaPixelOwnership: "adopted" as const, siteConsentGate: true, runId: RUN_ID, now: () => new Date(at) }
+    const graded = gradeTestRunFull(result, all4, "real_visit", { ...context, installedTools: [...context.installedTools] })
+    const column = buildProvenColumn({
+      runId: RUN_ID, mergeSha: MERGE_SHA, installed: ["infinite", "ga4", "posthog", "meta"], at, keys: keysFixture(), expect: all4,
+      visit: { result, grades: graded.tools },
+      receipts: receiptsAll({ infinite: lane("no_receipt"), ga4: lane("no_receipt"), posthog: lane("no_receipt"), meta_pixel: lane("no_receipt") }),
+      t1: [], serverLaneInstalled: false, conversionsWaiting: 0
+    })
+    expect(column.finishLine.proof_from_real_visit).toMatchObject({ state: "undetermined", reason: "held_by_consent" })
+    expect(column.finishLine.each_tool_once!.state).not.toBe("problem")
+    expect(column.cells.meta_pixel).toMatchObject({ state: "undetermined", reason: "held_by_consent" })
+    expect(column.cells.ga4_page_views_per_visit).toMatchObject({ state: "undetermined", reason: "held_by_consent" })
+    expect(JSON.stringify(column)).not.toMatch(/sent nothing|not firing|\/tr|2xx/)
+
+    const dash = (): Cell => ({ value: null, display: "—", state: "not_measured", provenance: { source: "wizard_check", at, runId: RUN_ID }, reason: "not_exercised" })
+    const finishLine = FINISH_LINE_IDS.map((id) => ({ n: FINISH_LINE_SOURCES[id].n, id, cells: { live_today: dash(), in_pr: dash(), proven_live: column.finishLine[id] ?? dash() } }))
+    const tools = (["infinite", "ga4", "posthog", "meta"] as const).map((tool) => ({ tool, ids: [], connected: true, installed: true, fired: false, ungraded: true, receipt: "no_receipt" as const, receiptReason: null }))
+    const verdict = computeVerdict({ site: HOST, finishLine, provenLive: { measuredAt: at, sha: MERGE_SHA, pending: null }, jobs: [], openFindings: [], tools, installedUnknown: null })
+    expect(verdict.state).toBe("unconfirmed")
+    expect(verdict.headline).toBe(`${HOST}: not measured: ${HELD_BY_BANNER}`)
+    expect(verdict.headline).not.toMatch(/does not collect|sent nothing/)
   })
 })
 

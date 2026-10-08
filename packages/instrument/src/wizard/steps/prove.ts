@@ -671,7 +671,10 @@ export function buildProvenColumn(input: ProvenColumnInput): ReportColumnSnapsho
     const lane = receipts.lanes.posthog
     const viaProxy = posthogViaProxy(visit)
     const fact = receiptFact(lane, "receipts.posthog", at, "PostHog")
-    if (fact.state === "pass" && viaProxy === false) facts.push({ ...fact, state: "problem", display: "PostHog: sent directly (ad blockers drop it)" })
+    // No receipt because the grader could not grade PostHog on the visit (the site's banner held it): unknown, not a problem.
+    if (fact.state === "problem" && visit !== null && viaProxy === null && ungradedOn(visit, "posthog")) {
+      facts.push({ ...fact, state: "undetermined", display: "PostHog: route not observed by this run", reason: reportReason(gradeReasonCode(visit.grades.posthog)) })
+    } else if (fact.state === "pass" && viaProxy === false) facts.push({ ...fact, state: "problem", display: "PostHog: sent directly (ad blockers drop it)" })
     else if (fact.state === "pass" && viaProxy === null) facts.push({ ...fact, state: "undetermined", display: "PostHog: route not observed by this run" })
     else facts.push(fact)
   }
@@ -769,7 +772,10 @@ function toolReceiptFact(tool: TestTool, visit: ProvenColumnInput["visit"], lane
   const installed = (input.installed ?? []).includes(tool)
   const fired = visit !== null && beaconsOf(visit.result, tool) > 0
   if (visit !== null && !fired && installed) {
-    if (ungradedOn(visit, tool)) return { input: "receipts.per_tool", state: "undetermined", display: `${label}: could not be graded on the real visit`, at, reason: reportReason(gradeReasonCode(visit.grades[tool])) }
+    if (ungradedOn(visit, tool)) {
+      const reason = reportReason(gradeReasonCode(visit.grades[tool]))
+      return { input: "receipts.per_tool", state: "undetermined", display: `${label}: ${reason === "held_by_consent" ? "not measured, kept off by your cookie banner" : "could not be graded on the real visit"}`, at, reason }
+    }
     return { input: "receipts.per_tool", state: "problem", display: `${label}: sent nothing`, at }
   }
   if (lane.state === "no_receipt" && (lane.reason ?? "").startsWith("unmarked:")) return { input: "receipts.per_tool", state: "problem", display: `${label}: ${UNMARKED_WORDS}`, at }
@@ -842,7 +848,7 @@ function spaFacts(result: TestResult, grades: Record<TestTool, CheckResult>, ins
 }
 
 function consentWords(mode: "not_required" | "required"): string {
-  return mode === "required" ? "wait for my banner's yes" : "collect by default"
+  return mode === "required" ? "waits for your banner's yes" : "starts with your site's own analytics, or on page load if it has none"
 }
 
 function liveTestRow(lanes: Array<[ReceiptLane, string]>, receipts: ReceiptsResponseFields, at: string): RowCellInput {
@@ -871,6 +877,8 @@ function ga4PageViewsRow(visit: NonNullable<ProvenColumnInput["visit"]>, expect:
   // §3x.6: an installed GA4 with no connection is measured too (its ID just cannot be compared).
   if (!expect.ga4) {
     if (!(installed ?? []).includes("ga4") && visit.result.ga4.events.length === 0) return { value: null, state: "not_measured", source: "desktop_test", at, reason: "not_connected" }
+    // Silent because the grader could not grade it here (the site's banner held it, a bot-flagged window): unknown.
+    if (visit.result.ga4.events.length === 0 && ungradedOn(visit, "ga4")) return { value: null, state: "undetermined", source: "desktop_test", at, checkId: "ga4_seen_leaving", reason: reportReason(gradeReasonCode(visit.grades.ga4)) }
     const views = visit.result.ga4.events.filter((event) => event.en === "page_view" && !event.afterNav)
     const sent = views.some((event) => typeof event.status === "number" && event.status >= 200 && event.status < 300)
     return {
@@ -934,6 +942,7 @@ function metaPixelRow(visit: NonNullable<ProvenColumnInput["visit"]>, expect: Te
   const sent = tr.some((event) => typeof event.status === "number" && event.status >= 200 && event.status < 300)
   if (blocked) return { value: "blocked", display: `blocked on ${visit.result.loads[0]?.finalUrl ? new URL(visit.result.loads[0].finalUrl).host : "the site"}`, state: "problem", source: "desktop_test", at, checkId: "meta_seen_leaving" }
   if (sent) return { value: "sending", display: "sending · domain allowed", state: "pass", source: "desktop_test", at, checkId: "meta_seen_leaving" }
+  if (tr.length === 0 && ungradedOn(visit, "meta")) return { value: null, state: "undetermined", source: "desktop_test", at, checkId: "meta_seen_leaving", reason: reportReason(gradeReasonCode(visit.grades.meta)) }
   return { value: "not seen", display: "no Meta event seen leaving", state: tr.length > 0 ? "problem" : "undetermined", source: "desktop_test", at, checkId: "meta_seen_leaving" }
 }
 
@@ -1219,13 +1228,21 @@ async function runProve(ctx: WizardContext, deps: WizardDeps): Promise<StepOutco
   const deployed = await installedAtMerge(ctx, deps, mergeSha, productionBranch)
   // Review P1-6: the cause is said and carried into THE verdict (at best unconfirmed), never swallowed.
   if (deployed.unknown !== null) ctx.emit.emit("step.sub", { step: "prove", text: `! ${deployed.unknown}: a tool that is installed but sent nothing cannot be named, so this run cannot be called proper`, tone: "warn" })
+  const consentMode = state.plan?.answers.consentMode ?? keys.infinite.consentMode
+  // The site keeps its trackers behind its own banner: the test window never accepts it, so a silent visit is not measured.
+  const siteConsentGate = keepsTrackersBehindBanner({
+    census: deployed.census,
+    consentMode,
+    staticCmp: (await readBeforeFactsFile(deps.fs, ctx.root, ctx.runId).catch(() => null))?.cmpDetected ?? null
+  })
   const gradeCtx = (result: TestResult) => ({
     ...gradeContextFrom({
       census: deployed.census ?? EMPTY_CENSUS,
       installed: deployed.installed ?? [],
-      consentMode: state.plan?.answers.consentMode ?? keys.infinite.consentMode,
+      consentMode,
       cmpDetected: result.environment.cmpDetected
     }),
+    ...(siteConsentGate ? { siteConsentGate: true } : {}),
     now: () => new Date(result.startedAt)
   })
   const installed = deployed.census === null ? null : (gradeCtx(EMPTY_FACTS_FOR_CONTEXT).installedTools ?? [])
@@ -1475,6 +1492,19 @@ async function commerceProof(
 
 /** No census entries: the grader then knows only what this run installed. */
 const EMPTY_CENSUS: CensusResult = { entries: [], envSourcedIds: [], identify: { identifyCalls: [], resetCalls: [] } }
+/**
+ * The site keeps its trackers off until a visitor accepts its own cookie banner: the tag follows the site's own pixels
+ * (the site runs GA4, PostHog or a Meta pixel of its own and Infinite's consent mode is not_required, exactly when the
+ * install turns follow mode on), or the scan found a consent tool or banner. The proof visit never accepts a banner
+ * (the desktop test engine has no way to; it may only seed Infinite's own key), so on such a site a visit where
+ * nothing sent is "not measured", never a failure.
+ */
+export function keepsTrackersBehindBanner(input: { census: CensusResult | null; consentMode: "required" | "not_required" | null; staticCmp: TestResult["environment"]["cmpDetected"] }): boolean {
+  if (input.staticCmp !== null) return true
+  const sitePixels = (input.census?.entries ?? []).some((entry) => entry.owner === "adopted" && (entry.tool === "ga4" || entry.tool === "posthog" || entry.tool === "meta"))
+  return input.consentMode === "not_required" && sitePixels
+}
+
 /** gradeContextFrom reads only the facts' cmpDetected; this stands in when no visit facts exist yet. */
 const EMPTY_FACTS_FOR_CONTEXT = { environment: { cmpDetected: null } } as unknown as TestResult
 

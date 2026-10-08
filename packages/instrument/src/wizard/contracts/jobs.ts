@@ -615,6 +615,11 @@ export interface GradeTestRunContext {
    * with no PageView after it graded `meta_spa_page_view_missing`. Absent = not requested.
    */
   spaNavigation?: boolean
+  /**
+   * The site keeps its trackers off until a visitor accepts its own cookie banner (the tag follows the site's own
+   * pixels, or the scan found a consent tool or banner). A visit on which nothing sent is then `held_by_consent`.
+   */
+  siteConsentGate?: boolean
 }
 
 export interface CheckRunner {

@@ -249,7 +249,7 @@ export function jobStateCell(job: ChecklistItem): string {
   if (job.ownerBoundary?.kind === "legacy_policy" || job.jobId === "privacy_paragraph") return job.note ?? "Privacy policy work is retired; earlier recorded edits are reported separately."
   if (job.state === "left_for_you") return job.note ?? "Not done: left for the site owner."
   const state = job.state.replace(/_/g, " ")
-  if ((job.state === "failed" || job.state === "blocked" || ((job.state === "done_in_code" || job.state === "claimed") && job.note && /^(?:Not checked after the deploy:|Checked, but not tied to this deploy:|Waiting for the Infinite app's results:)/.test(job.note))) && job.note) return `${state}: ${job.note}`
+  if ((job.state === "failed" || job.state === "blocked" || ((job.state === "done_in_code" || job.state === "claimed") && job.note && /^(?:Not checked after the deploy:|Not measured after the deploy:|Checked, but not tied to this deploy:|Waiting for the Infinite app's results:)/.test(job.note))) && job.note) return `${state}: ${job.note}`
   return `${state}${job.blockedReason ? ` (${job.blockedReason.replace(/_/g, " ")})` : ""}`
 }
 

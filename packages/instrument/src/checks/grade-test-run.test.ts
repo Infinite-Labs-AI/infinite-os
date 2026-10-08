@@ -11,7 +11,7 @@ import { describe, expect, it } from "vitest"
 
 import type { TestRunFixtureCase } from "../wizard/contracts/test-engine.js"
 import { TEST_TOOLS } from "../wizard/contracts/test-engine.js"
-import { gradeTestRun, gradeTestRunFull, type GradeContext, NOT_A_BROWSER_DETAIL } from "./grade-test-run.js"
+import { gradeTestRun, gradeTestRunFull, type GradeContext, HELD_BY_BANNER, NOT_A_BROWSER_DETAIL } from "./grade-test-run.js"
 
 const here = dirname(fileURLToPath(import.meta.url))
 const cases = JSON.parse(readFileSync(join(here, "../../contracts/tag-wizard-v1/test-run.fixtures.json"), "utf8")) as TestRunFixtureCase[]
@@ -170,3 +170,49 @@ describe("§3x.5 (W12) the grader's first rule: a test window that does not look
   })
 })
 
+
+describe("a site that keeps its trackers behind its own cookie banner (the proof visit never accepts it)", () => {
+  // The live run: the site's banner kept GA4, PostHog, its Meta pixel and (following them) Infinite off, and the
+  // report said "does not collect properly yet" and failed the Meta job, though a visitor who accepts sends AddToCart.
+  function silentVisit(): TestRunFixtureCase {
+    const fixture = byId("real_visit_delivering")
+    fixture.result.ga4.events = []
+    fixture.result.posthog.events = []
+    fixture.result.infinite.events = []
+    fixture.result.meta.tr = []
+    return fixture
+  }
+  const ctx = (fixture: TestRunFixtureCase, extra: Partial<GradeContext> = {}): GradeContext => ({
+    ...contextOf(fixture), cmpDetected: null, consentMode: "not_required", installedTools: ["infinite", "ga4", "posthog", "meta"], ...extra
+  })
+
+  it("a visit where nothing sent is not measured: every tool and the seen-leaving checks read held_by_consent, never a problem", () => {
+    const fixture = silentVisit()
+    const graded = gradeTestRunFull(fixture.result, fixture.request.expect, "real_visit", ctx(fixture, { siteConsentGate: true }))
+    for (const tool of TEST_TOOLS) {
+      expect(graded.tools[tool].state).toBe("undetermined")
+      expect(graded.tools[tool].reason).toBe(`held_by_consent — ${HELD_BY_BANNER}`)
+    }
+    const leaving = graded.checks.filter((check) => check.checkId === "meta_seen_leaving" || check.checkId === "ga4_seen_leaving")
+    expect(leaving.map((check) => [check.checkId, check.state, check.reason])).toEqual([
+      ["ga4_seen_leaving", "undetermined", `held_by_consent — ${HELD_BY_BANNER}`],
+      ["meta_seen_leaving", "undetermined", `held_by_consent — ${HELD_BY_BANNER}`]
+    ])
+    expect(graded.checks.some((check) => check.state === "problem")).toBe(false)
+  })
+
+  it("negative: the same silence with no banner known stays a problem (installed and sent nothing)", () => {
+    const fixture = silentVisit()
+    const graded = gradeTestRunFull(fixture.result, fixture.request.expect, "real_visit", ctx(fixture))
+    expect(code(graded.tools.meta.reason)).toBe("no_beacon")
+    expect(graded.checks.find((check) => check.checkId === "meta_seen_leaving")).toMatchObject({ state: "problem", reason: "not_seen_leaving — no Meta request left the page and was accepted" })
+  })
+
+  it("negative: when the site's own GA4 ran, a silent Infinite tag is a real problem, not the banner", () => {
+    const fixture = silentVisit()
+    fixture.result.ga4.events = byId("real_visit_delivering").result.ga4.events
+    const graded = gradeTestRun(fixture.result, fixture.request.expect, "real_visit", ctx(fixture, { siteConsentGate: true }))
+    expect(code(graded.infinite.reason)).toBe("no_beacon")
+    expect(graded.infinite.state).toBe("problem")
+  })
+})

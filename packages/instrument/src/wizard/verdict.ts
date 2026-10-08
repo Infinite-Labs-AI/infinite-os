@@ -210,6 +210,12 @@ export function computeVerdict(input: VerdictInput): ReportVerdict {
     if (withoutReceipt.length > 0) parts.push(`no receipt from the real visit for ${listNames(withoutReceipt.map((tool) => SILENT_LABEL[tool.tool]))}`)
     headline = `${input.site} does not collect properly yet: ${parts.join(" · ")}`
     if (input.installedUnknown !== null) headline += ` · ${installedUnknownWords(input.installedUnknown)}`
+  } else if (state === "unconfirmed" && heldByBanner(input, tools)) {
+    // The site keeps its trackers off until a visitor accepts its own banner, and the test visit does not accept it:
+    // nothing was measured, which is never a failure (real visitors who accept are measured from their own visits).
+    headline = `${input.site}: not measured: ${HELD_BY_BANNER_WORDS}`
+    if (unchecked.length > 0) headline += ` · ${unchecked.length} earlier ${plural(unchecked.length, "problem", "problems")} not re-checked after the deploy (${listNames(unchecked)})`
+    if (input.installedUnknown !== null) headline += ` · ${installedUnknownWords(input.installedUnknown)}`
   } else if (state === "unconfirmed") {
     const received = tools.filter((tool) => tool.receipt === "verified")
     const infiniteSent = tools.some((tool) => tool.tool === "infinite" && tool.receipt === "delivering")
@@ -238,6 +244,19 @@ export function computeVerdict(input: VerdictInput): ReportVerdict {
     headline = `${input.site} collects analytics properly now${waiting > 0 ? ` · ${waiting} ${plural(waiting, "check waits", "checks wait")} for real visitors or the 7-day check-in` : ""}`
   }
   return { state, headline: headline.slice(0, VERDICT_LIMITS.headlineMaxChars), reasons, installed }
+}
+
+/** The headline's words for a proof visit the site's own cookie banner kept silent. */
+export const HELD_BY_BANNER_WORDS = "your cookie banner keeps every tool off until a visitor accepts; real visitors who accept are measured from their own visits"
+
+/**
+ * The real visit saw nothing from any tool, and the proof cell says the site's banner held it (the grader's
+ * `held_by_consent`): every tool under test is silent and ungraded, none fired.
+ */
+function heldByBanner(input: VerdictInput, tools: readonly ToolProofFact[]): boolean {
+  const proof = input.finishLine.find((line) => line.id === "proof_from_real_visit")?.cells.proven_live
+  if (!proof || proof.state !== "undetermined" || proof.reason !== "held_by_consent") return false
+  return tools.length > 0 && tools.every((tool) => !tool.fired && (tool.ungraded || !tool.installed))
 }
 
 /** Review P1-6: the installed set could not be read, in the headline's words (the cause named). */

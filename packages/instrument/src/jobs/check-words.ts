@@ -14,8 +14,8 @@ export const CHECK_LABELS: Readonly<Record<string, string>> = {
   one_beacon_per_tool: "Each tag once per page",
   ga4_spa_page_view: "GA4: one page view per page change",
   meta_spa_page_view: "Meta: one page view per page change",
-  ga4_seen_leaving: "GA4 sent data from the visit",
-  meta_seen_leaving: "Meta sent data from the visit",
+  ga4_seen_leaving: "GA4 on the real visit",
+  meta_seen_leaving: "Meta on the real visit",
   ga4_one_page_view: "GA4 counts each page once",
   meta_pixel_once: "Meta counts each page once",
   posthog_via_proxy_once: "PostHog sends once through your site",
@@ -102,6 +102,17 @@ export function plainCheckDetail(reason: string | undefined, checkId?: string): 
     .replace(/MASKEDID(\d+)TOKEN/g, (_text, index: string) => masked[Number(index)]!)
     .replace(/\s+/g, " ").trim()
 }
+
+/** The site's own cookie banner kept the proof visit silent (the grader's `held_by_consent`). */
+export function heldByBanner(check: Pick<ChecklistItemCheck, "reason">): boolean {
+  return typeof check.reason === "string" && /^held_by_consent\b/.test(check.reason)
+}
+
+/**
+ * What a job's note says when every live check it was waiting on was kept silent by the site's own banner: not
+ * measured, never failed, and why (the test visit does not accept the banner; real visitors who accept are measured).
+ */
+export const NOT_MEASURED_BEHIND_BANNER = "Not measured after the deploy: your cookie banner keeps every tool off until a visitor accepts; real visitors who accept are measured from their own visits"
 
 export function checkWords(checks: readonly Pick<ChecklistItemCheck, "id" | "reason">[]): string {
   return [...new Set(checks.map(check => {
