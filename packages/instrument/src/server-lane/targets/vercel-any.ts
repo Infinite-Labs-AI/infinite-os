@@ -26,11 +26,10 @@ import {
   documentMatcherPattern,
   edgeLaneCoreSource,
   managedGeneratedFile,
-  outcomeHelperSource,
-  outcomeHelperTarget,
   type ServerLaneTargetDefinition,
   type TargetBuildInput
 } from "./shared.js"
+import { outcomeHelperOptionsFor, outcomeHelperSource } from "./outcome-helper.js"
 
 export const VERCEL_MIDDLEWARE_PATH = "middleware.ts"
 export const VERCEL_MODULE_PATH = "lib/infinite-server-lane.ts"
@@ -103,11 +102,11 @@ export const vercelAnyTarget: ServerLaneTargetDefinition = {
   installPackages: [VERCEL_MIDDLEWARE_PACKAGE],
   files: (appRootAbsolute) => [
     { path: VERCEL_MODULE_PATH, role: "module" },
-    { path: outcomeHelperTarget(appRootAbsolute).path, role: "module" },
+    { path: outcomeHelperOptionsFor(appRootAbsolute).path, role: "module" },
     { path: VERCEL_MIDDLEWARE_PATH, role: "entry" }
   ],
   build: (input, appRootAbsolute) => {
-    const outcome = outcomeHelperTarget(appRootAbsolute)
+    const outcome = outcomeHelperOptionsFor(appRootAbsolute)
     return {
       [VERCEL_MODULE_PATH]: vercelLaneModuleSource(input),
       [outcome.path]: outcomeHelperSource(input, outcome),

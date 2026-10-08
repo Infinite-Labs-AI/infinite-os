@@ -25,11 +25,10 @@ import { SERVER_LANE_SECRET_ENV, SERVER_LANE_SOURCE_KEY_ENV } from "../helpers.j
 import {
   edgeLaneCoreSource,
   managedGeneratedFile,
-  outcomeHelperSource,
-  outcomeHelperTarget,
   type ServerLaneTargetDefinition,
   type TargetBuildInput
 } from "./shared.js"
+import { outcomeHelperOptionsFor, outcomeHelperSource } from "./outcome-helper.js"
 
 export const CLOUDFLARE_MIDDLEWARE_PATH = "functions/_middleware.ts"
 export const CLOUDFLARE_OUTCOME_PATH = "lib/infinite-outcome.ts"
@@ -86,11 +85,11 @@ export const cloudflarePagesTarget: ServerLaneTargetDefinition = {
   label: "Cloudflare Pages functions/_middleware.ts",
   installPackages: [],
   files: (appRootAbsolute) => [
-    { path: outcomeHelperTarget(appRootAbsolute).path, role: "module" },
+    { path: outcomeHelperOptionsFor(appRootAbsolute).path, role: "module" },
     { path: CLOUDFLARE_MIDDLEWARE_PATH, role: "entry" }
   ],
   build: (input, appRootAbsolute) => {
-    const outcome = outcomeHelperTarget(appRootAbsolute)
+    const outcome = outcomeHelperOptionsFor(appRootAbsolute)
     return {
       [outcome.path]: outcomeHelperSource(input, outcome),
       [CLOUDFLARE_MIDDLEWARE_PATH]: cloudflarePagesMiddlewareSource(input)

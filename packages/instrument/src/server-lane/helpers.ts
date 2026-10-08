@@ -150,13 +150,13 @@ export interface DocumentRequestEventInput {
 /**
  * The OPTIONAL ad-match block on an OUTCOME (never on a document request).
  *
- * WHY IT EXISTS: a founder who runs Meta ads and has no PostHog otherwise has no server-side
- * conversion path — Meta's optimiser never learns about a purchase their server confirmed, because
- * a browser pixel cannot see a server-side truth. When the founder turns the relay on in Infinite,
- * an outcome carrying this block is forwarded to Meta's Conversions API at ingest and the block is
- * then DISCARDED: it is never stored, never written to the ledger, never logged. A PostHog customer
- * needs none of it — PostHog ships its own Meta destination, and two senders for one conversion is
- * a double count.
+ * WHY IT EXISTS: Infinite is the Meta path for server conversions, for every site: a browser pixel
+ * cannot see a purchase the server confirmed, so without it Meta's optimiser never learns about it.
+ * When the founder turns the relay on in Infinite, an outcome carrying this block is forwarded to
+ * Meta's Conversions API at ingest and the block is then DISCARDED: it is never stored, never written
+ * to the ledger, never logged. A site that also runs PostHog turns PostHog's own Meta destination off
+ * for these events: that copy shares no event id with the pixel and carries no browser cookies, ip or
+ * user agent, and two senders for one conversion is a double count.
  *
  * YOUR SERVER HASHES; INFINITE NEVER DOES. `em`, `external_id`, name and address fields are sha256
  * hex you compute (`hashInfiniteEmail` below is exactly the email recipe), so raw email, name and
@@ -172,8 +172,8 @@ export interface DocumentRequestEventInput {
  * required for website events shared using the Conversions API". The call you make to Infinite is
  * SERVER-TO-SERVER, so Infinite's view of it is your Vercel/Node egress ip and a `node` user agent —
  * useless to Meta, and actively harmful (it scores an impossible ip/UA pair against your event). So
- * copy them off YOUR OWN inbound browser request and put them in the block. `adMatchFromRequest`
- * does exactly that. Without `client_user_agent` the relay declines to send the event at all.
+ * copy them off YOUR OWN inbound browser request and put them in the block. The generated helper's
+ * `adMatchFromRequest` / `buyerContext` do exactly that. Without `client_user_agent` the relay declines to send the event at all.
  *
  * WHOSE MISTAKE COSTS WHAT. `em`/`external_id` are your own computation, so a malformed one is a
  * 400 you should hear about. Everything else here is copied from a VISITOR-controlled request — a

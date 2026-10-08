@@ -42,6 +42,7 @@ import {
 import { hookFixItem, runFixRound } from "../../review/fix.js"
 import { isGitHubAdapter } from "../../hosts/github.js"
 import { buildPrBody } from "../../review/post.js"
+import { serverEventsPrSectionFromRepo } from "../../server-lane/handoff.js"
 import { parseLedger, REVIEW_LEDGER_PATH } from "../../review/ledger.js"
 import { applyRehearsalToJobs, rehearsalCheckResults, recordGa4KeyEventCells, recordRehearsalCells, rehearsalCountWords, rehearsalLines, rehearsalToolCount, rehearse, type RehearsalOutcome } from "../../review/rehearse.js"
 import type { Scanner } from "../../review/scan.js"
@@ -340,7 +341,8 @@ async function rehearsalRun(ctx: WizardContext, deps: WizardDeps): Promise<StepO
   const bodyInput = {
     reportMarkdown: deps.report.renderMarkdown(report, reportFacts.ownerBoundary, reportFacts.jobs, reportFacts.excludedLines),
     ownerBoundary: reportFacts.ownerBoundary,
-    howToReview: howToReviewSection(),
+    // P0-6: the owner's steps for server conversions (the hand-off file the install wrote), above the review notes.
+    howToReview: [await serverEventsPrSectionFromRepo(ctx.root, (path) => deps.fs.readText(path)), howToReviewSection()].filter(Boolean).join("\n\n"),
     runId,
     isPrivate: prepared.isPrivate,
     diffText,

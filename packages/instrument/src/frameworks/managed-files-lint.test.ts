@@ -10,7 +10,8 @@ import type { InstallPlan } from "../types.js"
 import { vercelLaneModuleSource, vercelMiddlewareSource } from "../server-lane/targets/vercel-any.js"
 import { netlifyEdgeFunctionSource } from "../server-lane/targets/netlify.js"
 import { cloudflarePagesMiddlewareSource } from "../server-lane/targets/cloudflare.js"
-import { nodeLaneModuleSource, nodeOutcomeHelperSource } from "../server-lane/targets/node.js"
+import { nodeLaneModuleSource } from "../server-lane/targets/node.js"
+import { outcomeHelperSource } from "../server-lane/targets/outcome-helper.js"
 import { buildCreatedMiddlewareSource, buildServerLaneModuleSource } from "../server-lane/runtime-source.js"
 import { buildNextConfigSource } from "./vercel-config.js"
 import { buildAnalyticsModuleSource, buildClientComponentSource } from "./managed-files.js"
@@ -41,6 +42,7 @@ describe("the Next files the installer writes", () => {
       ["lib/infinite-server-lane.ts", vercelLaneModuleSource({ productionHosts: ["example.com"] })],
       ["middleware.ts", vercelMiddlewareSource({ productionHosts: ["example.com"] })],
       ["lib/infinite-server-lane-next.ts", buildServerLaneModuleSource()],
+      ["lib/infinite-outcome.ts", outcomeHelperSource({ productionHosts: ["example.com"] }, { background: "next-after" })],
       ["middleware.ts", buildCreatedMiddlewareSource({ moduleImportPath: "./lib/infinite-server-lane" })],
       ["next.config.mjs", buildNextConfigSource({ infinite: { path: "/infinite/ledger", destination: "https://api.example.com/collect" } })]
     ] as const
@@ -57,7 +59,7 @@ describe("the Next files the installer writes", () => {
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }
-  })
+  }, 30_000)
 
   it.each(["plugin:@typescript-eslint/recommended", "next/typescript"].flatMap(preset => ["off", "error"].map(core => [preset, core])))("passes non-Next emitted files with %s and core no-unused-vars=%s", async (preset, core) => {
     const packageRoot = join(dirname(fileURLToPath(import.meta.url)), "../..")
@@ -73,11 +75,15 @@ describe("the Next files the installer writes", () => {
       ["netlify/edge-functions/infinite-server-lane.ts", netlifyEdgeFunctionSource(input)],
       ["functions/_middleware.ts", cloudflarePagesMiddlewareSource(input)],
       ["lib/infinite-server-lane.js", nodeLaneModuleSource(input)],
-      ["lib/infinite-outcome.js", nodeOutcomeHelperSource()]
+      // The ONE outcome helper every target ships, in both languages and every background mode.
+      ["lib/infinite-outcome.js", outcomeHelperSource(input, { language: "js", extension: "js" })],
+      ["lib/infinite-outcome.ts", outcomeHelperSource(input, { background: "bounded" })],
+      ["lib/infinite-outcome-vercel.ts", outcomeHelperSource(input, { background: "vercel-wait-until" })],
+      ["lib/infinite-outcome-after.ts", outcomeHelperSource(input, { background: "next-after" })]
     ] as const
     for (const [file, source] of emitted) {
       const results = await lint.lintText(source, { filePath: join(packageRoot, file) })
       expect(results.flatMap((result) => result.messages.map((message) => `${file}:${message.line} ${message.ruleId}: ${message.message}`))).toEqual([])
     }
-  })
+  }, 30_000)
 })

@@ -220,8 +220,8 @@ export function renderReportTable(report: HarnessReport): string {
  * must never claim a state it did not read. So the line reports the LOCAL half by name and says
  * plainly that the toggle is elsewhere. Anything else would be a fabricated "on".
  *
- * WHY IT IS WORTH A LINE AT ALL. A founder running Meta ads without PostHog has no server-side
- * conversion path: Meta's optimiser never learns about the purchase their own server confirmed. The
+ * WHY IT IS WORTH A LINE AT ALL. Infinite is the Meta path for server conversions, PostHog or not:
+ * without it Meta's optimiser never learns about the purchase the site's own server confirmed. The
  * pieces are already installed at this point; all that is missing is one switch nobody mentioned.
  */
 export function metaRelayNote(report: HarnessReport): string | null {
@@ -236,7 +236,7 @@ export function metaRelayNote(report: HarnessReport): string | null {
   if (!laneReady) {
     return "Meta relay: off — a Meta pixel is installed but no server lane reports outcomes, so there is nothing to forward. Install the server lane first (`--server-lane`)."
   }
-  return "Meta relay: on locally — a Meta pixel is installed and the server lane can carry outcomes. Forwarding still needs the cloud toggle (Infinite → Site → Settings → “Send outcomes to Meta Conversions API”), which this command cannot read or set. Only turn it on if you do NOT use PostHog: PostHog ships its own Meta destination, and two senders for one conversion is a double count."
+  return "Meta relay: on locally — a Meta pixel is installed and the server lane can carry outcomes. Forwarding still needs the cloud toggle (Infinite → Site → Settings → “Send outcomes to Meta Conversions API”), which this command cannot read or set. Turn it on whether or not you use PostHog; if PostHog also sends to Meta, turn PostHog's Meta destination off for these events, since two senders count each conversion twice."
 }
 
 function markdownCell(value: string): string {

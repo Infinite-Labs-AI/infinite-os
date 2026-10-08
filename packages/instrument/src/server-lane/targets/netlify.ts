@@ -30,11 +30,10 @@ import {
   edgeLaneCoreSource,
   managedGeneratedFile,
   nonDocumentPrefixes,
-  outcomeHelperSource,
-  outcomeHelperTarget,
   type ServerLaneTargetDefinition,
   type TargetBuildInput
 } from "./shared.js"
+import { outcomeHelperOptionsFor, outcomeHelperSource } from "./outcome-helper.js"
 
 export const NETLIFY_EDGE_FUNCTION_NAME = "infinite-server-lane"
 export const NETLIFY_EDGE_FUNCTION_PATH = `netlify/edge-functions/${NETLIFY_EDGE_FUNCTION_NAME}.ts`
@@ -155,11 +154,11 @@ export const netlifyTarget: ServerLaneTargetDefinition = {
   label: "Netlify Edge Function",
   installPackages: [],
   files: (appRootAbsolute) => [
-    { path: outcomeHelperTarget(appRootAbsolute).path, role: "module" },
+    { path: outcomeHelperOptionsFor(appRootAbsolute).path, role: "module" },
     { path: NETLIFY_EDGE_FUNCTION_PATH, role: "entry" }
   ],
   build: (input, appRootAbsolute) => {
-    const outcome = outcomeHelperTarget(appRootAbsolute)
+    const outcome = outcomeHelperOptionsFor(appRootAbsolute)
     return {
       [outcome.path]: outcomeHelperSource(input, outcome),
       [NETLIFY_EDGE_FUNCTION_PATH]: netlifyEdgeFunctionSource(input)

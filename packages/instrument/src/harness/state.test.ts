@@ -226,8 +226,10 @@ describe("metaRelayNote", () => {
     )
     expect(note).toContain("Meta relay: on locally")
     expect(note).toContain("cannot read or set")
-    // The audience gate travels with the offer: the wrong founder double-counts by turning it on.
-    expect(note).toContain("do NOT use PostHog")
+    // The relay is the Meta path for every founder; PostHog's own Meta destination is the one turned off.
+    expect(note).toContain("whether or not you use PostHog")
+    expect(note).toContain("turn PostHog's Meta destination off")
+    expect(note).not.toContain("do NOT use PostHog")
     // It must never assert the cloud state as a bare fact.
     expect(note).not.toMatch(/relay is (on|enabled)\b/)
   })

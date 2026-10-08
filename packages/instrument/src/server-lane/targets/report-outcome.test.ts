@@ -1,5 +1,5 @@
-// reportInfiniteOutcome (§3j.5), EXECUTED in every generated form — the TS helper, the JS helper and the
-// Node twin — against the shared 202 vectors in `contracts/server-lane-v1.vectors.json`
+// reportInfiniteOutcomeForMirror / reportInfiniteOutcome (§3j.5), EXECUTED in every generated form (the
+// TS helper and the JS helper; every target, Node included, ships this one helper) against the shared 202 vectors in `contracts/server-lane-v1.vectors.json`
 // (`outcomeResponses`). The same vectors tell the receiving side (1bu-1, lane C2) what to answer.
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
@@ -12,8 +12,7 @@ import { createBrowserVm, plain } from "../../../test/site-code/browser-vm.js"
 import { buildMetaPixelSnippet } from "../../providers/meta.js"
 import { VECTORS } from "../helpers.test.js"
 
-import { nodeLaneModuleSource, nodeOutcomeHelperSource } from "./node.js"
-import { outcomeHelperSource } from "./shared.js"
+import { outcomeHelperSource } from "./outcome-helper.js"
 
 interface Report {
   accepted: boolean
@@ -23,8 +22,8 @@ interface Report {
   status: number | null
 }
 interface Helper {
-  reportInfiniteOutcome: (input: Record<string, unknown>) => Promise<Report>
-  postInfiniteOutcome: (input: Record<string, unknown>) => Promise<boolean>
+  reportInfiniteOutcomeForMirror: (input: Record<string, unknown>) => Promise<Report>
+  reportInfiniteOutcome: (input: Record<string, unknown>) => Promise<number | null>
 }
 
 const here = dirname(fileURLToPath(import.meta.url))
@@ -52,6 +51,7 @@ const META_MATCH = (
       zip: { raw: string; normalized: string; sha256: string }
       country: { raw: string; normalized: string; sha256: string }
       fullName: { raw: string; fn: string; ln: string }
+      fullNameMultiWord: { raw: string; fn: string; ln: string }
     }
   }
 ).metaMatch
@@ -59,22 +59,16 @@ const META_MATCH = (
 const BUILD = { siteSourceKey: "site_test", productionHosts: [VECTORS.host] }
 const tempRoots: string[] = []
 
-async function helper(form: "ts" | "js" | "node"): Promise<Helper> {
+async function helper(form: "ts" | "js"): Promise<Helper> {
   const dir = mkdtempSync(join(tmpdir(), "instrument-report-outcome-"))
   tempRoots.push(dir)
   const id = Math.random().toString(16).slice(2)
-  if (form === "node") {
-    writeFileSync(join(dir, "infinite-server-lane.js"), nodeLaneModuleSource(BUILD))
-    const path = join(dir, `infinite-outcome-${id}.js`)
-    writeFileSync(path, nodeOutcomeHelperSource())
-    return (await import(pathToFileURL(path).href)) as Helper
-  }
   const path = join(dir, `infinite-outcome-${id}.${form === "ts" ? "ts" : "mjs"}`)
   writeFileSync(path, outcomeHelperSource(BUILD, form === "ts" ? {} : { language: "js", extension: "mjs" }))
   return (await import(pathToFileURL(path).href)) as Helper
 }
 
-describe.each(["ts", "js", "node"] as const)("reportInfiniteOutcome (%s helper), executed", (form) => {
+describe.each(["ts", "js"] as const)("reportInfiniteOutcome (%s helper), executed", (form) => {
   const originalEnv = { ...process.env }
   let fetchMock: ReturnType<typeof vi.fn>
 
@@ -122,15 +116,16 @@ describe.each(["ts", "js", "node"] as const)("reportInfiniteOutcome (%s helper),
     expect(await outcome.hashExternalId(META_MATCH.externalId.raw)).toBe(META_MATCH.externalId.sha256)
   })
 
-  it.each(RESPONSES)("$name → the vector's report; postInfiniteOutcome is its .accepted", async (vector) => {
+  it.each(RESPONSES)("$name → the vector's report; reportInfiniteOutcome is its .status", async (vector) => {
     fetchMock = vi.fn(async () => new Response(vector.body, { status: vector.status }))
     vi.stubGlobal("fetch", fetchMock)
     const outcome = await helper(form)
-    await expect(outcome.reportInfiniteOutcome({ type: "sign_up", eventId: "signup:acct_991", path: "/signup" })).resolves.toEqual(
+    vi.spyOn(console, "warn").mockImplementation(() => undefined)
+    await expect(outcome.reportInfiniteOutcomeForMirror({ type: "sign_up", eventId: "signup:acct_991", path: "/signup" })).resolves.toEqual(
       vector.report
     )
-    await expect(outcome.postInfiniteOutcome({ type: "sign_up", eventId: "signup:acct_991", path: "/signup" })).resolves.toBe(
-      vector.report.accepted
+    await expect(outcome.reportInfiniteOutcome({ type: "sign_up", eventId: "signup:acct_991", path: "/signup" })).resolves.toBe(
+      vector.report.status
     )
   })
 
@@ -152,36 +147,33 @@ describe.each(["ts", "js", "node"] as const)("reportInfiniteOutcome (%s helper),
     expect(new Set(sent).size).toBe(2)
   })
 
-  it("negative: an old-style call with no eventId THROWS at once (and sends nothing)", async () => {
+  it("negative: a call with no stable eventId is refused here (400) and sends nothing; it never throws", async () => {
     fetchMock = vi.fn(async () => new Response(RESPONSES[0]!.body, { status: 202 }))
     vi.stubGlobal("fetch", fetchMock)
+    vi.spyOn(console, "warn").mockImplementation(() => undefined)
     const outcome = await helper(form)
     for (const input of [
       { type: "sign_up", path: "/signup" },
       { type: "sign_up", eventId: "", path: "/signup" },
       { type: "sign_up", eventId: "   ", path: "/signup" }
     ]) {
-      expect(() => outcome.reportInfiniteOutcome(input)).toThrow(/stable eventId/)
+      await expect(outcome.reportInfiniteOutcome(input)).resolves.toBe(400)
     }
     expect(fetchMock).not.toHaveBeenCalled()
-    // postInfiniteOutcome keeps its old contract for existing callers: a random id, a boolean.
-    await expect(outcome.postInfiniteOutcome({ type: "sign_up", path: "/signup" })).resolves.toBe(true)
-    expect(JSON.parse(String((fetchMock.mock.calls[0] as [string, RequestInit])[1].body)).eventId).toMatch(/^[0-9a-f-]{36}$/)
   })
 
-  it("negative: an outcome without a path resolves all-false / all-null with no network call", async () => {
+  it("P1-5: an outcome without a path is still recorded (only the Meta relay needs one)", async () => {
     fetchMock = vi.fn(async () => new Response(RESPONSES[0]!.body, { status: 202 }))
     vi.stubGlobal("fetch", fetchMock)
     const outcome = await helper(form)
-    const report = { accepted: false, duplicate: false, metaEventId: null, metaEventName: null, status: null }
-    await expect(outcome.reportInfiniteOutcome({ type: "lead", eventId: "lead:1" })).resolves.toEqual(report)
-    await expect(outcome.postInfiniteOutcome({ type: "lead" })).resolves.toBe(false)
-    expect(fetchMock).not.toHaveBeenCalled()
+    await expect(outcome.reportInfiniteOutcome({ type: "lead", eventId: "lead:1" })).resolves.toBe(202)
+    expect(JSON.parse(String((fetchMock.mock.calls[0] as [string, RequestInit])[1].body)).properties).not.toHaveProperty("path")
   })
 
   it("a network failure or the 2 s timeout resolves all-false / all-null and never rejects", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => Promise.reject(new Error("offline"))))
-    await expect((await helper(form)).reportInfiniteOutcome({ type: "sign_up", eventId: "e1", path: "/signup" })).resolves.toEqual({
+    vi.spyOn(console, "warn").mockImplementation(() => undefined)
+    await expect((await helper(form)).reportInfiniteOutcomeForMirror({ type: "sign_up", eventId: "e1", path: "/signup" })).resolves.toEqual({
       accepted: false,
       duplicate: false,
       metaEventId: null,
@@ -194,7 +186,7 @@ describe.each(["ts", "js", "node"] as const)("reportInfiniteOutcome (%s helper),
       "fetch",
       vi.fn(async () => Promise.reject(new DOMException("The operation was aborted.", "AbortError")))
     )
-    const pending = (await helper(form)).reportInfiniteOutcome({ type: "sign_up", eventId: "e2", path: "/signup" })
+    const pending = (await helper(form)).reportInfiniteOutcomeForMirror({ type: "sign_up", eventId: "e2", path: "/signup" })
     await expect(pending).resolves.toEqual({
       accepted: false,
       duplicate: false,
@@ -248,12 +240,12 @@ describe.each(["ts", "js", "node"] as const)("reportInfiniteOutcome (%s helper),
     expect(bodies[1].properties).not.toHaveProperty("campaign_provenance")
   })
 
-  // P3-6: the wizard's webhook recipe imports these three from the outcome helper, in every form.
-  it("exports adMatchFromRequest, infiniteVisitKey and postInfiniteOutcome, and signs the adMatch block in", async () => {
+  // P3-6: the wizard's recipes import these from the outcome helper, in every form.
+  it("exports adMatchFromRequest and infiniteVisitKey, and signs the adMatch block in", async () => {
     fetchMock = vi.fn(async () => new Response(RESPONSES[0]!.body, { status: 202 }))
     vi.stubGlobal("fetch", fetchMock)
     const outcome = (await helper(form)) as unknown as Helper & {
-      adMatchFromRequest: (request: unknown, match?: Record<string, unknown>) => Promise<Record<string, string>>
+      adMatchFromRequest: (request: unknown, match?: Record<string, unknown>) => Promise<Record<string, string> | undefined>
       infiniteVisitKey: unknown
     }
     expect(typeof outcome.adMatchFromRequest).toBe("function")
@@ -267,14 +259,16 @@ describe.each(["ts", "js", "node"] as const)("reportInfiniteOutcome (%s helper),
     })
     const adMatch = await outcome.adMatchFromRequest(buyer, {
       trackingAllowed: true,
-      email: META_MATCH.email.raw,
-      externalId: META_MATCH.externalId.raw,
-      fullName: META_MATCH.fullName.raw,
-      city: META_MATCH.city.raw,
-      state: META_MATCH.usState.raw,
-      postcode: META_MATCH.zip.raw,
-      country: META_MATCH.country.raw,
-      ph: "never-send-phone"
+      person: {
+        email: META_MATCH.email.raw,
+        externalId: META_MATCH.externalId.raw,
+        name: META_MATCH.fullName.raw,
+        city: META_MATCH.city.raw,
+        state: META_MATCH.usState.raw,
+        postcode: META_MATCH.zip.raw,
+        country: META_MATCH.country.raw,
+        ph: "never-send-phone"
+      }
     })
     expect(adMatch).toEqual({
       em: META_MATCH.email.sha256,
@@ -290,7 +284,12 @@ describe.each(["ts", "js", "node"] as const)("reportInfiniteOutcome (%s helper),
       client_ip_address: "203.0.113.9",
       client_user_agent: "Mozilla/5.0 Buyer"
     })
-    await expect(outcome.adMatchFromRequest(buyer, { trackingAllowed: false, email: META_MATCH.email.raw })).resolves.toEqual({})
+    await expect(outcome.adMatchFromRequest(buyer, { trackingAllowed: false, person: { email: META_MATCH.email.raw } })).resolves.toBeUndefined()
+    // P1-1: a 3+ word name: ln is every word after the first, joined, as Infinite's own sender splits it.
+    expect(await outcome.adMatchFromRequest(buyer, { trackingAllowed: true, person: { name: META_MATCH.fullNameMultiWord.raw } })).toMatchObject({
+      fn: META_MATCH.fullNameMultiWord.fn,
+      ln: META_MATCH.fullNameMultiWord.ln
+    })
     await outcome.reportInfiniteOutcome({ type: "sign_up", eventId: "e7", path: "/signup", adMatch })
     await outcome.reportInfiniteOutcome({ type: "sign_up", eventId: "e8", path: "/signup" })
     const bodies = fetchMock.mock.calls.map((call) => JSON.parse(String((call as [string, RequestInit])[1].body)))

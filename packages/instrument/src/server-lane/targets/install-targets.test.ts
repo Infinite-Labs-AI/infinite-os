@@ -153,8 +153,10 @@ describe("Vercel, any framework", () => {
     expect(readFileSync(join(root, SERVER_LANE_BRIEF_FILE), "utf8")).toContain(SERVER_LANE_GUIDE_FILE)
     const brief = readFileSync(join(root, SERVER_LANE_GUIDE_FILE), "utf8")
     expect(brief).toContain("npm install @vercel/functions")
-    expect(brief).toContain("Post a purchase from a server route")
-    expect(brief).toContain("postInfiniteOutcome")
+    expect(brief).toContain("Report conversions from your server")
+    expect(brief).toContain("reportInfiniteLead")
+    expect(brief).toContain("reportStripeCheckoutPurchase")
+    expect(brief).toContain("Conversions are reported with `lib/infinite-outcome.ts`")
 
     // Idempotent: a second run touches nothing.
     const before = snapshotTree(root)
@@ -185,8 +187,8 @@ describe("Vercel, any framework", () => {
     // The full guide (with the outcome-import example) lives in the guide doc since #26; the root
     // INSTALL-SERVER-LANE.md is a short pointer at it.
     const brief = readFileSync(join(root, SERVER_LANE_GUIDE_FILE), "utf8")
-    expect(brief).toContain('from "../lib/infinite-outcome.js"')
-    expect(brief).toContain("api/checkout-status.js")
+    expect(brief).toContain('import { reportInfiniteLead } from "../lib/infinite-outcome.js"')
+    expect(brief).toContain("```js")
 
     uninstallInstallation({ root, dryRun: false })
     expectTreeEquals(root, original)
@@ -280,7 +282,7 @@ describe("Vercel, any framework", () => {
     const preview = renderPreview(installPlan)
     expect(preview).toContain("→ Vercel root middleware (any framework)  (chosen because this repo has vercel.json)")
     expect(preview).toContain(`+ ${VERCEL_MIDDLEWARE_PATH}`)
-    expect(preview).toContain("postInfiniteOutcome() for your server routes")
+    expect(preview).toContain("reportInfiniteOutcome() and the Stripe/lead helpers for your server routes")
     expect(preview).toContain("→ then run: npm install @vercel/functions")
 
     // The public artifacts are baked in; the secret never is.
@@ -431,10 +433,10 @@ describe("Cloudflare", () => {
     expect(plan(root).serverLane?.mode).toBe("cloudflare-pages")
   })
 
-  it("falls back to the brief for a plain Worker, writing nothing", () => {
+  it("falls back to the brief for a plain Worker: no page-view lane file, only the outcome helper", () => {
     const root = viteOn({ "wrangler.toml": 'name = "worker"\nmain = "src/index.ts"\n' })
     const { plan: installPlan, apply } = planAndApply(root)
-    expect(installPlan.serverLane).toMatchObject({ mode: "brief", files: [] })
+    expect(installPlan.serverLane).toMatchObject({ mode: "brief", files: ["lib/infinite-outcome.ts"] })
     expect(existsSync(join(root, CLOUDFLARE_MIDDLEWARE_PATH))).toBe(false)
     expect(apply.serverLane?.brief).toContain("Cloudflare Workers")
   })
@@ -468,12 +470,19 @@ describe("Express / any Node server", () => {
 })
 
 describe("no host signal", () => {
-  it("still writes only the brief, exactly as before", () => {
+  it("writes the brief and the host-agnostic outcome helper (one conversion API on every host), and reverses cleanly", () => {
     const root = copyFixture("vite-react-basic")
     const original = snapshotTree(root)
     const { plan: installPlan, apply } = planAndApply(root)
-    expect(installPlan.serverLane).toMatchObject({ mode: "brief", files: [] })
-    expect(apply.serverLane?.manifest).toEqual({ mode: "brief", brief: SERVER_LANE_BRIEF_FILE, guide: SERVER_LANE_GUIDE_FILE })
+    expect(installPlan.serverLane).toMatchObject({ mode: "brief", files: ["lib/infinite-outcome.ts"] })
+    expect(apply.serverLane?.manifest).toEqual({
+      mode: "brief",
+      created: ["lib/infinite-outcome.ts"],
+      createdDirs: ["lib"],
+      brief: SERVER_LANE_BRIEF_FILE,
+      guide: SERVER_LANE_GUIDE_FILE
+    })
+    expect(readFileSync(join(root, "lib/infinite-outcome.ts"), "utf8")).toContain("export async function reportInfiniteOutcome(")
     uninstallInstallation({ root, dryRun: false })
     expectTreeEquals(root, original)
   })
@@ -499,7 +508,11 @@ describe("Next.js is untouched by hosting detection", () => {
       middleware: { path: "middleware.ts", action: "create" },
       modulePath: "lib/infinite-server-lane.ts"
     })
-    expect(installPlan.serverLane?.created).toBeUndefined()
-    expect(existsSync(join(root, VERCEL_OUTCOME_PATH))).toBe(false)
+    // Gap 1: the SAME outcome helper as every other target, beside the Next module.
+    expect(installPlan.serverLane?.created).toEqual([{ path: "lib/infinite-outcome.ts", role: "module", action: "create" }])
+    const helper = readFileSync(join(root, "lib/infinite-outcome.ts"), "utf8")
+    for (const name of ["reportInfiniteOutcome", "reportInfiniteOutcomeForMirror", "adMatchFromRequest", "personMatch", "reportStripeCheckoutPurchase", "reportInfiniteLead"]) {
+      expect(helper).toMatch(new RegExp(`export (async )?function ${name}\\(`))
+    }
   })
 })
