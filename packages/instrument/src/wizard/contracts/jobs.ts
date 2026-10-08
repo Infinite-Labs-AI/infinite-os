@@ -5,10 +5,11 @@
 //
 // NORMATIVE. Item states are COMPUTED by the wizard, never written by the agent: a claim moves an item
 // no further than `claimed`, and `proven` needs a check whose evidence carries THIS run's id.
+import type { EventInventoryEntry, EventSite } from "../../scan/event-inventory.js"
 import type { ManagedTextEdit, WorkspaceInstallArtifacts } from "../../types.js"
 import type { AskAnswers, PlanLine, PlanLineKind } from "./asks.js"
 import type { TagHosting, TagKeys } from "./bridge.js"
-import { arrayOf, oneOf, shapeOf } from "./shape.js"
+import { arrayOf, oneOf, recordOf, shapeOf } from "./shape.js"
 import type { TestExpect, TestMode, TestResult, TestTool } from "./test-engine.js"
 
 // ---------------------------------------------------------------------------------------------
@@ -389,6 +390,12 @@ export interface ChecklistItem {
    * sanitized like claim notes. Shown in the "Not done" line, the PR checklist and the report's job list.
    */
   note?: string
+  /**
+   * The event × tool inventory entries this item fills (`src/scan/event-inventory.ts`): the exact trigger sites, the
+   * sends each tool already has, and the tools still missing the event. Set only by the registry's seeding (from
+   * `JobScan.detections.eventInventory`), never from an agent. Briefs name the files, lines and missing tools from it.
+   */
+  inventory?: EventInventoryEntry[]
 }
 
 /** §3x.2 The most a `ChecklistItem.note` keeps. */
@@ -729,16 +736,24 @@ const EVIDENCE_SHAPE = oneOf(
   shapeOf<{ url: string }>()("UrlEvidence", ["url"], [])
 )
 
+const EVENT_SITE_SHAPE = shapeOf<EventSite>()("EventSite", ["file", "line", "via"], [])
+
 export const CHECKLIST_ITEM_SHAPE = shapeOf<ChecklistItem>()(
   "ChecklistItem",
   ["id", "jobId", "n", "title", "owner", "trigger", "allow", "checks", "state"],
-  ["claim", "blockedReason", "edits", "note", "ownerBoundary", "consentActivation"],
+  ["claim", "blockedReason", "edits", "note", "ownerBoundary", "consentActivation", "inventory"],
   {
     trigger: shapeOf<ChecklistItem["trigger"]>()("ChecklistItem.trigger", ["finding", "evidence"], [], { evidence: arrayOf(EVIDENCE_SHAPE) }),
     allow: shapeOf<ChecklistItem["allow"]>()("ChecklistItem.allow", ["files", "create"], []),
     checks: arrayOf(shapeOf<ChecklistItemCheck>()("ChecklistItemCheck", ["id", "tier", "state"], ["reason", "at", "runId"])),
     claim: shapeOf<NonNullable<ChecklistItem["claim"]>>()("ChecklistItem.claim", ["status", "note", "at"], []),
-    edits: arrayOf(shapeOf<EditRef>()("EditRef", ["editId", "file"], []))
+    edits: arrayOf(shapeOf<EditRef>()("EditRef", ["editId", "file"], [])),
+    inventory: arrayOf(
+      shapeOf<EventInventoryEntry>()("EventInventoryEntry", ["event", "sites", "tools", "missing"], [], {
+        sites: arrayOf(EVENT_SITE_SHAPE),
+        tools: recordOf(arrayOf(EVENT_SITE_SHAPE))
+      })
+    )
   }
 )
 

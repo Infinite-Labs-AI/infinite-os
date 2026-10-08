@@ -6,7 +6,8 @@ import type { ImproveLine } from "../types.js"
 import { previewGuardBrief } from "../wizard/deps.js"
 import { YES_POLICY, yesApproves } from "../wizard/contracts/asks.js"
 import type { BaselineResponseFields } from "../wizard/contracts/report.js"
-import type { CheckResult } from "../wizard/contracts/jobs.js"
+import type { ChecklistItem, CheckResult } from "../wizard/contracts/jobs.js"
+import type { EventInventory } from "../scan/event-inventory.js"
 import type { TestResult } from "../wizard/contracts/test-engine.js"
 
 /** Lane O6's stored D10 result, exactly as `gradeTestRun` words it (B12). */
@@ -125,8 +126,8 @@ describe("the plan model asks ONLY the three decisions", () => {
     const plan = buildPlanModel(input())
     const text = plan.lines.find((line) => line.id === "server_lane")?.text ?? ""
     expect(text).toContain(SERVER_LANE_PROBE_DISCLOSURE)
-    expect(text).toContain("top-level path")
-    expect(text).toContain("count every event")
+    // P1-8: plain words, no internal mechanics on the screen.
+    expect(text).not.toMatch(/top-level path|metaEventId|eventID|dedupe|mirror|count every event/i)
     expect(SERVER_LANE_PROBE_DISCLOSURE).toMatch(/marks it as its own test, so it never counts in your Infinite numbers/)
     expect(SERVER_LANE_PROBE_DISCLOSURE).not.toMatch(/bot-flagged|TWO/)
   })
@@ -504,37 +505,78 @@ it("does not call a browser conversion unwired when only its server job is unava
   expect(plan.lines.find(line => line.id === "user_action:conversions_unwired")?.text).toContain("Other conversion jobs shown in this plan can still run")
 })
 
-it("puts an event-delivery summary near the top, including Meta gaps instead of burying them", () => {
-  const plan = buildPlanModel(input({
-    keys: fakeKeys({ meta: { status: "not_connected", pixels: [] } }),
-    candidates: [candidate("server_conversions", "purchase"), candidate("conversions_to_tools", "purchase")]
-  }))
-  const ids = plan.lines.map(line => line.id)
-  expect(ids.slice(0, 6)).toEqual(expect.arrayContaining(["conversion_names", "event_delivery:ga4", "event_delivery:posthog", "event_delivery:meta", "event_delivery:infinite"]))
-  expect(plan.lines.find(line => line.id === "event_delivery:ga4")?.text).toContain("purchase")
-  expect(plan.lines.find(line => line.id === "event_delivery:ga4")?.text).toContain("will receive")
-  expect(plan.lines.find(line => line.id === "event_delivery:posthog")?.text).toContain("purchase")
-  expect(plan.lines.find(line => line.id === "event_delivery:infinite")?.text).toContain("server lane")
-  expect(plan.lines.find(line => line.id === "event_delivery:meta")?.text).toContain("not connected")
-  expect(plan.lines.find(line => line.id === "event_delivery:meta")?.text).toContain("not yet")
-  expect(plan.lines.find(line => line.id === "event_delivery:meta")?.text).toContain("purchase")
-})
+const inv = (events: EventInventory["events"], extra: Partial<EventInventory> = {}): EventInventory => ({ events, checkoutCreates: [], paymentWebhook: null, pixelRestrictedRoutes: [], ...extra })
+const site = (file: string, line: number, via: string) => ({ file, line, via })
+/** A store shaped like the reference: GA4 + PostHog get every step, Meta gets page views only. */
+const STORE_INVENTORY = inv([
+  { event: "view_item", sites: [site("pages/products/[slug].tsx", 21, "helper:viewItem")], tools: { ga4: [site("src/analytics/events.ts", 23, "helper:sendGa")], posthog: [site("src/analytics/events.ts", 24, "helper:capturePosthog")] }, missing: ["meta_browser"] },
+  { event: "add_to_cart", sites: [site("pages/index.tsx", 17, "helper:addToCart")], tools: { ga4: [site("src/analytics/events.ts", 28, "helper:sendGa")], posthog: [site("src/analytics/events.ts", 29, "helper:capturePosthog")] }, missing: ["meta_browser"] },
+  { event: "begin_checkout", sites: [site("pages/api/checkout.ts", 67, "stripe.checkout.sessions.create")], tools: { ga4: [site("src/analytics/events.ts", 33, "helper:sendGa")], posthog: [site("src/analytics/events.ts", 34, "helper:capturePosthog")] }, missing: ["meta_server", "infinite"] },
+  { event: "purchase", sites: [site("pages/success.tsx", 28, "helper:purchase")], tools: { ga4: [site("src/analytics/events.ts", 41, "helper:sendGa")], posthog: [site("src/analytics/events.ts", 45, "helper:capturePosthog")] }, missing: ["meta_server", "infinite"] },
+  { event: "lead", sites: [site("pages/api/mailing-list.ts", 11, "form-api")], tools: { ga4: [site("src/analytics/events.ts", 52, "helper:sendGa")], posthog: [site("src/analytics/events.ts", 53, "helper:capturePosthog")] }, missing: ["meta_server", "infinite"] }
+], { checkoutCreates: [site("pages/api/checkout.ts", 67, "stripe.checkout.sessions.create")] })
+const withInventory = (item: ChecklistItem, events: readonly string[]): ChecklistItem => ({ ...item, inventory: STORE_INVENTORY.events.filter((entry) => events.includes(entry.event)) })
+const STORE_CANDIDATES = [
+  withInventory(candidate("meta_improve", "commerce_events"), ["view_item", "add_to_cart"]),
+  withInventory(candidate("server_conversions", "begin_checkout"), ["begin_checkout"]),
+  withInventory(candidate("server_conversions", "purchase"), ["purchase"]),
+  withInventory(candidate("server_conversions", "lead"), ["lead"])
+]
+const ADOPTED_ALL: PlanScanFacts["adopted"] = [
+  { provider: "meta", via: "snippet", file: "src/analytics/tracking.ts", line: 70, key: null },
+  { provider: "ga4", via: "snippet", file: "src/analytics/tracking.ts", line: 50, key: null },
+  { provider: "posthog", via: "snippet", file: "src/analytics/tracking.ts", line: 60, key: null }
+]
+const JARGON = /eventID|metaEventId|top-level path|mirror|dedupe|count every event/i
 
-it("describes the PR 393 server conversion contract and owner-approved Meta pixel changes in the tool headlines", () => {
-  const plan = buildPlanModel(input({
-    scan: scanFacts({ adopted: [{ provider: "meta", via: "snippet", file: "index.html", line: 6, key: IDS.meta }] }),
-    candidates: [candidate("server_conversions", "begin_checkout"), candidate("server_conversions", "purchase"), candidate("server_conversions", "lead")]
-  }))
-  const meta = plan.lines.find(line => line.id === "event_delivery:meta")?.text ?? ""
-  const infinite = plan.lines.find(line => line.id === "event_delivery:infinite")?.text ?? ""
-  expect(meta).toContain("checkout/purchase/lead")
-  expect(meta).toContain("top-level path")
-  expect(meta).toContain("server first")
-  expect(meta).toContain("returned metaEventId")
-  expect(meta).toContain("owner approval")
-  expect(meta).toContain("disablePushState")
-  expect(infinite).toContain("count every event")
-  expect(infinite).toContain("top-level path")
+describe("P1-8: the plan opens with one plain line per tool, built from the inventory", () => {
+  it("Meta connected in Infinite: says what Meta gets today and every event this run adds, browser and server", () => {
+    const plan = buildPlanModel(input({ scan: scanFacts({ adopted: ADOPTED_ALL, eventInventory: STORE_INVENTORY }), candidates: STORE_CANDIDATES }))
+    expect(plan.lines.slice(0, 4).map((line) => line.id)).toEqual(["headline:meta", "headline:ga4", "headline:posthog", "headline:infinite"])
+    const text = (id: string) => plan.lines.find((line) => line.id === id)?.text ?? ""
+    expect(text("headline:meta")).toBe(
+      "Meta: gets page views only today. We'll add ViewContent and AddToCart in the browser, where your site already tracks product views and add-to-cart, and send InitiateCheckout, Purchase and Lead from your server."
+    )
+    expect(text("headline:ga4")).toBe("GA4: gets product views, add-to-cart, checkout starts, purchases and leads today. Nothing to add.")
+    expect(text("headline:posthog")).toBe("PostHog: gets product views, add-to-cart, checkout starts, purchases and leads today. Nothing to add.")
+    expect(text("headline:infinite")).toBe("Infinite: records page views once its tag is live. We'll record checkout starts, purchases and leads from your server.")
+    for (const line of plan.lines) expect(line.text).not.toMatch(JARGON)
+    expect(plan.lines.some((line) => line.id.startsWith("event_delivery:"))).toBe(false)
+  })
+
+  it("a pixel in the code is not a connection: Meta not connected in Infinite → the server events are one plain 'once connected' line", () => {
+    const plan = buildPlanModel(input({ keys: fakeKeys({ meta: { status: "not_connected", pixels: [] } }), scan: scanFacts({ adopted: ADOPTED_ALL, eventInventory: STORE_INVENTORY }), candidates: STORE_CANDIDATES }))
+    const text = (id: string) => plan.lines.find((line) => line.id === id)?.text ?? ""
+    expect(text("headline:meta")).toBe("Meta: gets page views only today. We'll add ViewContent and AddToCart in the browser, where your site already tracks product views and add-to-cart.")
+    expect(text("headline:meta_server")).toBe("Meta gets InitiateCheckout, Purchase and Lead from your server once Meta is connected in Infinite (Connections › Meta).")
+    // No relay line is offered without the connection.
+    expect(plan.lines.some((line) => line.id === "meta_relay")).toBe(false)
+  })
+
+  it("an Infinite app that cannot send server events to Meta (no tag.meta-relay.v1) is not a Meta connection", () => {
+    const plan = buildPlanModel(input({ run: { siteClaim: false, metaRelay: false }, scan: scanFacts({ adopted: ADOPTED_ALL, eventInventory: STORE_INVENTORY }), candidates: STORE_CANDIDATES }))
+    expect(plan.lines.find((line) => line.id === "headline:meta_server")?.text).toContain("once Meta is connected in Infinite")
+    expect(plan.lines.find((line) => line.id === "headline:meta")?.text).not.toContain("from your server")
+  })
+
+  it("never names an event the scan found no place for, and never claims what a withheld job cannot do", () => {
+    const leadOnly = inv([STORE_INVENTORY.events.find((entry) => entry.event === "lead")!])
+    const plan = buildPlanModel(input({
+      before: fakeBefore({ hosting: fakeHosting({ envWriteGranted: false }) }),
+      scan: scanFacts({ adopted: ADOPTED_ALL, eventInventory: leadOnly }),
+      candidates: [withInventory(candidate("server_conversions", "lead"), ["lead"])]
+    }))
+    const all = plan.lines.filter((line) => line.id.startsWith("headline:")).map((line) => line.text).join("\n")
+    expect(all).not.toMatch(/ViewContent|AddToCart|Purchase|InitiateCheckout|purchases|checkout/)
+    expect(plan.lines.find((line) => line.id === "headline:meta")?.text).toBe("Meta: gets page views only today.")
+    expect(plan.lines.find((line) => line.id === "headline:meta_server_lane")?.text).toContain("Lead can't be sent from your server yet.")
+    expect(plan.lines.find((line) => line.id === "headline:infinite")?.text).toContain("Leads can't be recorded from your server yet.")
+  })
+
+  it("proposes conversion names the Meta relay maps (gap 2): start_trial, sign_up, schedule — never trial / signup / booking", () => {
+    const plan = buildPlanModel(input({ candidates: [candidate("server_conversions", "trial"), candidate("server_conversions", "signup"), candidate("conversions_to_tools", "booking"), candidate("server_conversions", "begin_checkout")] }))
+    expect(plan.decisions.conversionNames).toEqual(["start_trial", "sign_up", "schedule", "begin_checkout"])
+  })
 })
 
 it("reports when the existing Meta pixel id comes from a host env var and names the selected Infinite pixel", () => {

@@ -24,7 +24,10 @@ import { isRepositoryWork, isContinuedWork } from "./plan-permission.js"
 import { buildHostGuardExpression } from "../host-guard.js"
 import { ownerGuardHandoff } from "../jobs/owner-boundary.js"
 import { automaticEventsPerVisitOf } from "../checks/grade-test-run.js"
-import { applyApprovalsTo, itemChecksFor, requiredLineKind } from "../jobs/registry.js"
+import { applyApprovalsTo, COMMERCE_EVENTS_TARGET, EVENT_WORDS, FUNNEL_EVENT_OF_TARGET, itemChecksFor, listWords, requiredLineKind } from "../jobs/registry.js"
+import { proposedConversionName } from "../jobs/plan-data.js"
+import { snapshotFromFiles } from "../jobs/repo-files.js"
+import { buildEventInventory, META_EVENT_NAME, type EventInventory, type FunnelEvent } from "../scan/event-inventory.js"
 import { createHash } from "node:crypto"
 
 import type { ImproveLine, ImproveLineKind, ProviderId } from "../types.js"
@@ -99,6 +102,11 @@ export interface PlanScanFacts {
   nextConfigRewrites?: { path: string; snippet?: string } | null
   /** Review I1 P1-2: why the install cannot be applied as planned (a dry plan's blocker), or null. */
   installBlocked?: string | null
+  /**
+   * The event × tool inventory (`src/scan/event-inventory.ts`, the same one `JobScan.detections.eventInventory` holds).
+   * Absent = built here from `sources`; neither = the headline reads the candidates' own inventory entries.
+   */
+  eventInventory?: EventInventory | null
 }
 
 export interface PlanAgentSummary {
@@ -130,6 +138,11 @@ export interface PlanRunFacts {
   site?: SiteState | null
   /** The bridge advertises `tag.site-claim.v1` (the site-file proof path exists). */
   siteClaim: boolean
+  /**
+   * The bridge advertises `tag.meta-relay.v1` (Infinite can send this site's server conversions to Meta). Absent = not
+   * known (Meta counts as connected on its keys alone); false = the app cannot, so Meta is not connected in Infinite.
+   */
+  metaRelay?: boolean
 }
 
 /** The preview-guard decision for a wizard install (§3h.9). */
@@ -208,7 +221,7 @@ export const RUNNABILITY_TEXT = {
   claimWording: (host: string) =>
     `Infinite confirms ${host} is yours after your merge, from a one-line file this pull request adds (/.well-known/infinite-site-verification.txt). Until then it records nothing.`,
   conversionsUnwired: (names: readonly string[]) =>
-    `Some conversion work (${names.join(", ") || "none named"}) cannot run: the required browser helper or server lane is unavailable. Other conversion jobs shown in this plan can still run.`
+    `Not wired this run: ${names.join(", ") || "no conversion"}. The server lane or the browser helpers they need cannot be set up yet. Other conversion jobs shown in this plan can still run.`
 } as const
 
 /** The source is verified: an existing site source (not a pending claim), or a Vercel connection serving the host. */
@@ -377,12 +390,16 @@ export function lineKindForCandidate(item: ChecklistItem): PlanLineKind | null {
   return requiredLineKind(item)
 }
 
-/** Conversion names proposed from the detectors' candidates (jobs 8 and 10): the item target when it is a valid name. */
+/**
+ * Conversion names proposed from the detectors' candidates (jobs 8 and 10). Gap 2: each target's proposed name is one
+ * Infinite's Meta relay maps to a Meta standard event (`trial` → `start_trial`, `signup` → `sign_up`; plan-data's
+ * `PROPOSED_CONVERSION_NAME`), so a server report reaches Meta as that event.
+ */
 export function proposedConversionNames(candidates: readonly ChecklistItem[]): string[] {
   const names: string[] = []
   for (const item of candidates) {
     if (item.jobId !== "server_conversions" && item.jobId !== "conversions_to_tools") continue
-    const name = itemTarget(item)
+    const name = proposedConversionName(itemTarget(item))
     if (CONVERSION_NAME_PATTERN.test(name) && !names.includes(name)) names.push(name)
   }
   return names
@@ -616,48 +633,6 @@ export function buildPlanModel(input: PlanModelInput): WizardPlanModel {
       })
     )
   }
-  if (conversionNames.length > 0) {
-    const named = conversionNames.join(" · ")
-    const adoptedProviders = new Set(scan.adopted.map(entry => entry.provider))
-    const toolConnected = (tool: "ga4" | "posthog" | "meta"): boolean =>
-      tool === "meta"
-        ? (keys.meta.status === "connected" && keys.meta.pixels.length > 0) || adoptedProviders.has("meta")
-        : (keys[tool].status === "connected" || adoptedProviders.has(tool))
-    lines.push(
-      line({
-        id: "event_delivery:ga4",
-        kind: "user_action",
-        requires: "info",
-        text: toolConnected("ga4")
-          ? `GA4 will receive: ${named} where the site is not already sending it; product events carry GA4 items/value/currency.`
-          : `GA4 not yet: ${named} cannot be sent until GA4 is connected in Infinite and this is rerun.`
-      }),
-      line({
-        id: "event_delivery:posthog",
-        kind: "user_action",
-        requires: "info",
-        text: toolConnected("posthog")
-          ? `PostHog will receive: ${named} where the site is not already sending it; product/value properties stay attached.`
-          : `PostHog not yet: ${named} cannot be sent until PostHog is connected in Infinite and this is rerun.`
-      }),
-      line({
-        id: "event_delivery:meta",
-        kind: "user_action",
-        requires: "info",
-        text: toolConnected("meta")
-          ? `Meta will receive: browser-only ViewContent/AddToCart/custom CTAs from the pixel with no eventID; server checkout/purchase/lead conversions (${named}) include a top-level path, go server first through Infinite's Meta relay, and browser mirrors use only the returned metaEventId. Existing pixel auto events, consent gating, and disablePushState changes require owner approval.`
-          : `Meta not yet: ${named} cannot be sent because Meta is not connected; connect Meta in Infinite and rerun.`
-      }),
-      line({
-        id: "event_delivery:infinite",
-        kind: "user_action",
-        requires: "info",
-        text: infiniteRecordable
-          ? `Infinite will receive: browser intent/product events through the pixel; server outcomes (${named}) include a top-level path and product ids/value/currency through the server lane when available, otherwise the plan leaves an owner handoff. Declare server conversions with count every event dedupe.`
-          : `Infinite not yet: ${named} cannot be recorded until the site source is connected.`
-      })
-    )
-  }
   const metaEnvIds = [...new Map((before.census?.envSourcedIds ?? [])
     .filter((entry) => entry.tool === "meta")
     .map((entry) => [`${entry.envName}:${entry.file}:${entry.line}`, entry])).values()]
@@ -756,7 +731,7 @@ export function buildPlanModel(input: PlanModelInput): WizardPlanModel {
       line({
         id: "server_lane",
         kind: "server_lane",
-        text: `Server lane (${scan.serverLane.targetLabel}): counts every page request on your server, even with ad blockers. Checkout, purchase and lead reports include a top-level path, go server first through Infinite's Meta relay, and declare conversions with count every event dedupe. ${SERVER_LANE_PROBE_DISCLOSURE}`,
+        text: `Server lane (${scan.serverLane.targetLabel}): counts every page request on your server, even with ad blockers, and carries the conversions your server reports to Infinite. ${SERVER_LANE_PROBE_DISCLOSURE}`,
         requires: "approval",
         ownership: "managed",
         jobIds: candidates.filter((item) => item.jobId === "server_conversions").map((item) => item.id)
@@ -918,6 +893,8 @@ export function buildPlanModel(input: PlanModelInput): WizardPlanModel {
     seeds.push(seed)
   }
 
+  const serverEvents = serverReportedEvents(candidates)
+  const serverEventWords = serverEvents.map((event) => EVENT_WORDS[event])
   // ---- Meta: the goal (D16) and the server-events relay (D11) ----
   const metaPresent = tools.includes("meta") || scan.adopted.some((entry) => entry.provider === "meta")
   const goal = metaPresent ? recommendMetaGoal(conversionNames) : null
@@ -934,12 +911,14 @@ export function buildPlanModel(input: PlanModelInput): WizardPlanModel {
       })
     )
   }
-  if (keys.meta.status === "connected" && keys.meta.pixels.length === 1) {
+  if (metaConnectedInInfinite(keys, input.run?.metaRelay) && keys.meta.pixels.length === 1) {
     lines.push(
       line({
         id: "meta_relay",
         kind: "meta_relay",
-        text: "Meta server events: checkout/purchase/lead go server first through Infinite's relay with a top-level path; Infinite conversions use count every event dedupe, and browser mirrors reuse the returned metaEventId so Meta never counts twice.",
+        text: serverEventWords.length > 0
+          ? `Meta server events: Infinite sends the ${listWords(serverEventWords)} your server reports to Meta, so Meta counts each one once.`
+          : "Meta server events: Infinite sends the conversions your server reports to Meta, so Meta counts each one once.",
         requires: "approval"
       })
     )
@@ -1095,6 +1074,25 @@ export function buildPlanModel(input: PlanModelInput): WizardPlanModel {
     )
   }
 
+  // ---- P1-8: the per-tool headline, built from the inventory, is the first thing the plan says ----
+  const inventory = scan.eventInventory ?? (scan.sources ? buildEventInventory(snapshotFromFiles(scan.sources, { appRoot: scan.appRoot ?? "." })) : inventoryFromCandidates(input.candidates))
+  // Only a blocker that stops the whole install ("Infinite's tag is NOT installed by this run") reads before it.
+  const blockerFirst = lines[0]?.id === "user_action:owner_wiring" ? 1 : 0
+  lines.splice(
+    blockerFirst,
+    0,
+    ...toolHeadlines({
+      inventory,
+      candidates,
+      withheld: withheldItems,
+      installTools: tools,
+      adopted: scan.adopted.map((entry) => entry.provider),
+      keys,
+      metaRelay: input.run?.metaRelay,
+      serverLaneBlocked: serverLaneRule.ok ? null : serverLaneRule.line || null
+    })
+  )
+
   const decisions: PlanModel["decisions"] = {
     consentMode: consentProposed,
     conversionNames,
@@ -1117,6 +1115,131 @@ export function buildPlanModel(input: PlanModelInput): WizardPlanModel {
     serverLaneOffered: serverLaneApprovable,
     withheld
   }
+}
+
+
+// ---------------------------------------------------------------------------------------------
+// P1-8: the per-tool headline
+// ---------------------------------------------------------------------------------------------
+
+/** The funnel events the server jobs (job 8) of these candidates report, in funnel order. */
+function serverReportedEvents(candidates: readonly ChecklistItem[]): FunnelEvent[] {
+  const events = new Set<FunnelEvent>()
+  for (const item of candidates) {
+    if (item.jobId !== "server_conversions") continue
+    const event = FUNNEL_EVENT_OF_TARGET[itemTarget(item)]
+    if (event) events.add(event)
+  }
+  return FUNNEL_ORDER.filter((event) => events.has(event))
+}
+
+const FUNNEL_ORDER: readonly FunnelEvent[] = ["view_item", "add_to_cart", "begin_checkout", "purchase", "lead", "sign_up", "start_trial"]
+
+/** The inventory as far as the candidates carry it (a plan built without the scan's inventory or sources). */
+function inventoryFromCandidates(candidates: readonly ChecklistItem[]): EventInventory {
+  const events = new Map<FunnelEvent, NonNullable<ChecklistItem["inventory"]>[number]>()
+  for (const item of candidates) for (const entry of item.inventory ?? []) if (!events.has(entry.event)) events.set(entry.event, entry)
+  return { events: FUNNEL_ORDER.filter((event) => events.has(event)).map((event) => events.get(event)!), checkoutCreates: [], paymentWebhook: null, pixelRestrictedRoutes: [] }
+}
+
+export interface ToolHeadlineInput {
+  inventory: EventInventory
+  /** The candidates this plan can run (withheld ones removed). */
+  candidates: readonly ChecklistItem[]
+  /** The candidates this plan withholds (nothing would run them). */
+  withheld: readonly ChecklistItem[]
+  /** The tools this plan installs new. */
+  installTools: readonly ProviderId[]
+  /** The tools already in the site's code. */
+  adopted: readonly ProviderId[]
+  keys: TagKeys
+  /** The bridge's `tag.meta-relay.v1` capability (absent = not known). */
+  metaRelay?: boolean
+  /** Why the server lane cannot be set up this run (null = it can). */
+  serverLaneBlocked: string | null
+}
+
+/**
+ * Meta is connected IN INFINITE: a connected Meta pixel in the keys (what the relay binds) and an Infinite app that can
+ * send server events to Meta. A pixel in the site's code is not a connection.
+ */
+export function metaConnectedInInfinite(keys: TagKeys, metaRelay?: boolean): boolean {
+  return keys.meta.status === "connected" && keys.meta.pixels.length > 0 && metaRelay !== false
+}
+
+const metaNames = (events: readonly FunnelEvent[]) => listWords(events.map((event) => META_EVENT_NAME[event]))
+const words = (events: readonly FunnelEvent[]) => listWords(events.map((event) => EVENT_WORDS[event]))
+const capitalized = (text: string) => text.charAt(0).toUpperCase() + text.slice(1)
+
+/**
+ * P1-8: one plain line per tool, first in the plan: what the tool gets today (from the site's own code) and what this
+ * run adds, from the inventory and the jobs this plan really seeds. Only events the scan found a place for are named.
+ * Meta's server events are promised only when Meta is connected in Infinite; otherwise one line says when they start.
+ */
+export function toolHeadlines(input: ToolHeadlineInput): PlanLine[] {
+  const { inventory, candidates, withheld } = input
+  const found = FUNNEL_ORDER.filter((event) => inventory.events.some((entry) => entry.event === event))
+  const gets = (tool: "ga4" | "posthog" | "meta_browser" | "meta_server" | "infinite") =>
+    found.filter((event) => (inventory.events.find((entry) => entry.event === event)?.tools[tool]?.length ?? 0) > 0)
+  const commerceItem = (jobId: string) => candidates.find((item) => item.id === `${jobId}:${COMMERCE_EVENTS_TARGET}`)
+  const itemEvents = (item: ChecklistItem | undefined) => FUNNEL_ORDER.filter((event) => (item?.inventory ?? []).some((entry) => entry.event === event))
+  const conversionTools = (tool: "ga4" | "posthog") =>
+    FUNNEL_ORDER.filter((event) =>
+      candidates.some((item) => item.jobId === "conversions_to_tools" && (item.inventory ?? []).some((entry) => entry.event === event && entry.missing.includes(tool)))
+    )
+  const serverAdds = serverReportedEvents(candidates).filter((event) => found.includes(event))
+  const serverWithheld = serverReportedEvents(withheld).filter((event) => found.includes(event))
+  const present = (tool: ProviderId, sends: readonly FunnelEvent[]) => input.installTools.includes(tool) || input.adopted.includes(tool) || sends.length > 0
+  const lines: PlanLine[] = []
+  const headline = (id: string, text: string) => lines.push(line({ id: `headline:${id}`, kind: "user_action", requires: "info", text }))
+  const blockedReason = input.serverLaneBlocked ? ` ${input.serverLaneBlocked}` : ""
+  const todayWithoutEvents = (tool: ProviderId, what: string) =>
+    input.adopted.includes(tool) ? "gets page views only today" : input.installTools.includes(tool) ? `gets nothing today; this run installs ${what} for page views` : "gets nothing today"
+
+  // Meta first: the founder's ads run on it.
+  const metaToday = [...new Set([...gets("meta_browser"), ...gets("meta_server")])]
+  const metaPresent = present("meta", metaToday)
+  const connected = metaConnectedInInfinite(input.keys, input.metaRelay)
+  const metaBrowserAdds = itemEvents(commerceItem("meta_improve"))
+  const metaServerAdds = serverAdds.filter((event) => !gets("meta_server").includes(event))
+  if (!metaPresent && !connected) {
+    headline("meta", "Meta: there is no Meta pixel on this site and Meta is not connected in Infinite, so Meta gets nothing from this run. Connect Meta in Infinite (Connections › Meta), then run npx infinite-tag again.")
+  } else {
+    const today = metaToday.length > 0 ? `gets ${metaNames(metaToday)} today` : todayWithoutEvents("meta", "the pixel")
+    const adds: string[] = []
+    if (metaBrowserAdds.length > 0) adds.push(`add ${metaNames(metaBrowserAdds)} in the browser, where your site already tracks ${words(metaBrowserAdds)}`)
+    if (metaServerAdds.length > 0 && connected) adds.push(`send ${metaNames(metaServerAdds)} from your server`)
+    headline("meta", `Meta: ${today}. ${adds.length > 0 ? `We'll ${adds.join(", and ")}.` : metaServerAdds.length > 0 || serverWithheld.length > 0 ? "" : "Nothing to add."}`.trim())
+    if (metaServerAdds.length > 0 && !connected) {
+      headline("meta_server", `Meta gets ${metaNames(metaServerAdds)} from your server once Meta is connected in Infinite (Connections › Meta).`)
+    }
+  }
+  const metaWithheld = serverWithheld.filter((event) => !gets("meta_server").includes(event))
+  if (metaWithheld.length > 0) headline("meta_server_lane", `Meta: ${metaNames(metaWithheld)} can't be sent from your server yet.${blockedReason}`)
+
+  // GA4 and PostHog: every step they miss, only where the site runs them.
+  for (const [tool, name] of [["ga4", "GA4"], ["posthog", "PostHog"]] as const) {
+    const today = gets(tool)
+    if (!present(tool, today)) {
+      if (input.keys[tool].status !== "connected") headline(tool, `${name}: not on this site and not connected in Infinite, so it gets nothing from this run.`)
+      continue
+    }
+    const adds = FUNNEL_ORDER.filter((event) => itemEvents(commerceItem(`${tool}_improve`)).includes(event) || conversionTools(tool).includes(event))
+    const todayText = today.length > 0 ? `gets ${words(today)} today` : todayWithoutEvents(tool, "it")
+    headline(tool, `${name}: ${todayText}. ${adds.length > 0 ? `We'll add ${words(adds)}.` : "Nothing to add."}`)
+  }
+
+  // Infinite: page views from its tag; conversions from the site's server.
+  const infiniteToday = gets("infinite")
+  const infiniteAdds = serverAdds.filter((event) => !infiniteToday.includes(event))
+  const infiniteWithheld = serverWithheld.filter((event) => !infiniteToday.includes(event))
+  const infiniteParts = [
+    infiniteToday.length > 0 ? `Infinite: gets ${words(infiniteToday)} today.` : "Infinite: records page views once its tag is live.",
+    infiniteAdds.length > 0 ? `We'll record ${words(infiniteAdds)} from your server.` : "",
+    infiniteWithheld.length > 0 ? `${capitalized(words(infiniteWithheld))} can't be recorded from your server yet.${blockedReason}` : ""
+  ]
+  headline("infinite", infiniteParts.filter(Boolean).join(" "))
+  return lines
 }
 
 /** The target a candidate links by: job 7's line is per provider (`init`); job 5's capture is `capture`. */

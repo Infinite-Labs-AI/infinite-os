@@ -70,6 +70,10 @@ const OUTCOME_PATTERNS: Array<{ kind: OutcomeKind; detail: string; pattern: RegE
   { kind: "booking", detail: "Calendly invitee", pattern: /["'`]invitee\.created["'`]/g }
 ]
 
+/** API routes that take a lead (`/api/mailing-list`, `/api/subscribe`, `/api/contact`) or a signup (`/api/signup`). */
+const LEAD_API_ROUTE = /^\/api\/(?:.*\/)?(?:mailing-?list|newsletter|subscribe|subscribers?|waitlist|wait-list|leads?|contact(?:-us)?|enquir(?:y|ies)|inquir(?:y|ies)|demo-?request)(?:\/|$)/i
+const SIGNUP_API_ROUTE = /^\/api\/(?:.*\/)?(?:sign-?up|register|registration|create-account)(?:\/|$)/i
+
 /** Pure: server-side outcome handlers, one finding per (file, kind) at the first matching line. */
 export function detectOutcomes(snapshot: RepoSnapshot): OutcomeFinding[] {
   const findings: OutcomeFinding[] = []
@@ -91,6 +95,13 @@ export function detectOutcomes(snapshot: RepoSnapshot): OutcomeFinding[] {
     if (!seenKinds.has("download") && route !== null && /(?:^|\/)(?:api\/)?downloads?(?:\/|$)/.test(route.slice(1))) {
       const handler = codeMatches(text, /export\s+(?:async\s+)?function\s+(?:GET|POST|handler)\b|export\s+default\b/g)[0]
       if (handler) findings.push({ file: path, line: handler.line, detail: "download route", kind: "download", conversionType: "download", route })
+    }
+    // A signup or mailing-list API route counts by its path even before it stores anything (a first store often logs the
+    // email and wires a provider later): `/api/mailing-list`, `/api/subscribe`, `/api/signup`.
+    const formKind: OutcomeKind | null = route === null ? null : SIGNUP_API_ROUTE.test(route) ? "signup" : LEAD_API_ROUTE.test(route) ? "lead" : null
+    if (formKind && !seenKinds.has(formKind)) {
+      const handler = codeMatches(text, /export\s+(?:async\s+)?function\s+(?:GET|POST|PUT|handler)\b|export\s+default\b|export\s+const\s+(?:GET|POST)\b/g)[0]
+      if (handler) findings.push({ file: path, line: handler.line, detail: `${formKind} API route`, kind: formKind, conversionType: OUTCOME_TYPE[formKind], route })
     }
   }
   return sortFindings(findings)

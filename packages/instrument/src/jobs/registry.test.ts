@@ -120,7 +120,8 @@ describe("seedCandidates", () => {
     expect(signup.checks.map((c) => `${c.tier}:${c.id}`)).toEqual(["S:no_fbq_standard_on_click", "S:track_after_success", "P:first_real_conversion"])
     expect(signup.trigger.evidence).toEqual([{ file: "app/signup/page.tsx", line: 5 }])
     expect(signup.allow.files).toEqual(["app/signup/page.tsx"])
-    expect(signup.title).toBe("Send the signup conversion to every tool")
+    // P0-5: the title names the tools that miss the conversion, never "every tool".
+    expect(signup.title).toBe("Send the signup conversion to GA4 and PostHog")
     expect(items.every((item) => item.owner === "agent" && item.checks.every((c) => c.state === "not_run"))).toBe(true)
   })
 
@@ -596,7 +597,7 @@ describe("§3x.3 live run 3: job 10 targets the success, job 11 is not a second 
   it("titles: each item of a several-item job is named by its target (no two share a title)", () => {
     const items = seedCandidatesFrom(run3Scan(), before)
     expect(items.filter((item) => item.jobId === "preview_guard").map((item) => item.title)).toEqual(["Keep previews silent: GA4", "Keep previews silent: Meta pixel"])
-    expect(items.find((item) => item.id === "conversions_to_tools:signup")!.title).toBe("Send the signup conversion to every tool")
+    expect(items.find((item) => item.id === "conversions_to_tools:signup")!.title).toBe("Send the signup conversion to GA4")
     expect(new Set(items.map((item) => item.title)).size).toBe(items.length)
   })
 
