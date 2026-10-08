@@ -56,6 +56,8 @@ export const PLAN_LINE_KINDS = [
   "meta_spa_page_views",
   /** R4-8: an adopted GA4 that sends no page_view on a client-side page change; the user approves the fix. */
   "ga4_spa_page_views",
+  /** Parity gap 5: hashed email / account id on the managed Meta pixel's browser events (on by default; the owner can turn it off). */
+  "meta_advanced_matching",
   "user_action",
   // B28: the 7-day check-in that follows the deploy (shown only; `checkinOptIn` stays the accepted default).
   "checkin"
@@ -113,6 +115,8 @@ export const YES_POLICY: { readonly [K in PlanLineKind]: YesPolicyValue } = {
   meta_spa_page_views: "yes",
   // GA4 page-view fix, subject to the same exclusions.
   ga4_spa_page_views: "yes",
+  // A change to the managed Meta pixel, shown with the rest of the plan; a no turns it off.
+  meta_advanced_matching: "yes",
   // The D16 recommendation: an informational default the user can change.
   meta_goal: "n/a",
   // GTM edit, Traffic Permissions, connect a tool, the GA4 page-change setting: shown only.

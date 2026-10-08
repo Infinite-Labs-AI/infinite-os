@@ -275,6 +275,11 @@ export function serverLaneHandoffText(provider: string | null | undefined, targe
   return `We'll write the server code; you add the secret in ${host ?? "your host's settings"} (steps in the PR).`
 }
 
+/** The plan line for the Meta pixel's browser match data (parity gap 5). */
+export const META_ADVANCED_MATCHING_LINE_ID = "meta_advanced_matching"
+export const META_ADVANCED_MATCHING_TEXT =
+  "Meta: when your page knows the visitor's email or account id, send it hashed with the browser events, only for visitors who allowed tracking, so Meta can match more of your ad clicks. Turn this off to leave it out."
+
 export const GUARD_NO_HOST_TEXT = "Infinite does not know your production domain yet, so no preview guard is added; tell the wizard your live domain (--production-host)."
 
 /** The facts for this plan (keys, hosting, the scan, the run's site state and the bridge's claim capability). */
@@ -952,6 +957,14 @@ export function buildPlanModel(input: PlanModelInput): WizardPlanModel {
     )
   }
 
+  // Parity gap 5: the managed Meta pixel's browser events carry hashed match data (email / account id the page knows),
+  // only while the tag says the visitor allowed tracking. On by default when Meta is connected; a plain line the owner
+  // can turn off (declining it sets `decisions.metaAdvancedMatching: false`).
+  const metaManaged = tools.includes("meta") || scan.managedProviders.includes("meta")
+  if (metaManaged && keys.meta.status === "connected") {
+    lines.push(line({ id: META_ADVANCED_MATCHING_LINE_ID, kind: "meta_advanced_matching", requires: "approval", ownership: "managed", text: META_ADVANCED_MATCHING_TEXT }))
+  }
+
   // §3x.3 (F6): the site's own Meta pixel counted only the first page of the test load's visit. A change to the
   // customer's own tag, so it is a line the user approves (never done on the wizard's say-so).
   const metaSpaItems = candidates.filter((item) => item.id === "meta_improve:spa_page_view")
@@ -1462,6 +1475,8 @@ export interface ResolvedPlanAnswers {
   privacyText: string | null
   npmInstall: boolean | null
   metaGoal: string | null
+  /** The managed Meta pixel's browser match data: on unless its plan line was declined (`decisions.metaAdvancedMatching`). */
+  metaAdvancedMatching: boolean
   /** Per line: true approved, false declined, null unanswered (info / user-action lines are always null). */
   lines: Array<{ id: string; approved: boolean | null }>
   /** The answer normalised for `JobRegistry.applyApprovals` (consent flag folded in, unknown ids dropped). */
@@ -1546,6 +1561,7 @@ export function resolvePlanAnswers(
     npmInstall: !npmAsked ? null : approved.has(DECISION_LINE_IDS.npmInstall) ? true : declined.has(DECISION_LINE_IDS.npmInstall) ? false : null,
     // The recommendation is data on the plan, never parsed back out of its copy (P2-10).
     metaGoal: wizardPlan.metaGoal ?? null,
+    metaAdvancedMatching: plan.decisions.metaAdvancedMatching !== false && !declined.has(META_ADVANCED_MATCHING_LINE_ID),
     lines,
     approvals: {
       approved: [...approved],

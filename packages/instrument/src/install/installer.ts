@@ -407,7 +407,7 @@ export class WizardInstaller implements Installer {
     const answers = resolvePlanAnswers(plan, approvals, { consentFlag: this.options.consentFlag() })
     const approved = new Set(answers.lines.filter((entry) => entry.approved === true).map((entry) => entry.id))
     const served = siteServing(scan, internals.before, keys)
-    const all = followSitePixels(artifactsFromKeys(keys, { ...plan.decisions, consentMode: answers.consentMode ?? "not_required" }, { posthogProxy: served.posthogProxy }), scan.detected, pixelFreePathsOf(scan))
+    const all = followSitePixels(artifactsFromKeys(keys, { ...plan.decisions, metaAdvancedMatching: answers.metaAdvancedMatching, consentMode: answers.consentMode ?? "not_required" }, { posthogProxy: served.posthogProxy }), scan.detected, pixelFreePathsOf(scan))
     const artifacts: WizardInstallArtifacts = { ...(all.productionHosts ? { productionHosts: all.productionHosts } : {}) }
     for (const tool of ["infinite", "ga4", "posthog", "meta"] as const) {
       const lineForTool = plan.lines.find((entry) => entry.kind === "install_provider" && (entry.id === `install_provider:${tool}` || entry.id.startsWith(`install_provider:${tool}:`)))
@@ -462,7 +462,7 @@ export class WizardInstaller implements Installer {
 
     // ---- the artifacts: approved tools from the connections; an already-managed tool whose update
     // was not approved is KEPT exactly as the receipt recorded it (never dropped from the page) ----
-    const all = followSitePixels(artifactsFromKeys(keys, { ...plan.decisions, consentMode: answers.consentMode }, { posthogProxy: served.posthogProxy }), scan.detected, pixelFreePathsOf(scan))
+    const all = followSitePixels(artifactsFromKeys(keys, { ...plan.decisions, metaAdvancedMatching: answers.metaAdvancedMatching, consentMode: answers.consentMode }, { posthogProxy: served.posthogProxy }), scan.detected, pixelFreePathsOf(scan))
     const installLine = (tool: ProviderId) =>
       plan.lines.find((entry) => entry.kind === "install_provider" && (entry.id === `install_provider:${tool}` || entry.id.startsWith(`install_provider:${tool}:`)))
     const previous = scan.manifest
@@ -474,7 +474,7 @@ export class WizardInstaller implements Installer {
         continue
       }
       if (!previous?.providers.includes(tool)) continue
-      const kept = answers.consentMode === null ? "the plan has no consent answer for it" : keptArtifact(tool, previous, keys, answers.consentMode, plan.decisions.metaAdvancedMatching !== false)
+      const kept = answers.consentMode === null ? "the plan has no consent answer for it" : keptArtifact(tool, previous, keys, answers.consentMode, answers.metaAdvancedMatching)
       if (typeof kept === "string") {
         return this.failed(artifacts, warnings, `${TOOL_LABEL[tool]} is already installed here and its update was not approved, but ${kept}. Approve "Update ${TOOL_LABEL[tool]}", or remove it with uninstall first.`, false)
       }

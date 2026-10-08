@@ -35,7 +35,9 @@ import {
   seedItemsAfterApprovals,
   type PlanModelInput,
   type PlanScanFacts,
-  SERVER_LANE_HANDOFF_LINE_ID
+  SERVER_LANE_HANDOFF_LINE_ID,
+  META_ADVANCED_MATCHING_LINE_ID,
+  META_ADVANCED_MATCHING_TEXT
 } from "./plan-model.js"
 
 type WizardBeforeFactsCensus = ReturnType<typeof fakeBefore>["census"]
@@ -607,4 +609,24 @@ it("reports when the existing Meta pixel id comes from a host env var and names 
   expect(text).toContain("NEXT_PUBLIC_META_PIXEL_ID")
   expect(text).toContain("host settings")
   expect(text).toContain(IDS.meta)
+})
+
+describe("parity gap 5: the managed Meta pixel's browser match data is a plain plan line the owner can turn off", () => {
+  it("on by default when Meta is connected and installed by this run; a no turns it off", () => {
+    const plan = buildPlanModel(input())
+    const matchLine = plan.lines.find((entry) => entry.id === META_ADVANCED_MATCHING_LINE_ID)
+    expect(plan.installTools).toContain("meta")
+    expect(matchLine?.text).toBe(META_ADVANCED_MATCHING_TEXT)
+    expect(matchLine?.text).not.toMatch(/eventID|metaEventId|advanced matching/i)
+    expect(resolvePlanAnswers(plan, { approved: [], declined: [], edits: {} }, { consentFlag: null }).metaAdvancedMatching).toBe(true)
+    expect(resolvePlanAnswers(plan, { approved: [], declined: [META_ADVANCED_MATCHING_LINE_ID], edits: {} }, { consentFlag: null }).metaAdvancedMatching).toBe(false)
+  })
+
+  it("NEGATIVE: no line when the site's own pixel stays (nothing managed to change) or Meta is not connected", () => {
+    const adopted = buildPlanModel(input({ scan: scanFacts({ adopted: [{ provider: "meta", via: "snippet", file: "index.html", line: 6, key: "1234567890123456" }] }) }))
+    expect(adopted.lines.some((entry) => entry.id === META_ADVANCED_MATCHING_LINE_ID)).toBe(false)
+    const keys = { ...fakeKeys(), meta: { status: "not_connected" as const, pixels: [] } }
+    const unconnected = buildPlanModel(input({ keys, before: fakeBefore({ keys }) }))
+    expect(unconnected.lines.some((entry) => entry.id === META_ADVANCED_MATCHING_LINE_ID)).toBe(false)
+  })
 })
