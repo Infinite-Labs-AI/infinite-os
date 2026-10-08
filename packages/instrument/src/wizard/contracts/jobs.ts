@@ -171,6 +171,10 @@ export const JOB_TABLE: { readonly [J in JobId]: JobSpec & { jobId: J } } = {
       p("S", "outcome_declared"),
       p("S", "event_id_stable"),
       p("S", "no_pii_in_outcome"),
+      // Review r3: Meta can match the conversion (adMatch), and a purchase carries its value and currency. Each passes
+      // when nothing applies, so they may only fail the job.
+      c("S", "outcome_ad_match"),
+      c("S", "outcome_value_currency"),
       c("B", "build"),
       c("P", "first_real_outcome")
     ],
@@ -203,6 +207,9 @@ export const JOB_TABLE: { readonly [J in JobId]: JobSpec & { jobId: J } } = {
       c("S", "no_fbq_standard_on_click"),
       p("S", "conversion_tracked"),
       p("S", "track_after_success"),
+      // Review r3: no second send of an event a tool already gets from the site, and no page-made Meta event id.
+      c("S", "no_double_count"),
+      c("S", "meta_event_id_from_server"),
       c("P", "first_real_conversion")
     ],
     donePath: ["done_in_code", "waiting_real_event", "proven"]

@@ -26,6 +26,9 @@ import { isUnsupported } from "../../hosts/other.js"
 import { classifyReview, isReviewResult, parseBriefReview, printedReviewBrief, reviewerBrief, type ClassifiedReview } from "../../review/brief.js"
 import { allowlistUnion, assertNoAgentAlive, bestEffortBridge, bridgeStop, manifestFiles, status, sub } from "../../review/context.js"
 import { parseUnifiedDiff } from "../../review/diff.js"
+import { commerceFindingsForChange } from "../../checks/commerce-static.js"
+import { loadRepoSnapshot } from "../../jobs/repo-files.js"
+import { jobStaticRunContext } from "../deps.js"
 import { ciFixItem, job16Item, restoreFiles, runFixRound, snapshotFiles, settleFixRound } from "../../review/fix.js"
 import { openFindings, parseLedger, recordDecisions, REVIEW_LEDGER_PATH, type ReviewLedger } from "../../review/ledger.js"
 import { wizardOwnership, type WizardOwnership } from "../../review/ownership.js"
@@ -81,7 +84,7 @@ async function saveLedger(session: Session): Promise<void> {
 }
 
 /** The review inputs, written into the reviewer's own detached worktree (never into the user's repo). */
-async function writeReviewInputs(session: Session, dir: string, diff: string): Promise<{ diff: string; plan: string; checks: string }> {
+async function writeReviewInputs(session: Session, dir: string, diff: string, fromSha: string | null = null): Promise<{ diff: string; plan: string; checks: string }> {
   const { deps, ctx } = session
   const state = ctx.state.get()
   const keys = session.ship.facts.keys
@@ -107,13 +110,33 @@ async function writeReviewInputs(session: Session, dir: string, diff: string): P
   }
   const checks = {
     jobs: state.jobs.map((job) => ({ id: job.id, title: job.title, state: job.state, checks: job.checks.map((check) => ({ id: check.id, tier: check.tier, state: check.state })) })),
-    inPr: state.report.in_pr ? Object.fromEntries(Object.entries(state.report.in_pr.finishLine).map(([id, cell]) => [id, cell?.state ?? null])) : null
+    inPr: state.report.in_pr ? Object.fromEntries(Object.entries(state.report.in_pr.finishLine).map(([id, cell]) => [id, cell?.state ?? null])) : null,
+    // Review r3: what the plan promised each tool against the whole change (missing Meta events, outcomes without
+    // match data or money, a second send of an event a tool already gets, personal data), in plain words.
+    commerce: await reviewCommerceFindings(session, dir, diff, fromSha)
   }
   const names = { diff: `${REVIEW_INPUT_DIR}/diff.patch`, plan: `${REVIEW_INPUT_DIR}/plan.json`, checks: `${REVIEW_INPUT_DIR}/checks.json` }
   await deps.fs.writeTextAtomic(join(dir, names.diff), await stubManagedDiff(session, dir, diff), 0o600)
   await deps.fs.writeTextAtomic(join(dir, names.plan), `${JSON.stringify(plan, null, 2)}\n`, 0o600)
   await deps.fs.writeTextAtomic(join(dir, names.checks), `${JSON.stringify(checks, null, 2)}\n`, 0o600)
   return names
+}
+
+/** The commerce findings for the reviewer: the head's app files, and the changed files as they were at `fromSha`. */
+async function reviewCommerceFindings(session: Session, dir: string, diff: string, fromSha: string | null): Promise<Array<{ rule: string; state: string; message: string }>> {
+  try {
+    const run = jobStaticRunContext(session.ctx.root, session.ctx.state.get().runId)
+    const findings = await commerceFindingsForChange({
+      files: loadRepoSnapshot(dir, session.ctx.appRoot).files,
+      changedPaths: parseUnifiedDiff(diff).map((file) => file.path),
+      baseText: async (path) => (fromSha === null ? undefined : await session.ship.git.showFile(fromSha, path).catch(() => undefined)),
+      ...(run.eventInventory ? { inventory: run.eventInventory } : {}),
+      ...(run.metaInUse !== undefined ? { metaInUse: run.metaInUse } : {})
+    })
+    return findings.map((finding) => ({ rule: finding.rule, state: finding.state, message: finding.message }))
+  } catch (error) {
+    return [{ rule: "commerce", state: "undetermined", message: `The commerce checks could not run (${error instanceof Error ? error.message.slice(0, 80) : "unknown error"}).` }]
+  }
 }
 
 /** §3x.3 The run's ownership facts (read once per session from the install receipt and the PR's base commit). */
@@ -223,7 +246,7 @@ async function runReviewer(session: Session, reviewer: AgentKind, round: number,
   const { ship, deps, ctx } = session
   const worktree = await ship.git.worktreeAddDetached(head)
   try {
-    const inputs = await writeReviewInputs(session, worktree.dir, await ship.git.diff(fromSha, head))
+    const inputs = await writeReviewInputs(session, worktree.dir, await ship.git.diff(fromSha, head), fromSha)
     const nonce = randomBytes(8).toString("hex")
     await deps.fs.writeTextAtomic(join(worktree.dir, READ_CHECK_PATH), `${nonce}\n`, 0o600)
     const brief = reviewerBrief({

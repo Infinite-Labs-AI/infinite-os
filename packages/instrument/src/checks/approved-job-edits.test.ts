@@ -150,7 +150,7 @@ it("verifies correct scripted source edits for each applicable kind on the main 
     .replace("gtag('config', 'G-FAKE00001');", `gtag('config', 'G-FAKE00001');\n${GA4_PAGE_CHANGE_SCRIPT}`)
     .replace("fbq('init', '1234567890123456');", "fbq('set', 'autoConfig', false, '1234567890123456');\nfbq('init', '1234567890123456');")
     .replace("fbq('track', 'PageView');", `fbq('track', 'PageView');\n${META_PAGE_CHANGE_SCRIPT}`))
-  edit(signup, source => source.replace("  return Response.json({ ok: true", "  await reportInfiniteOutcome({ type: 'sign_up', path: '/signup', eventId: data.user.id })\n  return Response.json({ ok: true"))
+  edit(signup, source => source.replace("  return Response.json({ ok: true", "  await reportInfiniteOutcome({ type: 'sign_up', path: '/signup', eventId: data.user.id, adMatch: await adMatchFromRequest(request, { trackingAllowed: false, email, externalId: data.user.id }) })\n  return Response.json({ ok: true"))
   edit(login, source => source.replace("  return Response.json({ ok: true", "  infiniteIdentify(data.user.id)\n  return Response.json({ ok: true"))
   edit(logout, source => source.replace("  await supabase.auth.signOut()", "  await supabase.auth.signOut()\n  infiniteReset()"))
   edit(form, source => source.replace('if (response.ok) window.location.assign("/")', 'if (response.ok) { infiniteTrack("sign_up"); window.location.assign("/"); }'))
