@@ -34,7 +34,8 @@ import {
   GA4_SPA_LINE_TEXT,
   seedItemsAfterApprovals,
   type PlanModelInput,
-  type PlanScanFacts
+  type PlanScanFacts,
+  SERVER_LANE_HANDOFF_LINE_ID
 } from "./plan-model.js"
 
 type WizardBeforeFactsCensus = ReturnType<typeof fakeBefore>["census"]
@@ -70,14 +71,27 @@ const adoptedMetaLines: ImproveLine[] = [
   { id: "autoconfig_off_adopted:meta:autoconfig", kind: "autoconfig_off_adopted", provider: "meta", target: "autoconfig", text: "Meta: turn off automatic events.", owner: "code", evidence: { file: "index.html", line: 6 } }
 ]
 
-it("withholds server outcome jobs when the server lane cannot be installed", () => {
+it("founder ruling (P0-6): without Infinite's env writes the lane is still written, inert, its jobs seeded, and the plan says the owner adds the secret", () => {
   const item = candidate("server_conversions", "lead")
   const plan = buildPlanModel(input({
     before: fakeBefore({ hosting: fakeHosting({ envWriteGranted: false }) }),
     candidates: [item]
   }))
-  expect(plan.lines.map((line) => line.id)).toContain("user_action:server_lane")
+  const ids = plan.lines.map((line) => line.id)
+  expect(ids).toContain("server_lane")
+  expect(plan.lines.find((line) => line.id === SERVER_LANE_HANDOFF_LINE_ID)?.text).toBe("We'll write the server code; you add the secret in Vercel (steps in the PR).")
+  // Never the "connect Vercel" dead end, and never a line asking to let Infinite write env vars it cannot write.
+  expect(ids).not.toContain("user_action:server_lane")
+  expect(ids).not.toContain("account_settings:hosting")
+  expect(plan.withheld).not.toContain(item.id)
+  expect(seedItemsAfterApprovals([item], [], plan, { approved: plan.lines.filter((line) => line.requires === "approval").map((line) => line.id), declined: [], edits: {} })).toContainEqual(expect.objectContaining({ id: item.id }))
+})
+
+it("withholds server outcome jobs when the framework has no server lane at all", () => {
+  const item = candidate("server_conversions", "lead")
+  const plan = buildPlanModel(input({ scan: scanFacts({ serverLane: null }), candidates: [item] }))
   expect(plan.withheld).toContain(item.id)
+  expect(plan.lines.map((line) => line.id)).not.toContain(SERVER_LANE_HANDOFF_LINE_ID)
   expect(seedItemsAfterApprovals([item], [], plan, { approved: plan.lines.filter((line) => line.requires === "approval").map((line) => line.id), declined: [], edits: {} })).not.toContainEqual(expect.objectContaining({ id: item.id }))
 })
 const adoptedPosthogLines: ImproveLine[] = [
@@ -561,9 +575,9 @@ describe("P1-8: the plan opens with one plain line per tool, built from the inve
 
   it("never names an event the scan found no place for, and never claims what a withheld job cannot do", () => {
     const leadOnly = inv([STORE_INVENTORY.events.find((entry) => entry.event === "lead")!])
+    // A framework with no server lane: the lead's server job is withheld.
     const plan = buildPlanModel(input({
-      before: fakeBefore({ hosting: fakeHosting({ envWriteGranted: false }) }),
-      scan: scanFacts({ adopted: ADOPTED_ALL, eventInventory: leadOnly }),
+      scan: scanFacts({ adopted: ADOPTED_ALL, eventInventory: leadOnly, serverLane: null }),
       candidates: [withInventory(candidate("server_conversions", "lead"), ["lead"])]
     }))
     const all = plan.lines.filter((line) => line.id.startsWith("headline:")).map((line) => line.text).join("\n")

@@ -20,7 +20,8 @@ import {
   seedItemsAfterApprovals,
   type LineFacts,
   type PlanModelInput,
-  type PlanScanFacts
+  type PlanScanFacts,
+  SERVER_LANE_HANDOFF_LINE_ID
 } from "./plan-model.js"
 
 const NO_HOSTING: TagHosting = { provider: "none", vercel: null }
@@ -109,9 +110,11 @@ describe("the Infinite line (DECISIONS §1.6 table)", () => {
     const index = plan.lines.findIndex((line) => line.id === "install_provider:infinite")
     expect(plan.lines[index]).toMatchObject({ requires: "info", kind: "install_provider" })
     expect(plan.lines[index + 1]).toMatchObject({ id: "info:infinite_site_file", requires: "info", text: RUNNABILITY_TEXT.claimWording("fresh-acme.com") })
-    // The claim path never offers the server lane (it needs a VERIFIED source and Infinite's Vercel connection).
-    expect(plan.lines.find((line) => line.id === "user_action:server_lane")?.text).toBe(RUNNABILITY_TEXT.serverLaneNoConnection)
-    expect(plan.lines.some((line) => line.id === "npm_install")).toBe(false)
+    // The claim path has no Vercel connection to save the lane's settings: the lane is written inert in the pull
+    // request and the owner adds its secret (founder ruling, review P0-6). Infinite never asks to write env vars here.
+    expect(plan.lines.find((line) => line.id === "server_lane")?.requires).toBe("info")
+    expect(plan.lines.find((line) => line.id === SERVER_LANE_HANDOFF_LINE_ID)?.text).toMatch(/^We'll write the server code; you add the secret in .+ \(steps in the PR\)\.$/)
+    expect(plan.lines.some((line) => line.id === "user_action:server_lane" || line.id === "account_settings:hosting")).toBe(false)
   })
 
   it("a host answered but an old app (no capability) and no Vercel connection → the no-proof user_action", () => {
@@ -150,11 +153,12 @@ describe("the Infinite line (DECISIONS §1.6 table)", () => {
     expect(plan.lines.find((line) => line.id === "server_lane")?.requires).toBe("info")
   })
 
-  it("NEGATIVE: Vercel connected without env writes → the no-scope line, never a pre-checked lane", () => {
+  it("NEGATIVE: Vercel connected without env writes → the lane is written inert and the owner adds the secret; Infinite never asks to save it", () => {
     const keys = freshKeys()
     const plan = buildPlanModel(freshInput({ keys, before: fakeBefore({ keys, hosting: fakeHosting({ envWriteGranted: false }) }) }))
-    expect(plan.lines.some((line) => line.id === "server_lane")).toBe(false)
-    expect(plan.lines.find((line) => line.id === "user_action:server_lane")?.text).toBe(RUNNABILITY_TEXT.serverLaneNoScope)
+    expect(plan.lines.find((line) => line.id === SERVER_LANE_HANDOFF_LINE_ID)?.text).toBe("We'll write the server code; you add the secret in Vercel (steps in the PR).")
+    expect(plan.lines.some((line) => line.id === "account_settings:hosting")).toBe(false)
+    expect(plan.lines.some((line) => line.id === "user_action:server_lane")).toBe(false)
   })
 
   it("an existing site source is runnable as before (the connected world is unchanged)", () => {
@@ -190,8 +194,9 @@ describe("job 10 is seeded only when this install emits the conversion helpers (
 
   it("NEGATIVE: Infinite installed this run → job 10 is a candidate again", () => {
     const plan = buildPlanModel(freshInput({ run: { site: answered("fresh-acme.com"), siteClaim: true } }))
-    expect(plan.withheld).toEqual(["server_conversions:signup"])
-    expect(plan.lines.some((line) => line.id === "user_action:conversions_unwired")).toBe(true)
+    // Job 8 too: its server code is written inert on the hand-off path, so nothing is withheld.
+    expect(plan.withheld).toEqual([])
+    expect(plan.lines.some((line) => line.id === "user_action:conversions_unwired")).toBe(false)
   })
 })
 

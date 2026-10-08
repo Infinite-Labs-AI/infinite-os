@@ -22,7 +22,7 @@ import { bridgeFailureLine, bridgeFailureOutcome, missingCapabilities, protocolO
 import { hashInputs, sub } from "../../bridge/step-kit.js"
 import { readKeysResult } from "../handoff/keys-result.js"
 import { readBeforeFactsFile } from "../handoff/before-facts.js"
-import { lineFactsFor, lineRunnable, RUNNABILITY_TEXT, type PlanScanFacts } from "../../install/plan-model.js"
+import { lineFactsFor, lineRunnable, RUNNABILITY_TEXT, SERVER_LANE_HANDOFF_LINE_ID, type PlanScanFacts } from "../../install/plan-model.js"
 import type { TagHosting } from "../contracts/bridge.js"
 import { hardStopOutcome, isTransientBridgeFailure } from "../../bridge/outcomes.js"
 
@@ -131,6 +131,11 @@ async function serverLaneStillRunnable(ctx: WizardContext, deps: WizardDeps): Pr
 async function provisionServerLane(ctx: WizardContext, deps: WizardDeps): Promise<"saved" | "needs_you" | "skipped" | "not_offered"> {
   const approval = ctx.state.get().plan?.lines.find(line => line.id === "account_settings:hosting")?.approved
   if (approval !== true) {
+    // The hand-off path: the server code is in the pull request; its settings are the owner's (steps in the PR).
+    if ((ctx.state.get().plan?.lines ?? []).some((line) => line.id === SERVER_LANE_HANDOFF_LINE_ID)) {
+      sub(ctx, "settings", "Server lane: the server code is in the pull request; add its secret yourself (steps in the PR)", "info")
+      return "not_offered"
+    }
     const userAction = (ctx.state.get().plan?.lines ?? []).some((line) => line.id === "user_action:server_lane")
     if (userAction) {
       sub(ctx, "settings", "Server lane: not offered (Infinite has no Vercel connection serving this site, or no env-write permission)", "info")

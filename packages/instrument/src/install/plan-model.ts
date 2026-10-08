@@ -258,6 +258,23 @@ export function lineRunnable(kind: RunnableLineKey, facts: LineFacts): { ok: tru
   }
 }
 
+/** The plan line that says the server code is written now and the owner adds its settings (the hand-off path). */
+export const SERVER_LANE_HANDOFF_LINE_ID = "info:server_lane_handoff"
+
+/**
+ * The hand-off path applies when the server lane can be written (a target, and Infinite's tag in this install) and the
+ * ONLY thing missing is Infinite's way to save its environment variables on the host.
+ */
+export function serverLaneHandoffApplies(rule: { ok: true } | { ok: false; line: string }, installable: boolean): boolean {
+  return installable && !rule.ok && (rule.line === RUNNABILITY_TEXT.serverLaneNoConnection || rule.line === RUNNABILITY_TEXT.serverLaneNoScope)
+}
+
+/** "We'll write the server code; you add the secret in Vercel (steps in the PR)." — named for the site's host. */
+export function serverLaneHandoffText(provider: string | null | undefined, targetLabel: string): string {
+  const host = provider === "vercel" || /vercel|next/i.test(targetLabel) ? "Vercel" : provider === "netlify" || /netlify/i.test(targetLabel) ? "Netlify" : provider === "cloudflare" || /cloudflare/i.test(targetLabel) ? "Cloudflare" : null
+  return `We'll write the server code; you add the secret in ${host ?? "your host's settings"} (steps in the PR).`
+}
+
 export const GUARD_NO_HOST_TEXT = "Infinite does not know your production domain yet, so no preview guard is added; tell the wizard your live domain (--production-host)."
 
 /** The facts for this plan (keys, hosting, the scan, the run's site state and the bridge's claim capability). */
@@ -581,7 +598,14 @@ export function buildPlanModel(input: PlanModelInput): WizardPlanModel {
   const tools = scan.ownerWiring?.canWire === false ? [] : proposedTools
   const hosting = before.hosting
   const serverLaneRule = lineRunnable("server_lane", facts)
-  const serverLaneApprovable = serverLaneRule.ok && scan.serverLane !== null && tools.includes("infinite")
+  // Founder ruling (review P0-6): when the only thing missing is Infinite's way to set the lane's environment variables
+  // on the host (no Vercel connection serving the site, or no env-write permission), the agent still writes the server
+  // code in the pull request. It is inert until the variables exist; the owner hand-off (docs/infinite-server-events.md
+  // and the pull request's section) says how to add them.
+  const serverLaneHandoff = serverLaneHandoffApplies(serverLaneRule, scan.serverLane !== null && tools.includes("infinite"))
+  // The lane Infinite provisions itself (it saves the environment variables on Vercel).
+  const serverLaneProvisioned = serverLaneRule.ok && scan.serverLane !== null && tools.includes("infinite")
+  const serverLaneApprovable = serverLaneProvisioned || serverLaneHandoff
   // §3y.5 (P3-13): job 10 is seeded only when this install emits the conversion helpers (a new or managed tool).
   const helpersEmitted = tools.length > 0 || scan.managedProviders.length > 0
   const infiniteRecordable = tools.includes("infinite") || scan.managedProviders.includes("infinite") || keys.infinite.status === "ready"
@@ -654,7 +678,8 @@ export function buildPlanModel(input: PlanModelInput): WizardPlanModel {
   }
   const privacyText = null // Owner-only; suggested wording is copy-only report material.
   let npmInstall: string | null = null
-  if (scan.serverLane && scan.serverLane.installPackages.length > 0 && serverLaneApprovable && lineRunnable("npm_install", facts).ok) {
+  // The package the lane imports goes in with the lane (also on the hand-off path: the build needs it either way).
+  if (scan.serverLane && scan.serverLane.installPackages.length > 0 && serverLaneApprovable && (serverLaneHandoff || lineRunnable("npm_install", facts).ok)) {
     if (scan.npm && "commandLine" in scan.npm) {
       npmInstall = scan.npm.commandLine
       lines.push(
@@ -737,6 +762,9 @@ export function buildPlanModel(input: PlanModelInput): WizardPlanModel {
         jobIds: candidates.filter((item) => item.jobId === "server_conversions").map((item) => item.id)
       })
     )
+    if (serverLaneHandoff) {
+      lines.push(line({ id: SERVER_LANE_HANDOFF_LINE_ID, kind: "user_action", requires: "info", text: serverLaneHandoffText(hosting.provider, scan.serverLane.targetLabel) }))
+    }
   } else if (scan.serverLane && (tools.includes("infinite") || infiniteUnrunnable) && !serverLaneRule.ok && serverLaneRule.line) {
     // §3y.5: never pre-checked when it cannot run; it says what is needed instead.
     lines.push(line({ id: "user_action:server_lane", kind: "user_action", text: serverLaneRule.line, requires: "user_action" }))
@@ -972,7 +1000,7 @@ export function buildPlanModel(input: PlanModelInput): WizardPlanModel {
   }
 
   if (keys.ga4.status === "connected") lines.push(line({ id: "account_settings:ga4", kind: "account_settings", requires: "approval", text: "Allow Infinite to mark the selected, click-tested conversions as key events in your connected GA4 property." }))
-  if (serverLaneApprovable) lines.push(line({ id: "account_settings:hosting", kind: "account_settings", requires: "approval", text: "Allow Infinite to save server-lane environment settings in your connected hosting project." }))
+  if (serverLaneProvisioned) lines.push(line({ id: "account_settings:hosting", kind: "account_settings", requires: "approval", text: "Allow Infinite to save server-lane environment settings in your connected hosting project." }))
 
   // ---- things only the user can do ----
   if (scan.adopted.some((entry) => entry.via === "gtm")) {
@@ -1089,7 +1117,7 @@ export function buildPlanModel(input: PlanModelInput): WizardPlanModel {
       adopted: scan.adopted.map((entry) => entry.provider),
       keys,
       metaRelay: input.run?.metaRelay,
-      serverLaneBlocked: serverLaneRule.ok ? null : serverLaneRule.line || null
+      serverLaneBlocked: serverLaneRule.ok || serverLaneHandoff ? null : serverLaneRule.line || null
     })
   )
 
