@@ -44,6 +44,7 @@ import { stageAndCommit, failed, pushBranch } from "../../review/ship.js"
 import { provenPendingFor } from "./prove.js"
 import { announceRehearsal, commitStop, isShipContext, prepareShip, recordClickTests, testPageUrls, type ShipContext } from "./rehearsal.js"
 import { fallbackReviewer, notRunUnchecked, reviewFailureWords, reviewNotRunCode, reviewOutcome, shouldAskAgain, usableReviewers, type ReviewAttempt } from "../review-outcome.js"
+import { jobsReviewKeepsDraft } from "./jobs-review.js"
 
 const meta = WIZARD_STEP_META.review
 const REVIEW_INPUT_DIR = ".infinite/review"
@@ -815,6 +816,15 @@ async function finish(session: Session, options: { once?: boolean } = {}): Promi
     })
     throw new ReviewBlockerStop(ship.scanner.redact(`Second review blocker: ${quotes.join("; ")}`).text)
   }
+  // A job whose review agent did not run keeps the pull request a draft, like step 9's own review (jobs-review.ts).
+  const keepDraftForJobsReview = (): boolean => {
+    const held = jobsReviewKeepsDraft(state.jobs ?? [], null)
+    if (held.keepDraft && held.reason) {
+      session.notes.push(held.reason)
+      sub(ctx, "review", `${held.reason}. The pull request stays a draft.`, "warn")
+    }
+    return held.keepDraft
+  }
   if (session.github && session.number !== null && (await session.github.readPr(session.number)).state === "OPEN") {
     const verdict = await requiredChecksResult(session, ship.runId)
     if (verdict) session.notes.push(verdict.reason ?? "PR checks not measured")
@@ -824,7 +834,7 @@ async function finish(session: Session, options: { once?: boolean } = {}): Promi
     const comments = await session.github.readComments(session.number).catch(() => [])
     if (comments.some((comment) => comment.author === session.login && hasFinalMarker(comment.body, ship.runId))) {
       const pr = await session.github.readPr(session.number)
-      if (pr.isDraft && pr.state === "OPEN") {
+      if (pr.isDraft && pr.state === "OPEN" && !keepDraftForJobsReview()) {
         await session.github.markReady(session.number)
         ctx.state.update((draft) => {
           if (draft.pr) draft.pr.isDraft = false
@@ -835,7 +845,7 @@ async function finish(session: Session, options: { once?: boolean } = {}): Promi
   }
   if (session.github && session.number !== null) {
     const pr = await session.github.readPr(session.number)
-    if (pr.isDraft && pr.state === "OPEN") {
+    if (pr.isDraft && pr.state === "OPEN" && !keepDraftForJobsReview()) {
       await session.github.markReady(session.number)
       ctx.state.update((draft) => {
         if (draft.pr) draft.pr.isDraft = false
