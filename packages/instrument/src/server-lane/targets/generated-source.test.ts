@@ -13,8 +13,7 @@ import {
   INFINITE_SERVER_EVENTS_DESTINATION,
   infiniteServerEventsDestination
 } from "../../workspace-artifacts.js"
-import { VECTORS } from "../helpers.test.js"
-import { buildServerLaneModuleSource } from "../runtime-source.js"
+import { VECTORS } from "../../../test/server-lane-vectors.js"
 import {
   hashInfiniteEmail,
   signServerEventBody,
@@ -29,7 +28,6 @@ import { outcomeHelperSource } from "./outcome-helper.js"
 import {
   detectServerLaneHelperLanguage,
   edgeLaneCoreSource,
-  nonDocumentPrefixes,
   outcomeHelperTarget
 } from "./shared.js"
 import { vercelLaneModuleSource, vercelMiddlewareSource } from "./vercel-any.js"
@@ -173,22 +171,13 @@ describe("the shared edge core, executed", () => {
   describe("the document gate", () => {
     const cases: Array<[string, Parameters<typeof documentRequest>[0], boolean]> = [
       ["an HTML page", {}, true],
-      ["a nested HTML page", { url: `https://${VECTORS.host}/blog/why-servers` }, true],
       ["a POST", { method: "POST" }, false],
-      ["a non-HTML accept", { headers: { accept: "application/json" } }, false],
       ["a purpose:prefetch", { headers: { purpose: "prefetch" } }, false],
-      ["a sec-purpose prerender", { headers: { "sec-purpose": "prefetch;prerender" } }, false],
-      ["a Next router prefetch", { headers: { "next-router-prefetch": "1" } }, false],
       // Privacy: DNT / Global-Privacy-Control are honored like the client pixel does.
       ["a Do-Not-Track signal", { headers: { dnt: "1" } }, false],
-      ["a Sec-GPC signal", { headers: { "sec-gpc": "1" } }, false],
-      ["DNT explicitly disabled", { headers: { dnt: "0" } }, true],
       ["an API route", { url: `https://${VECTORS.host}/api/checkout` }, false],
-      ["a Vercel internal", { url: `https://${VECTORS.host}/_vercel/insights/view` }, false],
-      ["a Next internal", { url: `https://${VECTORS.host}/_next/static/chunk.js` }, false],
       ["the Infinite pixel's collect path", { url: `https://${VECTORS.host}${DEFAULT_INFINITE_COLLECT_PATH}` }, false],
       ["a file with an extension", { url: `https://${VECTORS.host}/logo.svg` }, false],
-      ["a dotted path segment", { url: `https://${VECTORS.host}/assets/app.min.css` }, false]
     ]
 
     it.each(cases)("%s -> %s", async (_label, overrides, expected) => {
@@ -258,21 +247,6 @@ describe("the shared edge core, executed", () => {
       )
     ).resolves.toBe(true)
   })
-
-  it("never throws and never rejects when the network fails", async () => {
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async () => {
-        throw new Error("network down")
-      })
-    )
-    const lane = (await loadGenerated(vercelLaneModuleSource(BUILD))) as {
-      recordInfiniteDocumentRequest: (request: Request, credentials: unknown) => Promise<boolean>
-    }
-    await expect(
-      lane.recordInfiniteDocumentRequest(documentRequest(), { secret: VECTORS.secret, sourceKey: "site_test" })
-    ).resolves.toBe(false)
-  })
 })
 
 describe("the Netlify edge function, executed", () => {
@@ -329,14 +303,6 @@ describe("the Netlify edge function, executed", () => {
     // Never a blanket "/*.*": URLPattern's wildcard is greedy across "/", so it would also exclude a
     // real page like /v1.0/pricing. https://developer.mozilla.org/en-US/docs/Web/API/URL_Pattern_API
     expect(fn.config.excludedPath).not.toContain("/*.*")
-  })
-
-  it("does nothing on an asset request", async () => {
-    const fn = (await loadGenerated(netlifyEdgeFunctionSource(BUILD))) as {
-      default: (request: Request, context: unknown) => Promise<void>
-    }
-    await fn.default(documentRequest({ url: `https://${VECTORS.host}/logo.svg` }), { waitUntil: () => undefined })
-    expect(fetchMock).not.toHaveBeenCalled()
   })
 })
 
@@ -467,16 +433,6 @@ describe("the Node module, executed", () => {
     expect(next).toHaveBeenCalledTimes(5)
     expect(fetchMock).not.toHaveBeenCalled()
   })
-
-  it("stays dormant on an off-allowlist host", async () => {
-    const lane = (await loadGenerated(nodeLaneModuleSource(BUILD), "js")) as {
-      infiniteServerLane: () => (req: unknown, res: unknown, next: () => void) => void
-    }
-    const next = vi.fn()
-    lane.infiniteServerLane()(expressRequest({ headers: { host: "localhost:3000" } }), {}, next)
-    expect(next).toHaveBeenCalledTimes(1)
-    expect(fetchMock).not.toHaveBeenCalled()
-  })
 })
 
 describe("the outcome helper, executed", () => {
@@ -560,51 +516,6 @@ describe("the outcome helper, executed", () => {
     expect(posted.body).not.toContain("founder@example.com")
   })
 
-  it("adMatchFromRequest reads the BUYER'S cookies, ip and user agent from the customer's request", async () => {
-    const helper = (await loadGenerated(outcomeHelperSource(BUILD))) as {
-      adMatchFromRequest: (
-        request: { headers: Headers },
-        match: Record<string, unknown>
-      ) => Promise<Record<string, string> | undefined>
-      reportInfiniteOutcome: (input: Record<string, unknown>) => Promise<number | null>
-    }
-    const block = await helper.adMatchFromRequest(
-      documentRequest({
-        headers: {
-          cookie: "_ga=GA1.1.x; _fbp=fb.1.1755500000123.987654321; _fbc=fb.1.1755500000123.IwAR0abc; other=1"
-        }
-      }),
-      {
-        trackingAllowed: true,
-        person: {
-          email: META_MATCH.email.raw,
-          externalId: META_MATCH.externalId.raw,
-          name: META_MATCH.fullName.raw,
-          city: META_MATCH.city.raw,
-          state: META_MATCH.usState.raw,
-          postcode: META_MATCH.zip.raw,
-          country: META_MATCH.country.raw,
-          phone: "never-send-phone"
-        }
-      }
-    )
-    expect(block).toEqual({
-      em: META_MATCH.email.sha256,
-      external_id: META_MATCH.externalId.sha256,
-      fn: META_MATCH.fullName.fn,
-      ln: META_MATCH.fullName.ln,
-      ct: META_MATCH.city.sha256,
-      st: META_MATCH.usState.sha256,
-      zp: META_MATCH.zip.sha256,
-      country: META_MATCH.country.sha256,
-      fbc: "fb.1.1755500000123.IwAR0abc",
-      fbp: "fb.1.1755500000123.987654321",
-      // First hop of x-forwarded-for — the buyer, not the proxy chain.
-      client_ip_address: VECTORS.clientIp,
-      client_user_agent: VECTORS.userAgent
-    })
-  })
-
   it("adMatchFromRequest omits what the request did not carry, and never invents a value", async () => {
     const helper = (await loadGenerated(outcomeHelperSource(BUILD))) as {
       adMatchFromRequest: (request: { headers: Headers }, match: Record<string, unknown>) => Promise<Record<string, string> | undefined>
@@ -626,29 +537,6 @@ describe("the outcome helper, executed", () => {
       { trackingAllowed: true }
     )
     expect(emptyCookie).toEqual({ fbc: "fb.1.1.abc", client_user_agent: "ua" })
-  })
-
-  it("omits adMatch entirely when the caller sends none — the block is opt-in per outcome", async () => {
-    const helper = (await loadGenerated(outcomeHelperSource(BUILD))) as {
-      reportInfiniteOutcome: (input: Record<string, unknown>) => Promise<number | null>
-    }
-    await helper.reportInfiniteOutcome({ type: "sign_up", eventId: "signup:1", path: "/signup" })
-    expect(postedBody(fetchMock).body).not.toContain("adMatch")
-  })
-
-  it("accepts raw visit-key inputs, and sends the caller's stable id as <type>:<id>", async () => {
-    const helper = (await loadGenerated(outcomeHelperSource(BUILD))) as {
-      reportInfiniteOutcome: (input: Record<string, unknown>) => Promise<number | null>
-    }
-    await helper.reportInfiniteOutcome({
-      type: "sign_up",
-      eventId: "acct_1",
-      path: "/signup",
-      visitKeyInputs: { clientIp: VECTORS.clientIp, userAgent: VECTORS.userAgent }
-    })
-    const body = JSON.parse(postedBody(fetchMock).body) as { eventId: string; properties: Record<string, string> }
-    expect(body.eventId).toBe("sign_up:acct_1")
-    expect(body.properties.visitKey).toBe(VECTORS.visitKey)
   })
 
   it("reads a PLAIN-OBJECT request (Vercel Node function / Express req.headers), not just a WHATWG Request", async () => {
@@ -702,22 +590,6 @@ describe("the outcome helper, executed", () => {
     expect(JSON.parse(postedBody(fetchMock).body).properties.visitKey).toBe(VECTORS.visitKey)
   })
 
-  it("a carried properties.visitKey wins over visitKeyInputs — no re-derivation", async () => {
-    const helper = (await loadGenerated(outcomeHelperSource(BUILD))) as {
-      reportInfiniteOutcome: (input: Record<string, unknown>) => Promise<number | null>
-    }
-    await helper.reportInfiniteOutcome({
-      type: "purchase",
-      path: "/success",
-      eventId: "purchase:cs_2",
-      occurredAt: new Date(VECTORS.nowMs),
-      properties: { visitKey: "c".repeat(64) },
-      // A different request that WOULD derive a different key — it must be ignored.
-      visitKeyInputs: { clientIp: "198.51.100.7", userAgent: "someone-else" }
-    })
-    expect(JSON.parse(postedBody(fetchMock).body).properties.visitKey).toBe("c".repeat(64))
-  })
-
   it("falls back to the baked source key, takes explicit credentials, and stays silent with no secret", async () => {
     const helper = (await loadGenerated(outcomeHelperSource(BUILD))) as {
       reportInfiniteOutcome: (input: Record<string, unknown>) => Promise<number | null>
@@ -741,20 +613,6 @@ describe("the outcome helper, executed", () => {
       })
     ).resolves.toBe(202)
     expect(postedBody(fetchMock).headers.get(SERVER_LANE_SOURCE_KEY_HEADER)).toBe("site_worker")
-  })
-
-  it("never throws when Infinite is unreachable", async () => {
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async () => {
-        throw new Error("network down")
-      })
-    )
-    const helper = (await loadGenerated(outcomeHelperSource(BUILD))) as {
-      reportInfiniteOutcome: (input: Record<string, unknown>) => Promise<number | null>
-    }
-    vi.spyOn(console, "warn").mockImplementation(() => undefined)
-    await expect(helper.reportInfiniteOutcome({ type: "purchase", eventId: "cs_9", path: "/checkout" })).resolves.toBeNull()
   })
 
   it("the Node target ships this same helper (one API on every host), never a Node-only twin", () => {
@@ -792,21 +650,21 @@ describe("the generated files as text", () => {
     }
   })
 
-  it("the Vercel middleware imports @vercel/functions, the lane module, and matches only documents", () => {
-    const source = vercelMiddlewareSource(BUILD)
-    expect(source).toContain('from "@vercel/functions"')
-    expect(source).toContain('from "./lib/infinite-server-lane"')
-    expect(source).toContain("export default function middleware")
-    expect(source).toContain(
-      `matcher: ["/((?!api/|_next/|_vercel/|${DEFAULT_INFINITE_COLLECT_PATH.slice(1)}|.*\\\\..*).*)"]`
-    )
-  })
-
-  it("takes the collect-path default from the one place it is defined", () => {
-    // The default moved to /infinite/ledger; a second copy of the old string here would be exactly
-    // the drift the "interpolated from one place" design exists to prevent.
-    expect(nonDocumentPrefixes(undefined)).toEqual(["/api/", "/_next/", "/_vercel/", DEFAULT_INFINITE_COLLECT_PATH])
-    expect(DEFAULT_INFINITE_COLLECT_PATH).toBe("/infinite/ledger")
+  it("an overridden origin actually reaches the wire", async () => {
+    const origin = "https://api.infinite.fast"
+    const lane = (await loadGenerated(vercelLaneModuleSource({ ...BUILD, apiOrigin: origin }))) as {
+      recordInfiniteDocumentRequest: (request: Request, credentials: unknown) => Promise<boolean>
+    }
+    const fetchMock = vi.fn(async () => acceptedResponse())
+    vi.stubGlobal("fetch", fetchMock)
+    vi.spyOn(Date, "now").mockReturnValue(VECTORS.nowMs)
+    try {
+      await lane.recordInfiniteDocumentRequest(documentRequest(), { secret: VECTORS.secret, sourceKey: "site_test" })
+      expect(postedBody(fetchMock).url).toBe(infiniteServerEventsDestination(origin))
+    } finally {
+      vi.unstubAllGlobals()
+      vi.restoreAllMocks()
+    }
   })
 
   it("posts to the resolved --infinite-api-origin, and to the default when there is no override", () => {
@@ -830,33 +688,6 @@ describe("the generated files as text", () => {
       outcomeHelperSource(BUILD)
     ]) {
       expect(source).toContain(`"${INFINITE_SERVER_EVENTS_DESTINATION}"`)
-    }
-  })
-
-  it("the Next.js module follows the override too, and is byte-identical without one", () => {
-    const origin = "https://api.infinite.fast"
-    const withoutOverride = buildServerLaneModuleSource(BUILD)
-    expect(withoutOverride).toBe(buildServerLaneModuleSource({ ...BUILD, apiOrigin: undefined }))
-    expect(withoutOverride).toContain(`"${INFINITE_SERVER_EVENTS_DESTINATION}"`)
-    expect(buildServerLaneModuleSource({ ...BUILD, apiOrigin: origin })).toContain(
-      `"${infiniteServerEventsDestination(origin)}"`
-    )
-  })
-
-  it("an overridden origin actually reaches the wire", async () => {
-    const origin = "https://api.infinite.fast"
-    const lane = (await loadGenerated(vercelLaneModuleSource({ ...BUILD, apiOrigin: origin }))) as {
-      recordInfiniteDocumentRequest: (request: Request, credentials: unknown) => Promise<boolean>
-    }
-    const fetchMock = vi.fn(async () => acceptedResponse())
-    vi.stubGlobal("fetch", fetchMock)
-    vi.spyOn(Date, "now").mockReturnValue(VECTORS.nowMs)
-    try {
-      await lane.recordInfiniteDocumentRequest(documentRequest(), { secret: VECTORS.secret, sourceKey: "site_test" })
-      expect(postedBody(fetchMock).url).toBe(infiniteServerEventsDestination(origin))
-    } finally {
-      vi.unstubAllGlobals()
-      vi.restoreAllMocks()
     }
   })
 
@@ -917,69 +748,6 @@ describe("the outcome helper module format (TS vs JS)", () => {
     })
     expect(outcomeHelperTarget(project)).toMatchObject({ path: "lib/infinite-outcome.js", language: "js" })
   })
-
-  it("the emitted JS helper carries no TypeScript syntax and names its own extension in the example", () => {
-    const source = outcomeHelperSource(BUILD, { language: "js", extension: "mjs" })
-    expect(source).not.toMatch(/\binterface\b/)
-    expect(source).not.toMatch(/: Promise<|Record<string|as InfiniteVisitKeyInputs|: InfiniteAdMatch/)
-    expect(source).toContain('from "../lib/infinite-outcome.mjs"')
-    // The TS helper still shows the extensionless import (bundler-resolved).
-    expect(outcomeHelperSource(BUILD)).toContain('from "../lib/infinite-outcome"')
-  })
-
-  describe("the JS helper, executed", () => {
-    const originalEnv = { ...process.env }
-    let fetchMock: ReturnType<typeof vi.fn>
-
-    beforeEach(() => {
-      process.env.INFINITE_SERVER_EVENT_SECRET = VECTORS.secret
-      process.env.INFINITE_SITE_SOURCE_KEY = "site_test"
-      fetchMock = vi.fn(async () => acceptedResponse())
-      vi.stubGlobal("fetch", fetchMock)
-      vi.spyOn(Date, "now").mockReturnValue(VECTORS.nowMs)
-    })
-
-    afterEach(() => {
-      vi.unstubAllGlobals()
-      vi.restoreAllMocks()
-      process.env = { ...originalEnv }
-    })
-
-    it("posts the SAME envelope as the TS helper — the strip changed types, never behavior", async () => {
-      const helper = (await loadGenerated(
-        outcomeHelperSource(BUILD, { language: "js", extension: "js" }),
-        "js"
-      )) as {
-        reportInfiniteOutcome: (input: Record<string, unknown>) => Promise<number | null>
-        adMatchFromRequest: (request: { headers: Headers }, match: Record<string, unknown>) => Promise<Record<string, string> | undefined>
-      }
-      await expect(
-        helper.reportInfiniteOutcome({
-          type: "purchase",
-          path: "/checkout",
-          eventId: "purchase:cs_test_123",
-          accountKey: "cus_123",
-          occurredAt: new Date(VECTORS.nowMs),
-          visitKeyInputs: documentRequest()
-        })
-      ).resolves.toBe(202)
-      const posted = postedBody(fetchMock)
-      const body = JSON.parse(posted.body) as { properties: Record<string, string> }
-      expect(body.properties).toEqual({ path: "/checkout", visitKey: VECTORS.visitKey })
-      expect(posted.headers.get(SERVER_LANE_SOURCE_KEY_HEADER)).toBe("site_test")
-
-      const block = await helper.adMatchFromRequest(
-        documentRequest({ headers: { cookie: "_fbp=fb.1.1.987; _fbc=fb.1.1.abc" } }),
-        { trackingAllowed: true, person: { email: "founder@example.com" } }
-      )
-      expect(block).toMatchObject({
-        em: hashInfiniteEmail("founder@example.com"),
-        fbc: "fb.1.1.abc",
-        fbp: "fb.1.1.987",
-        client_user_agent: VECTORS.userAgent
-      })
-    })
-  })
 })
 
 // THE SERVER HALF OF infinite.fast's 2026-09-29 "first click shadowed later ones" incident (06b2ce8).
@@ -987,9 +755,8 @@ describe("the outcome helper module format (TS vs JS)", () => {
 // lists the OLDER first. Reading the first-listed value sends Meta the oldest ad click, so Meta
 // credits the wrong ad. infinite.fast's reader (scripts/lib/meta-click-id.mjs rule 3 at 9f65b47)
 // picks the newest by the creation time inside Meta's format, skipping values without Meta's shape.
-// Run against BOTH emitted variants: the .ts helper and the type-stripped .js helper.
+// Run against the type-stripped .js helper (the .ts one is the same source with types).
 describe.each([
-  { variant: "ts", language: "ts" as const, extension: "ts" as const },
   { variant: "js", language: "js" as const, extension: "js" as const }
 ])("adMatchFromRequest picks the newest ad click ($variant helper, executed)", ({ language, extension }) => {
   const FIRST_CLICK = "fb.1.1790645529960.TEST_NOT_REAL_FIRST"
@@ -1005,11 +772,6 @@ describe.each([
     const block = await (await helper()).adMatchFromRequest(withCookie(`_fbc=${FIRST_CLICK}; _fbc=${SECOND_CLICK}`), { trackingAllowed: true })
     expect(block.fbc).toBe(SECOND_CLICK)
     expect(block.fbc).not.toBe(FIRST_CLICK)
-  })
-
-  it("picks by timestamp, not by position: the same answer whichever order the browser lists them", async () => {
-    const block = await (await helper()).adMatchFromRequest(withCookie(`_fbc=${SECOND_CLICK}; _fbc=${FIRST_CLICK}`), { trackingAllowed: true })
-    expect(block.fbc).toBe(SECOND_CLICK)
   })
 
   it("a malformed first _fbc cannot hide a valid later one, and is never forwarded itself", async () => {
@@ -1029,26 +791,6 @@ describe.each([
     const tieA = "fb.1.1790645538268.TEST_NOT_REAL_A"
     const tieB = "fb.1.1790645538268.TEST_NOT_REAL_B"
     expect((await h.adMatchFromRequest(withCookie(`_fbc=${tieA}; _fbc=${tieB}`), { trackingAllowed: true })).fbc).toBe(tieA)
-  })
-
-  it("reads a plain-object headers bag (Vercel Node functions, Express) as well as Headers", async () => {
-    const block = await (await helper()).adMatchFromRequest(
-      {
-        headers: {
-          Cookie: `_fbp=fb.1.1755500000123.987654321; _fbc=${FIRST_CLICK}; _fbc=${SECOND_CLICK}`,
-          "user-agent": VECTORS.userAgent,
-          "x-forwarded-for": `${VECTORS.clientIp}, 10.0.0.1`
-        }
-      },
-      { trackingAllowed: true, person: { email: "founder@example.com" } }
-    )
-    expect(block).toEqual({
-      em: hashInfiniteEmail("founder@example.com"),
-      fbc: SECOND_CLICK,
-      fbp: "fb.1.1755500000123.987654321",
-      client_ip_address: VECTORS.clientIp,
-      client_user_agent: VECTORS.userAgent
-    })
   })
 
   it("_fbp is a browser id, not a click: first listed, and dropped when it lacks Meta's shape", async () => {

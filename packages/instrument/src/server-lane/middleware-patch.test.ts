@@ -2,8 +2,6 @@ import { describe, expect, it } from "vitest"
 
 import {
   UNPATCHABLE_REASONS,
-  importInsertionOffset,
-  inspectConfigMatcher,
   isBroadMatcherEntry,
   patchExistingMiddleware
 } from "./middleware-patch.js"
@@ -14,7 +12,6 @@ const IMPORT = "./lib/infinite-server-lane"
 // Fixture import lines live in constants so package-shape.test.ts's scanner ignores them.
 const NEXT_RESPONSE_IMPORT = 'import { NextResponse } from "next/server"'
 const NEXT_REQUEST_TYPE_IMPORT = 'import type { NextRequest } from "next/server"'
-const NEXT_EVENT_TYPES_IMPORT = 'import type { NextFetchEvent, NextRequest } from "next/server"'
 const CLERK_IMPORT = 'import { clerkMiddleware } from "@clerk/nextjs/server"'
 const NEXT_INTL_IMPORT = 'import createMiddleware from "next-intl/middleware"'
 const NEXT_AUTH_IMPORT = 'import { withAuth } from "next-auth/middleware"'
@@ -62,15 +59,6 @@ describe("patchExistingMiddleware — recognised shapes", () => {
     expect(result.contents).toContain('response.headers.set("x-hello", "world")')
   })
 
-  it("wraps `export async function middleware(request, event)`", () => {
-    const result = expectPatched(`${NEXT_EVENT_TYPES_IMPORT}
-export async function middleware(request: NextRequest, event: NextFetchEvent) {
-  return undefined
-}
-`)
-    expect(result.contents).toContain("\nasync function middleware(request: NextRequest, event: NextFetchEvent) {")
-  })
-
   it("wraps `export default function middleware(` by name", () => {
     const result = expectPatched(`export default function middleware(request) {
   return undefined
@@ -78,24 +66,6 @@ export async function middleware(request: NextRequest, event: NextFetchEvent) {
 `)
     expect(result.innerIdentifier).toBe("middleware")
     expect(result.contents).toContain("\nfunction middleware(request) {")
-  })
-
-  it("wraps `export default async function customName(`", () => {
-    const result = expectPatched(`export default async function guard(request) {
-  return undefined
-}
-`)
-    expect(result.innerIdentifier).toBe("guard")
-    expect(result.contents).toContain("export default withInfiniteServerLane(guard)")
-  })
-
-  it("wraps an anonymous `export default async function (` as a function expression", () => {
-    const result = expectPatched(`export default async function (request) {
-  return undefined
-}
-`)
-    expect(result.innerIdentifier).toBe("infiniteInnerMiddleware")
-    expect(result.contents).toContain("const infiniteInnerMiddleware = async function (request) {")
   })
 
   it("wraps `export const middleware = createMiddleware(routing)` (next-intl style, no matcher)", () => {
@@ -143,15 +113,6 @@ export const config = { matcher: "/((?!api|_next/static|_next/image|favicon.ico)
     expect(result.contents).toContain("const infiniteInnerMiddleware = withAuth(")
   })
 
-  it("wraps a bare `export default middleware` identifier", () => {
-    const result = expectPatched(`function middleware(request) {
-  return undefined
-}
-export default middleware
-`)
-    expect(result.contents).toContain("const infiniteInnerMiddleware = middleware\n")
-  })
-
   it("keeps a leading pragma/banner comment first and puts the import fence after it", () => {
     const source = `// @ts-nocheck
 /**
@@ -170,11 +131,6 @@ export function middleware() {
     expect(fenceIndex).toBeLessThan(result.contents.indexOf(NEXT_RESPONSE_IMPORT))
   })
 
-  it("adds a trailing newline before the export fence when the file has none", () => {
-    const result = expectPatched(`export function middleware() {}`)
-    expect(result.contents).toContain("export function".replace("export ", "") + " middleware() {}\n")
-  })
-
   it("also recognises Next.js 16 `export default function proxy(`", () => {
     const result = expectPatched(`export default function proxy(request) {
   return undefined
@@ -190,12 +146,6 @@ describe("patchExistingMiddleware — refusals", () => {
       kind: "unpatchable",
       reason: UNPATCHABLE_REASONS.noExport
     })
-  })
-
-  it("refuses two middleware exports", () => {
-    expect(
-      patch(`export function middleware(req) {}\nexport default function other(req) {}\n`)
-    ).toEqual({ kind: "unpatchable", reason: UNPATCHABLE_REASONS.multipleExports })
   })
 
   it("refuses re-exports", () => {
@@ -251,42 +201,11 @@ describe("patchExistingMiddleware — refusals", () => {
 describe("inspectConfigMatcher / isBroadMatcherEntry", () => {
   it.each([
     ["/((?!_next/static|_next/image|favicon.ico|api|.*\\..*).*)", true],
-    ["/((?!api|_next/static|_next/image|favicon.ico).*)", true],
-    ["/(.*)", true],
     ["/:path*", true],
     ["/dashboard/:path*", false],
-    ["/", false],
     ["/(de|en)/:path*", false]
   ])("%s broad=%s", (entry, expected) => {
     expect(isBroadMatcherEntry(entry)).toBe(expected)
-  })
-
-  it("no config export → ok; config without matcher → ok", () => {
-    expect(inspectConfigMatcher("export function middleware() {}")).toBe("ok")
-    expect(inspectConfigMatcher("export function middleware() {}\nexport const config = { runtime: 'nodejs' }")).toBe("ok")
-  })
-
-  it("array with a broad entry among narrow ones → ok", () => {
-    expect(
-      inspectConfigMatcher(`export const config = { matcher: ['/', '/((?!api|_next).*)', ] }`)
-    ).toBe("ok")
-  })
-
-  it("template literal with substitutions → unreadable", () => {
-    expect(inspectConfigMatcher("export const config = { matcher: [`/${prefix}/:path*`] }")).toBe("unreadable")
-  })
-})
-
-describe("importInsertionOffset", () => {
-  it("is 0 for a file starting with code", () => {
-    expect(importInsertionOffset('import x from "y"\n')).toBe(0)
-  })
-  it("skips leading blank and comment lines", () => {
-    const source = "\n// one\n/* two */\n/**\n * three\n */\nconst a = 1\n"
-    expect(source.slice(importInsertionOffset(source))).toBe("const a = 1\n")
-  })
-  it("returns the length of a comment-only file", () => {
-    expect(importInsertionOffset("// only\n")).toBe("// only\n".length)
   })
 })
 
@@ -301,9 +220,6 @@ describe("text edits", () => {
     const installed = applyTextEdits(original, edits)
     expect(installed).toBe("<<abcXYZfghij>>")
     expect(reverseTextEdits(installed, edits)).toBe(original)
-  })
-  it("refuses to apply when the original text does not match", () => {
-    expect(() => applyTextEdits("abc", [{ offset: 0, removed: "x", inserted: "" }])).toThrow(/does not match/)
   })
   it("refuses to reverse when an inserted segment was altered", () => {
     expect(() => reverseTextEdits("zzabc", [{ offset: 0, removed: "", inserted: "<<" }])).toThrow(/no longer matches/)

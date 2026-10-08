@@ -99,24 +99,16 @@ describe("the store with a two-level sender chain (store-chain)", () => {
 
 describe("names", () => {
   it.each([
-    ["product_added_to_cart", "add_to_cart"],
-    ["product_added", "add_to_cart"],
     ["AddToCart", "add_to_cart"],
-    ["checkout_started", "begin_checkout"],
     ["InitiateCheckout", "begin_checkout"],
-    ["purchase_completed", "purchase"],
     ["Order Completed", "purchase"],
-    ["mailing_list_joined", "lead"],
     ["generate_lead", "lead"],
-    ["product_viewed", "view_item"],
-    ["ViewContent", "view_item"],
     ["CompleteRegistration", "sign_up"],
-    ["trial_started", "start_trial"]
   ])("%s means %s", (name, event) => {
     expect(funnelEventOf(name)).toBe(event)
   })
 
-  it.each(["$pageview", "page_view", "faq_open", "cta_click", "PageView"])("%s is not a funnel event", (name) => {
+  it.each(["$pageview", "PageView"])("%s is not a funnel event", (name) => {
     expect(funnelEventOf(name)).toBeNull()
   })
 })

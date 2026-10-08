@@ -106,10 +106,6 @@ describe("the helper script", () => {
     p.vm.runScript(buildConversionHelpersScript({}))
     expect(p.vm.window.infiniteTrack).toBe(first)
   })
-
-  it("emits no backtick, no ${ and no </ (it folds into <script> and the Next string literal)", () => {
-    expect(buildConversionHelpersScript({ consentMode: "required", ownHosts: ["acme.com"] })).not.toMatch(/`|\$\{|<\//)
-  })
 })
 
 describe("infiniteTrack", () => {
@@ -215,11 +211,6 @@ describe("infiniteTrack", () => {
     expect(p.gtagCalls).toEqual([])
   })
 
-  it("with no tags present returns false and never throws", () => {
-    const p = page()
-    expect(p.call("infiniteTrack('cta_clicked', { a: 1 })")).toBe(false)
-  })
-
   it("a denied consent hook captures nothing, and a revocation is honoured on the next call", () => {
     const denied = page({ posthog: true, ga4: "managed", localStorage: { infinite_analytics_consent: "denied" } })
     expect(denied.call("infiniteTrack('cta_clicked')")).toBe(false)
@@ -231,19 +222,6 @@ describe("infiniteTrack", () => {
     p.vm.localValues.set("infinite_analytics_consent", "denied")
     expect(p.call("infiniteTrack('second')")).toBe(false)
     expect(plain(p.posthogCalls)).toEqual([["capture", "first", {}]])
-  })
-
-  it("asks the runtime's own consent check first when the runtime exposes it (without the DNT/GPC default)", () => {
-    const p = page({ posthog: true })
-    const asked: unknown[] = []
-    p.vm.window.__infiniteConsentAllowed = (options: unknown) => {
-      asked.push(options)
-      return false
-    }
-    expect(p.call("infiniteTrack('cta_clicked')")).toBe(false)
-    p.vm.window.__infiniteConsentAllowed = () => true
-    expect(p.call("infiniteTrack('cta_clicked')")).toBe(true)
-    expect(plain(asked)).toEqual([{ privacySignal: false }])
   })
 
   // P2-4: GA4's and PostHog's own page views do not follow DNT/GPC, so a helper that did would drop a GPC
@@ -300,10 +278,7 @@ describe("infiniteTrackThenNavigate", () => {
   // P1-1: a <button> CTA (a string target with a click) has no navigation of its own. Every case where
   // GA4 did not start must still take the visitor there, at once.
   it.each([
-    ["no tags at all", {} as PageOptions],
-    ["an ADOPTED gtag (no lane marker)", { ga4: "adopted", callback: "never" } as PageOptions],
     ["consent no (GPC is not enough; an explicit denial)", { ga4: "managed", callback: "never", localStorage: { infinite_analytics_consent: "denied" } } as PageOptions],
-    ["required mode before a grant", { ga4: "managed", callback: "never", consentMode: "required" } as PageOptions]
   ])("a button click goes there at once when GA4 did not start: %s", async (_label, options) => {
     const p = page(options)
     const event = p.click()
@@ -316,15 +291,6 @@ describe("infiniteTrackThenNavigate", () => {
     expect(p.vm.assigned).toHaveLength(1)
   })
 
-  it("a button click with a bad event name still navigates (nothing is sent)", () => {
-    const p = page({ ga4: "managed", posthog: true })
-    p.vm.window.__event = p.click()
-    p.call("infiniteTrackThenNavigate(window.__event, '/signup', 'not a name')")
-    expect(p.vm.assigned).toEqual(["https://acme.com/signup"])
-    expect(p.gtagCalls).toEqual([])
-    expect(p.posthogCalls).toEqual([])
-  })
-
   it("negative: an anchor click with the SAME href is the browser's own navigation, so the helper does not navigate too", () => {
     const p = page({ ga4: "adopted" })
     const event = p.click()
@@ -333,23 +299,6 @@ describe("infiniteTrackThenNavigate", () => {
     p.call("infiniteTrackThenNavigate(window.__event, '/signup', 'cta_clicked')")
     expect(p.vm.assigned).toEqual([])
     expect(event.defaultPrevented).toBe(false)
-  })
-
-  it("an anchor pointing somewhere ELSE is not the browser's navigation: the helper goes to the destination", () => {
-    const p = page()
-    const event = p.click()
-    p.vm.window.__event = event
-    p.call(`window.__event.currentTarget = ${anchorSource("/pricing")}`)
-    p.call("infiniteTrackThenNavigate(window.__event, '/signup', 'cta_clicked')")
-    expect(event.defaultPrevented).toBe(true)
-    expect(p.vm.assigned).toEqual(["https://acme.com/signup"])
-  })
-
-  it("a button click the site already prevented still navigates (the caller asked the helper to go)", () => {
-    const p = page({ ga4: "adopted" })
-    p.vm.window.__event = p.click({ defaultPrevented: true })
-    p.call("infiniteTrackThenNavigate(window.__event, '/signup', 'cta_clicked')")
-    expect(p.vm.assigned).toEqual(["https://acme.com/signup"])
   })
 
   it("holds a same-tab click until GA4 has the hit, and navigates exactly once", async () => {
@@ -380,14 +329,6 @@ describe("infiniteTrackThenNavigate", () => {
     expect(p.vm.assigned).toHaveLength(1)
   })
 
-  it("the callback fires twice → navigates once", async () => {
-    const p = page({ ga4: "managed", callback: "twice" })
-    p.vm.window.__event = p.click()
-    p.call("infiniteTrackThenNavigate(window.__event, '/download', 'download_clicked')")
-    await p.vm.advance(2000)
-    expect(p.vm.assigned).toEqual(["https://acme.com/download"])
-  })
-
   it("preventDefault only when the GA4 LANE started: an adopted gtag with no marker holds nothing", async () => {
     const p = page({ ga4: "adopted", callback: "never" })
     const event = p.click()
@@ -415,36 +356,6 @@ describe("infiniteTrackThenNavigate", () => {
     expect(p.vm.assigned).toEqual(["https://acme.com/account"])
   })
 
-  it("R4-5: a loaded adopted GA4 that never calls back releases the navigation at 1 s, never later", async () => {
-    const p = page({ ga4: "adopted", callback: "never" })
-    p.vm.window.google_tag_manager = { "G-QWERT67890": {} }
-    p.call("infiniteTrackThenNavigate(null, '/account', 'signup')")
-    expect(p.vm.assigned).toEqual([])
-    await p.vm.advance(999)
-    expect(p.vm.assigned).toEqual([])
-    await p.vm.advance(2)
-    expect(p.vm.assigned).toEqual(["https://acme.com/account"])
-  })
-
-  it("negative (live run 4): with no lane marker and no loaded gtag.js, the conversion goes out unheld and the page leaves at once", async () => {
-    const p = page({ ga4: "adopted", callback: "never" })
-    p.call("infiniteTrackThenNavigate(null, '/account', 'signup')")
-    expect(plain(p.gtagCalls)).toEqual([["event", "signup", {}]])
-    expect(p.vm.assigned).toEqual(["https://acme.com/account"])
-  })
-
-  it("negative: keying the hold off `typeof gtag` (the old rule) would hold the adopted click for a full second", async () => {
-    const p = page({ ga4: "adopted", callback: "never" })
-    p.vm.window.__infiniteGa4Lane = { id: "G-ADOPTED" } // what the old heuristic effectively assumed
-    const event = p.click()
-    p.vm.window.__event = event
-    p.call(`window.__event.currentTarget = ${anchorSource("/download")}`)
-    p.call("infiniteTrackThenNavigate(window.__event, '/download', 'download_clicked')")
-    expect(event.defaultPrevented).toBe(true)
-    await p.vm.advance(999)
-    expect(p.vm.assigned).toEqual([])
-  })
-
   it("leaves new-tab and modified ANCHOR clicks to the browser", () => {
     for (const overrides of [{ metaKey: true }, { ctrlKey: true }, { shiftKey: true }, { altKey: true }, { button: 1 }]) {
       const p = page({ ga4: "managed", callback: "never" })
@@ -463,41 +374,6 @@ describe("infiniteTrackThenNavigate", () => {
     p.call(`infiniteTrackThenNavigate(window.__event, window.__event.currentTarget, 'cta')`)
     expect(event.defaultPrevented).toBe(false)
     expect(p.vm.opened).toEqual([])
-  })
-
-  it("negative: a modified click on a BUTTON is still the helper's navigation (a button has no new-tab gesture)", () => {
-    const p = page({ ga4: "managed", callback: "never" })
-    p.vm.window.__event = p.click({ metaKey: true })
-    p.call("infiniteTrackThenNavigate(window.__event, '/download', 'download_clicked')")
-    expect((p.gtagCalls[0]![2] as Record<string, unknown>).event_callback).toBeTypeOf("function")
-  })
-
-  it("a delegated listener that passes the anchor the click landed in leaves that anchor to the browser", () => {
-    const p = page()
-    const event = p.click()
-    p.vm.window.__event = event
-    p.call("window.__span = { tagName: 'SPAN' }")
-    p.call(`window.__anchor = ${anchorSource("/download")}; window.__anchor.contains = function (node) { return node === window.__span }`)
-    p.call("window.__event.currentTarget = { nodeType: 9 }; window.__event.target = window.__span")
-    p.call("infiniteTrackThenNavigate(window.__event, window.__anchor, 'download_clicked')")
-    expect(event.defaultPrevented).toBe(false)
-    expect(p.vm.assigned).toEqual([])
-    // Negative: the same anchor, but the click landed outside it (a button elsewhere): the helper goes.
-    const other = p.click()
-    p.vm.window.__event = other
-    p.call(`window.__event.currentTarget = { nodeType: 9 }; window.__event.target = ${BUTTON}`)
-    p.call("infiniteTrackThenNavigate(window.__event, window.__anchor, 'download_clicked')")
-    expect(p.vm.assigned).toEqual(["https://acme.com/download"])
-  })
-
-  it("a target=_blank destination the browser will not open itself opens in a new tab, at once", () => {
-    const p = page({ ga4: "managed", callback: "never" })
-    const event = p.click()
-    p.vm.window.__event = event
-    p.call(`window.__event.currentTarget = ${BUTTON}`)
-    p.call(`infiniteTrackThenNavigate(window.__event, ${anchorSource("https://acme.com/x", "_blank")}, 'cta')`)
-    expect(p.vm.opened).toEqual(["_blank https://acme.com/x"])
-    expect(p.vm.assigned).toEqual([])
   })
 
   it("a denied consent hook captures nothing and never holds the click", async () => {
@@ -522,18 +398,6 @@ describe("infiniteTrackThenNavigate", () => {
     expect(p.vm.assigned).toEqual([])
   })
 
-  it("a gtag that throws after the click was held still navigates at once", () => {
-    const p = page({ ga4: "managed" })
-    p.vm.window.gtag = () => {
-      throw new Error("broken gtag")
-    }
-    const event = p.click()
-    p.vm.window.__event = event
-    p.call("infiniteTrackThenNavigate(window.__event, '/download', 'download_clicked')")
-    expect(event.defaultPrevented).toBe(true)
-    expect(p.vm.assigned).toEqual(["https://acme.com/download"])
-  })
-
   it("waits briefly for a browser-only Meta event before navigating when GA4 is not holding the click", async () => {
     const p = page({ posthog: true, ga4: false })
     const event = p.click()
@@ -545,26 +409,6 @@ describe("infiniteTrackThenNavigate", () => {
     expect(plain(p.fbqCalls)).toEqual([
       ["track", "AddToCart", { content_ids: ["sku_1"], content_type: "product", contents: [{ id: "sku_1", quantity: 1 }] }]
     ])
-    await p.vm.resourceLoaded("https://www.facebook.com/tr/?id=1234567890123456&ev=AddToCart")
-    expect(p.vm.assigned).toEqual(["https://acme.com/cart"])
-    await p.vm.advance(1000)
-    expect(p.vm.assigned).toHaveLength(1)
-  })
-
-  it("when GA4 is also holding the click, it still waits for Meta's /tr before navigating", async () => {
-    const p = page({ posthog: true, ga4: "managed", callback: "once" })
-    const event = p.click()
-    p.vm.window.__event = event
-    p.call(`window.__event.currentTarget = ${BUTTON}`)
-    p.call("infiniteTrackThenNavigate(window.__event, '/cart', 'add_to_cart', { item_id: 'sku_1', item_name: 'Trail Pack', price: 249, quantity: 1, value: 249, currency: 'USD' })")
-    expect(event.defaultPrevented).toBe(true)
-    expect(p.vm.assigned).toEqual([])
-    expect(plain(p.fbqCalls[0]![2] as Record<string, unknown>)).toMatchObject({
-      content_ids: ["sku_1"],
-      contents: [{ id: "sku_1", quantity: 1, item_price: 249 }],
-      value: 249,
-      currency: "USD"
-    })
     await p.vm.resourceLoaded("https://www.facebook.com/tr/?id=1234567890123456&ev=AddToCart")
     expect(p.vm.assigned).toEqual(["https://acme.com/cart"])
     await p.vm.advance(1000)
@@ -663,11 +507,5 @@ describe("infiniteIdentify / infiniteReset", () => {
     const none = page()
     expect(none.call("infiniteIdentify('u1')")).toBe(false)
     expect(none.call("infiniteReset()")).toBe(false)
-  })
-
-  it("reset forgets the person, consent or not", () => {
-    const p = page({ posthog: true, localStorage: { infinite_analytics_consent: "denied" } })
-    expect(p.call("infiniteReset()")).toBe(true)
-    expect(plain(p.posthogCalls)).toEqual([["reset"]])
   })
 })

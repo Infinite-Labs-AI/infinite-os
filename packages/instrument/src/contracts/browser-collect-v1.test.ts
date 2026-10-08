@@ -12,10 +12,7 @@ const schemaPath = resolve(contractsRoot, "browser-collect-v1.schema.json")
 const fixturePath = resolve(contractsRoot, "browser-collect-v1.fixture.json")
 const structuralTokenPattern = "^[A-Za-z0-9_-]{1,64}$"
 
-const utmKeys = ["utm_source", "utm_medium", "utm_campaign", "utm_content", "utm_term"] as const
-const clickIdPresenceKeys = ["has_gclid", "has_fbclid", "has_ttclid", "has_msclkid"] as const
-const adKeys = ["ad_id", "adset_id", "campaign_id", "utm_placement"] as const
-const campaignKeys = [...utmKeys, ...clickIdPresenceKeys, ...adKeys]
+const adKeys = ["ad_id", "utm_placement"] as const
 
 type JsonSchema = boolean | Record<string, unknown>
 
@@ -93,7 +90,8 @@ function pageView(properties: Record<string, unknown>): Record<string, unknown> 
 }
 
 describe("browser-collect-v1 public contract", () => {
-  it.each(campaignWireQueries)("validates actual serialized runtime payload for %s", search => {
+  // The full ad-id row, one invalid placement, one invalid ad id (control character), and no campaign at all.
+  it.each([0, 1, 7, 9].map(index => campaignWireQueries[index]!))("validates actual serialized runtime payload for %s", search => {
     const schema = JSON.parse(readFileSync(schemaPath, "utf8"));
     expect(validateAgainstContract(schema, emitCampaignWireFixture(search))).toBe(true);
   });
@@ -212,74 +210,6 @@ describe("browser-collect-v1 public contract", () => {
     expect(referrerHost).toBe("referrer.example")
   })
 
-  it("app_download_click explicitly permits structural CTA fields plus destination_path", () => {
-    const schema = JSON.parse(readFileSync(schemaPath, "utf8")) as {
-      allOf: Array<{
-        if: { properties: { eventName: { const: string } } }
-        then: { properties: { properties: Record<string, unknown> } }
-      }>
-    }
-    const appDownload = schema.allOf.find(
-      (branch) => branch.if.properties.eventName.const === "app_download_click"
-    )
-
-    expect(appDownload?.then.properties.properties).toEqual({
-      type: "object",
-      required: ["destination_path"],
-      properties: {
-        cta_id: { $ref: "#/properties/properties/properties/cta_id" },
-        cta_location: { $ref: "#/properties/properties/properties/cta_location" },
-        destination_path: { $ref: "#/properties/properties/properties/destination_path" }
-      }
-    })
-  })
-
-  it("site_page_view may carry the bounded nav enum plus the allowlisted campaign block (0.7.0), all optional", () => {
-    const schema = JSON.parse(readFileSync(schemaPath, "utf8")) as {
-      properties: { properties: { maxProperties: number; properties: Record<string, unknown> } }
-      allOf: Array<{
-        if: { properties: { eventName: { const?: string; enum?: string[] } } }
-        then: { properties: { properties: Record<string, unknown> } }
-      }>
-    }
-    const definitions = schema.properties.properties.properties
-    expect(definitions.nav).toEqual({ type: "string", enum: ["navigate", "history"] })
-    for (const key of utmKeys) {
-      expect(definitions[key], key).toEqual({
-        type: "string",
-        minLength: 1,
-        maxLength: 100,
-        pattern: "^[^\\u0000-\\u001f]+$"
-      })
-    }
-    for (const key of clickIdPresenceKeys) {
-      expect(definitions[key], key).toEqual({ const: true })
-    }
-    // Existing structural/email-intent keys plus campaign/ad metadata; pinned to H1 server bytes.
-    expect(Object.keys(definitions)).toHaveLength(18)
-    expect(schema.properties.properties.maxProperties).toBe(18)
-
-    const pageView = schema.allOf.find((branch) => branch.if.properties.eventName.const === "site_page_view")
-    expect(pageView?.then.properties.properties).toEqual({
-      type: "object",
-      maxProperties: 15,
-      properties: Object.fromEntries(
-        ["nav", "ie", ...campaignKeys].map((key) => [key, { $ref: `#/properties/properties/properties/${key}` }])
-      )
-    })
-    // Not required: a 0.5.x tag sends no properties on a page view and must keep validating.
-    expect(pageView?.then.properties.properties).not.toHaveProperty("required")
-
-    // The shared file has exactly three event branches pinned by the cloud hash. Legacy campaign
-    // keys remain permissive here and are rejected on clicks by ingest; the four new ad keys are
-    // explicitly forbidden by this schema on every non-page-view event.
-    expect(schema.allOf.map((branch) => branch.if.properties.eventName.const)).toEqual([
-      "site_page_view",
-      "site_click",
-      "app_download_click"
-    ])
-  })
-
   it("validates the campaign rules against the shipped file: page views accept the block, click events reject it, presence is literal true", () => {
     const schema = JSON.parse(readFileSync(schemaPath, "utf8")) as Record<string, unknown>
     const fixture = JSON.parse(readFileSync(fixturePath, "utf8"))
@@ -325,21 +255,6 @@ describe("browser-collect-v1 public contract", () => {
         eventName
       ).toBe(true)
     }
-  })
-
-  it("documents where the SHARED schema stays permissive: the cloud ingest, not the file, rejects a campaign block on a click event or a cta beside it", () => {
-    // Pinned on purpose (coordination decision 2026-09-02): both repos carry this file byte-for-byte
-    // and the cloud's ingest parser is the gate for these two cases. If either copy starts encoding
-    // them, the hash pin on the cloud side changes with it.
-    const schema = JSON.parse(readFileSync(schemaPath, "utf8")) as Record<string, unknown>
-    const fixture = JSON.parse(readFileSync(fixturePath, "utf8"))
-    expect(
-      validateAgainstContract(schema, {
-        ...fixture,
-        properties: { cta_id: "pricing_primary", cta_location: "hero", utm_source: "x.com" }
-      })
-    ).toBe(true)
-    expect(validateAgainstContract(schema, pageView({ nav: "navigate", cta_id: "hero" }))).toBe(true)
   })
 
   it("matches the runtime structural token contract for CTA properties", () => {

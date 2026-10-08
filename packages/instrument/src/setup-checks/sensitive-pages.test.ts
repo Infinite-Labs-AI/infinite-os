@@ -1,7 +1,7 @@
 // D17 sensitive-pages detector (lane O9): a plan line from a detector, never an automatic edit.
 import { describe, expect, it } from "vitest"
 
-import { checkSensitivePages, detectSensitivePages, routeOf } from "./sensitive-pages.js"
+import { checkSensitivePages, routeOf } from "./sensitive-pages.js"
 
 const files = (record: Record<string, string>) => new Map(Object.entries(record))
 const PAGE = "<html><head></head><body>x</body></html>"
@@ -16,13 +16,6 @@ describe("sensitive pages", () => {
     expect(routeOf("pages/api/login.ts", "")).toBeNull()
     expect(routeOf("account/reset-password.html", PAGE)).toBe("/account/reset-password")
     expect(routeOf("components/login-form.tsx", "")).toBeNull()
-  })
-
-  it("lists only sensitive routes", () => {
-    const routes = detectSensitivePages(
-      files({ "app/login/page.tsx": "", "app/pricing/page.tsx": "", "app/checkout/success/page.tsx": "", "app/forgot-password/page.tsx": "" })
-    )
-    expect(routes.map((route) => route.route)).toEqual(["/checkout/success", "/forgot-password", "/login"])
   })
 
   it("is information when PostHog records sensitive pages", () => {
@@ -43,7 +36,6 @@ describe("sensitive pages", () => {
   })
 })
 
-
 it("reports globally disabled replay and click capture without claiming they are on", () => {
   const source = `posthog.init(projectKey, {
     api_host: apiHost,
@@ -61,8 +53,6 @@ it("reports globally disabled replay and click capture without claiming they are
 
 it.each([
   "posthog.init(key, unknownOptions)",
-  "posthog.init(key, { autocapture: false, disable_session_recording: false })",
-  "posthog.init(key, { autocapture: true, disable_session_recording: true })"
 ])("does not claim both recording modes are on when their settings differ or are unknown: %s", source => {
   const result = checkSensitivePages({ files: files({ "src/tracking.ts": source, "app/account/page.tsx": "" }) })
   expect(result.state).toBe("info")

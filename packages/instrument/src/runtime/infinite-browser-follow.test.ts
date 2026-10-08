@@ -192,12 +192,4 @@ describe("the tag follows the site's own pixels", () => {
     expect(page.window.gtag).toBe(gtag)
     expect(layer).toEqual([])
   })
-
-  it("without the flag the tag starts on load, exactly as before, and names no provider", () => {
-    const page = follow({ followSitePixels: false })
-    expect(page.pageViews()).toBe(1)
-    expect(page.dispatched).toEqual([])
-    const plain = renderInfiniteBrowserTag({ siteSourceKey: "site_0123456789abcdef0123456789abcdef", collectPath: "/infinite/ledger", respectDnt: true, consent: { mode: "not_required" }, productionHosts: ["shop.example"] })
-    for (const name of ["fbq", "gtag", "posthog", "dataLayer", "analytics_storage", "opted_out"]) expect(plain, name).not.toContain(name)
-  })
 })

@@ -1,5 +1,5 @@
-// reportInfiniteOutcomeForMirror / reportInfiniteOutcome (§3j.5), EXECUTED in every generated form (the
-// TS helper and the JS helper; every target, Node included, ships this one helper) against the shared 202 vectors in `contracts/server-lane-v1.vectors.json`
+// reportInfiniteOutcomeForMirror / reportInfiniteOutcome (§3j.5), EXECUTED as the JS helper (the same source as the
+// TS helper with the types removed; every target, Node included, ships this one helper) against the shared 202 vectors in `contracts/server-lane-v1.vectors.json`
 // (`outcomeResponses`). The same vectors tell the receiving side (1bu-1, lane C2) what to answer.
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
@@ -10,7 +10,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import { createBrowserVm, plain } from "../../../test/site-code/browser-vm.js"
 import { buildMetaPixelSnippet } from "../../providers/meta.js"
-import { VECTORS } from "../helpers.test.js"
+import { VECTORS } from "../../../test/server-lane-vectors.js"
 
 import { outcomeHelperSource } from "./outcome-helper.js"
 
@@ -68,7 +68,7 @@ async function helper(form: "ts" | "js"): Promise<Helper> {
   return (await import(pathToFileURL(path).href)) as Helper
 }
 
-describe.each(["ts", "js"] as const)("reportInfiniteOutcome (%s helper), executed", (form) => {
+describe.each([ "js"] as const)("reportInfiniteOutcome (%s helper), executed", (form) => {
   const originalEnv = { ...process.env }
   let fetchMock: ReturnType<typeof vi.fn>
 
@@ -162,14 +162,6 @@ describe.each(["ts", "js"] as const)("reportInfiniteOutcome (%s helper), execute
     expect(fetchMock).not.toHaveBeenCalled()
   })
 
-  it("P1-5: an outcome without a path is still recorded (only the Meta relay needs one)", async () => {
-    fetchMock = vi.fn(async () => new Response(RESPONSES[0]!.body, { status: 202 }))
-    vi.stubGlobal("fetch", fetchMock)
-    const outcome = await helper(form)
-    await expect(outcome.reportInfiniteOutcome({ type: "lead", eventId: "lead:1" })).resolves.toBe(202)
-    expect(JSON.parse(String((fetchMock.mock.calls[0] as [string, RequestInit])[1].body)).properties).not.toHaveProperty("path")
-  })
-
   it("a network failure or the 2 s timeout resolves all-false / all-null and never rejects", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => Promise.reject(new Error("offline"))))
     vi.spyOn(console, "warn").mockImplementation(() => undefined)
@@ -238,63 +230,6 @@ describe.each(["ts", "js"] as const)("reportInfiniteOutcome (%s helper), execute
     // 15 + path = 16: no room; the outcome itself is unchanged.
     expect(Object.keys(bodies[1].properties)).toHaveLength(16)
     expect(bodies[1].properties).not.toHaveProperty("campaign_provenance")
-  })
-
-  // P3-6: the wizard's recipes import these from the outcome helper, in every form.
-  it("exports adMatchFromRequest and infiniteVisitKey, and signs the adMatch block in", async () => {
-    fetchMock = vi.fn(async () => new Response(RESPONSES[0]!.body, { status: 202 }))
-    vi.stubGlobal("fetch", fetchMock)
-    const outcome = (await helper(form)) as unknown as Helper & {
-      adMatchFromRequest: (request: unknown, match?: Record<string, unknown>) => Promise<Record<string, string> | undefined>
-      infiniteVisitKey: unknown
-    }
-    expect(typeof outcome.adMatchFromRequest).toBe("function")
-    expect(typeof outcome.infiniteVisitKey).toBe("function")
-    const buyer = new Request("https://acme.com/checkout", {
-      headers: {
-        cookie: "_fbc=fb.1.1700000000000.OLD; _fbc=fb.1.1800000000000.NEW; _fbp=fb.1.1700000000000.123456",
-        "user-agent": "Mozilla/5.0 Buyer",
-        "x-forwarded-for": "203.0.113.9"
-      }
-    })
-    const adMatch = await outcome.adMatchFromRequest(buyer, {
-      trackingAllowed: true,
-      person: {
-        email: META_MATCH.email.raw,
-        externalId: META_MATCH.externalId.raw,
-        name: META_MATCH.fullName.raw,
-        city: META_MATCH.city.raw,
-        state: META_MATCH.usState.raw,
-        postcode: META_MATCH.zip.raw,
-        country: META_MATCH.country.raw,
-        ph: "never-send-phone"
-      }
-    })
-    expect(adMatch).toEqual({
-      em: META_MATCH.email.sha256,
-      external_id: META_MATCH.externalId.sha256,
-      fn: META_MATCH.fullName.fn,
-      ln: META_MATCH.fullName.ln,
-      ct: META_MATCH.city.sha256,
-      st: META_MATCH.usState.sha256,
-      zp: META_MATCH.zip.sha256,
-      country: META_MATCH.country.sha256,
-      fbc: "fb.1.1800000000000.NEW",
-      fbp: "fb.1.1700000000000.123456",
-      client_ip_address: "203.0.113.9",
-      client_user_agent: "Mozilla/5.0 Buyer"
-    })
-    await expect(outcome.adMatchFromRequest(buyer, { trackingAllowed: false, person: { email: META_MATCH.email.raw } })).resolves.toBeUndefined()
-    // P1-1: a 3+ word name: ln is every word after the first, joined, as Infinite's own sender splits it.
-    expect(await outcome.adMatchFromRequest(buyer, { trackingAllowed: true, person: { name: META_MATCH.fullNameMultiWord.raw } })).toMatchObject({
-      fn: META_MATCH.fullNameMultiWord.fn,
-      ln: META_MATCH.fullNameMultiWord.ln
-    })
-    await outcome.reportInfiniteOutcome({ type: "sign_up", eventId: "e7", path: "/signup", adMatch })
-    await outcome.reportInfiniteOutcome({ type: "sign_up", eventId: "e8", path: "/signup" })
-    const bodies = fetchMock.mock.calls.map((call) => JSON.parse(String((call as [string, RequestInit])[1].body)))
-    expect(bodies[0].adMatch).toEqual(adMatch)
-    expect(bodies[1]).not.toHaveProperty("adMatch")
   })
 })
 

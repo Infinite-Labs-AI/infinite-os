@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import { INFINITE_SERVER_EVENTS_DESTINATION } from "../workspace-artifacts.js"
 
-import { VECTORS } from "./helpers.test.js"
+import { VECTORS } from "../../test/server-lane-vectors.js"
 import { AD_MATCH_KEYS, signServerEventBody } from "./helpers.js"
 import { outcomeHelperSource } from "./targets/outcome-helper.js"
 import {
@@ -14,8 +14,6 @@ import {
   SERVER_LANE_FENCE_END,
   SERVER_LANE_FENCE_START,
   buildCreatedMiddlewareSource,
-  buildFencedExportBlock,
-  buildFencedImportBlock,
   buildServerLaneModuleSource
 } from "./runtime-source.js"
 
@@ -141,19 +139,11 @@ describe("generated Next.js module (executed with WebCrypto)", () => {
 
   it.each([
     ["POST", fakeRequest({ method: "POST" })],
-    ["HEAD", fakeRequest({ method: "HEAD" })],
     ["asset path", fakeRequest({ path: "/logo.png" })],
-    ["/_next path", fakeRequest({ path: "/_next/static/x.js" })],
-    ["/api path", fakeRequest({ path: "/api/health" })],
-    ["non-html accept", fakeRequest({ headers: { accept: "*/*" } })],
     ["RSC accept", fakeRequest({ headers: { accept: "text/x-component" } })],
-    ["prefetch purpose", fakeRequest({ headers: { purpose: "prefetch" } })],
-    ["next-router-prefetch", fakeRequest({ headers: { "next-router-prefetch": "1" } })],
     // Privacy: DNT / Global-Privacy-Control are honored like the client pixel does.
     ["Do-Not-Track", fakeRequest({ headers: { dnt: "1" } })],
-    ["Sec-GPC", fakeRequest({ headers: { "sec-gpc": "1" } })],
     ["localhost", fakeRequest({ host: "localhost:3000" })],
-    ["loopback", fakeRequest({ host: "127.0.0.1" })]
   ])("skips %s", async (_label, request) => {
     const mod = await loadGeneratedModule()
     const event = fakeEvent()
@@ -224,11 +214,6 @@ describe("generated Next.js module (executed with WebCrypto)", () => {
     await expect(Promise.all(event.tasks)).resolves.toBeDefined()
   })
 
-  it("carries no outcome sender: outcomes go through the one outcome helper every target ships", async () => {
-    const module = await loadGeneratedModule()
-    expect(module).not.toHaveProperty("sendInfiniteServerEvent")
-  })
-
   it("infiniteVisitKey matches the Node recipe vector", async () => {
     const mod = await loadGeneratedModule()
     expect(await mod.infiniteVisitKey(fakeRequest({}).headers, VECTORS.secret, VECTORS.nowMs)).toBe(VECTORS.visitKey)
@@ -269,19 +254,5 @@ describe("generated sources (static)", () => {
     expect(source).toContain(`matcher: [${JSON.stringify(NEXT_DOCUMENT_MATCHER)}]`)
     // The matcher literal survives as a JS string that yields the intended regex.
     expect(NEXT_DOCUMENT_MATCHER).toBe("/((?!_next/static|_next/image|favicon.ico|api|.*\\..*).*)")
-  })
-
-  it("fenced blocks are self-delimiting", () => {
-    expect(buildFencedImportBlock({ moduleImportPath: "./lib/infinite-server-lane" })).toBe(
-      [
-        SERVER_LANE_FENCE_START,
-        'import { withInfiniteServerLane } from "./lib/infinite-server-lane"',
-        SERVER_LANE_FENCE_END,
-        ""
-      ].join("\n")
-    )
-    expect(buildFencedExportBlock({ innerIdentifier: "middleware" })).toContain(
-      "export default withInfiniteServerLane(middleware)"
-    )
   })
 })

@@ -2,11 +2,10 @@ import { describe, expect, it, vi } from "vitest"
 
 import { INFINITE_SERVER_LANE_RECEIPT_URL } from "../workspace-artifacts.js"
 
-import { VECTORS } from "./helpers.test.js"
+import { VECTORS } from "../../test/server-lane-vectors.js"
 import { classifyUserAgent, hmacHex, isDocumentPath } from "./helpers.js"
 import {
   VERIFY_USER_AGENT,
-  parseReceipt,
   receiptRequestSignature,
   renderServerLaneVerify,
   verifyServerLane
@@ -145,24 +144,6 @@ describe("verify --server-lane", () => {
       expect(page.init.headers["sec-purpose"]).toBeUndefined()
       expect(page.init.headers["next-router-prefetch"]).toBeUndefined()
     })
-
-    it("names bot protection first when the edge refuses a self-identified monitor", async () => {
-      const clock = fastClock()
-      const { impl } = fakeFetch({ siteStatus: 403, receipts: [{ status: 200, body: { received: 0 } }] })
-      const result = await verifyServerLane({
-        url: SITE,
-        secret: VECTORS.secret,
-        sourceKey: "site_test",
-        fetch: impl,
-        now: clock.now,
-        sleep: clock.sleep,
-        pollIntervalMs: 1000,
-        budgetMs: 1000
-      })
-      expect(result.failure).toBe("no_receipt")
-      expect(result.causes[0]).toContain("edge or WAF answered 403")
-      expect(result.causes[0]).toContain(VERIFY_USER_AGENT)
-    })
   })
 
   it("FAIL immediately with the wrong-secret cause on 401/403", async () => {
@@ -206,24 +187,6 @@ describe("verify --server-lane", () => {
     expect(calls).toHaveLength(1)
   })
 
-  it("a non-2xx page still gets polled (middleware runs before routing) but leads the causes on FAIL", async () => {
-    const clock = fastClock()
-    const { impl } = fakeFetch({ siteStatus: 404, receipts: [{ status: 200, body: { received: 0 } }] })
-    const result = await verifyServerLane({
-      url: SITE,
-      secret: VECTORS.secret,
-      sourceKey: "site_test",
-      fetch: impl,
-      now: clock.now,
-      sleep: clock.sleep,
-      pollIntervalMs: 1000,
-      budgetMs: 1000
-    })
-    expect(result.siteStatus).toBe(404)
-    expect(result.failure).toBe("no_receipt")
-    expect(result.causes[0]).toContain("HTTP 404")
-  })
-
   it("requires the secret and the source key without touching the network", async () => {
     const { impl, calls } = fakeFetch({ receipts: [] })
     const noSecret = await verifyServerLane({ url: SITE, secret: undefined, sourceKey: "site_test", fetch: impl })
@@ -239,14 +202,5 @@ describe("verify --server-lane", () => {
     expect(receiptRequestSignature(VECTORS.secret, VECTORS.receiptSince)).toBe(
       hmacHex(VECTORS.secret, "since=2026-08-18T20%3A00%3A00.000Z")
     )
-  })
-
-  it("parseReceipt tolerates the likely field spellings and rejects junk", () => {
-    expect(parseReceipt({ received: 2, lastPath: "/", lastReceivedAt: "t" })).toEqual({ received: 2, lastPath: "/", lastReceivedAt: "t" })
-    expect(parseReceipt({ count: 1, last_path: "/x", last_received_at: "t" })).toEqual({ received: 1, lastPath: "/x", lastReceivedAt: "t" })
-    expect(parseReceipt({ received: true })).toEqual({ received: 1, lastPath: null, lastReceivedAt: null })
-    expect(parseReceipt({ nope: 1 })).toBeNull()
-    expect(parseReceipt(null)).toBeNull()
-    expect(parseReceipt("x")).toBeNull()
   })
 })

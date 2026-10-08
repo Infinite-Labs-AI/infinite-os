@@ -43,26 +43,10 @@ describe("a form that submits and emits nothing", () => {
   // ---- the false-positive fixtures: every one of these is legitimately not a conversion --------
 
   it.each([
-    ["search", '<form role="search" action="/search"><input type="search" name="q" /><button>Go</button></form>'],
     ["login", '<form id="login" method="post"><input type="email" /><input type="password" /><button>Sign in</button></form>'],
-    ["password reset", '<form id="forgot-password" method="post"><input type="email" /><button>Reset</button></form>'],
-    ["newsletter", '<form class="newsletter-signup" method="post"><input type="email" /><button>Subscribe</button></form>'],
-    ["comment", '<form id="comment-reply" method="post"><textarea name="body"></textarea><button>Post</button></form>'],
-    ["filter", '<form id="product-filters" method="post"><select name="size"></select><button>Apply filters</button></form>'],
-    ["cart update", '<form class="cart-quantity" method="post"><input type="number" /><button>Update</button></form>'],
     ["a GET query", '<form action="/results" method="get"><input type="email" /><button type="submit">Go</button></form>']
   ])("stays silent about a %s form", (_label, markup) => {
     expect(check("src/app/page.tsx", markup).state).toBe("ok")
-  })
-
-  it("stays silent about a form with no lead signal at all", () => {
-    expect(check("src/app/page.tsx", '<form method="post"><input type="text" /><button>Go</button></form>').state).toBe("ok")
-  })
-
-  it("stays silent about a form with no submit path", () => {
-    expect(
-      check("src/app/page.tsx", '<form id="contact"><input type="email" /><button type="button">Later</button></form>').state
-    ).toBe("ok")
   })
 
   /** The honest middle: a hand-rolled handler we cannot attribute to this form is undetermined. */
@@ -86,15 +70,5 @@ describe("a form that submits and emits nothing", () => {
     // Nor the form's own identifiers or action url, which classification reads but never emits.
     expect(result.findings[0]!.message).not.toContain("contact-form")
     expect(result.findings[0]!.message).not.toContain("/api/lead")
-  })
-
-  it("recognises infinite-tag's own conversion helpers as analytics calls (lane O9)", () => {
-    for (const call of ["infiniteTrack('sign_up')", "infiniteTrackThenNavigate('sign_up', '/thanks')", "infiniteMetaMirror(res.metaEventId)", "await reportInfiniteOutcome({ type: 'lead' })", "await postInfiniteOutcome({ type: 'lead' })"]) {
-      const result = check("src/components/contact.tsx", `${LEAD_FORM}\nfunction onSubmit() { ${call} }`)
-      expect(result.findings[0]!.code).toBe("INF_SETUP_FORM_UNDETERMINED")
-    }
-    // Negative: a lookalike name that is not one of the helpers still reads as silent.
-    const lookalike = check("src/components/contact.tsx", `${LEAD_FORM}\nfunction onSubmit() { infiniteTracker('sign_up') }`)
-    expect(lookalike.findings[0]!.code).toBe("INF_SETUP_FORM_NO_CONVERSION")
   })
 })

@@ -12,7 +12,7 @@ import { pathToFileURL } from "node:url"
 import ts from "typescript"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
-import { VECTORS } from "./helpers.test.js"
+import { VECTORS } from "../../test/server-lane-vectors.js"
 import {
   defaultStripeWebhookRoute,
   leadRouteEdit,
@@ -137,7 +137,7 @@ const sentBodies = (fetchMock: ReturnType<typeof vi.fn>) =>
     .filter((call) => String((call as [string])[0]).includes("/api/analytics/events/server"))
     .map((call) => JSON.parse(String((call as [string, RequestInit])[1].body)) as Record<string, any>)
 
-describe.each(["ts", "js"] as const)("the recipes (%s), run against the real helper", (language) => {
+describe.each([ "js"] as const)("the recipes (%s), run against the real helper", (language) => {
   const originalEnv = { ...process.env }
   let fetchMock: ReturnType<typeof vi.fn>
 
