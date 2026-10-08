@@ -730,6 +730,12 @@ export function clickPathFindings(input: CommerceCheckInput): CommerceFinding[] 
 
 /** A wait the handler at `fn` gives the send before it leaves. */
 function handlerWaits(masked: string, fn: FunctionRange | null, index: number): boolean {
+  // Inside `infiniteLeaveAfter(() => { …; return helper(…) }, go)`: the call is in its arguments.
+  for (const match of masked.matchAll(/\binfiniteLeaveAfter\s*\(/g)) {
+    const open = (match.index ?? 0) + match[0].length - 1
+    const close = closingOf(masked, open)
+    if (open < index && index < close) return true
+  }
   const scope = fn ? masked.slice(fn.start, fn.end) : masked
   if (/\b(?:infiniteLeaveAfter|infiniteTrackThenNavigate)\s*\(/.test(scope)) return true
   // `await helper(…)` / `helper(…).then(…)` on the reaching call itself.

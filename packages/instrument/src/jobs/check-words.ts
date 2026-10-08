@@ -46,6 +46,7 @@ export const CHECK_LABELS: Readonly<Record<string, string>> = {
   commerce_promises_met: "Every promised event is in the code",
   no_double_count: "No event is counted twice",
   meta_event_id_from_server: "Meta event IDs come from your server",
+  sends_before_leaving: "Events are out before the page changes",
   first_real_outcome: "A real server conversion arrived",
   identify_on_auth_success: "Signed-in visits are linked to the account",
   reset_on_every_signout: "Account tracking resets on sign-out",

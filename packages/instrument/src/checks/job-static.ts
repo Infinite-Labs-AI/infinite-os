@@ -32,7 +32,7 @@ import { runCensus } from "./census.js"
 import { analyzeCsp, cspNeeds, parseCspPolicies } from "./live/csp.js"
 import { checkResult, isolated } from "./result.js"
 import { callsOf, literalString, splitTopLevelArgs, topLevelProps, type Call } from "./source-calls.js"
-import { adMatchFindings, canonicalEvent, doubleCountFindings, metaEventIdFindings, outcomeHas, outcomesIn, piiFindings, promiseFindings, valueFindings, type CommerceCheckInput, type CommerceFinding, type OutcomeCall } from "./commerce-static.js"
+import { adMatchFindings, canonicalEvent, clickPathFindings, doubleCountFindings, leadFindings, leaveFindings, metaEventIdFindings, outcomeHas, outcomesIn, piiFindings, promiseFindings, valueFindings, type CommerceCheckInput, type CommerceFinding, type OutcomeCall } from "./commerce-static.js"
 import type { EventInventory, InventoryTool as CommerceTool } from "./commerce-inventory.js"
 import { COMMERCE_EVENTS_TARGET } from "../scan/event-inventory.js"
 
@@ -71,7 +71,9 @@ export const JOB_STATIC_CHECK_IDS = [
   "outcome_ad_match",
   "outcome_value_currency",
   "no_double_count",
-  "meta_event_id_from_server"
+  "meta_event_id_from_server",
+  // P1-A: a browser Meta send a full page load right after it can cut off is waited for.
+  "sends_before_leaving"
 ] as const
 export type JobStaticCheckId = (typeof JOB_STATIC_CHECK_IDS)[number]
 
@@ -470,6 +472,9 @@ export function jobStaticCheckFunctions(deps: JobStaticDeps): Record<JobStaticCh
       const scope = itemFiles(input)
       const calls = outcomeCalls(scope)
       if (calls.length === 0) return noOutcomeCall("event_id_stable", scope, ctx)
+      // P2-7: a lead with no fallbackId has no id at all until LEAD_ID_SECRET is set, so it reports nothing.
+      const lead = leadFindings({ files: scope })
+      if (lead.some((finding) => finding.state === "problem")) return commerceResult("event_id_stable", ctx, lead, "")
       for (const outcome of calls) {
         const { file, call } = outcome
         // A recipe reporter keys the outcome itself (the Stripe session id, one id per person for a lead).
@@ -528,8 +533,20 @@ export function jobStaticCheckFunctions(deps: JobStaticDeps): Record<JobStaticCh
     no_double_count: run("no_double_count", (input, ctx) => {
       const commerce = withBase(input, { files: itemFiles(input), inventory: context().eventInventory ?? null })
       const findings = doubleCountFindings(commerce)
-      if (findings === null) return result("no_double_count", ctx, "undetermined", "the code before this run could not be read, so new sends could not be told apart from the site's own")
-      return commerceResult("no_double_count", ctx, findings, "no event is sent twice to one tool")
+      // P1-A: one click that reaches two sends of one event (inside the site's helper AND in the handler calling it).
+      const onClick = clickPathFindings(commerce)
+      if (findings === null) {
+        if (onClick.length > 0) return commerceResult("no_double_count", ctx, onClick, "")
+        return result("no_double_count", ctx, "undetermined", "the code before this run could not be read, so new sends could not be told apart from the site's own")
+      }
+      return commerceResult("no_double_count", ctx, [...onClick, ...findings], "no event is sent twice to one tool")
+    }),
+
+    // P1-A: where the scan saw a click leave with a full page load, the browser Meta send it reaches is waited for.
+    sends_before_leaving: run("sends_before_leaving", (input, ctx) => {
+      const inventory = context().eventInventory
+      if (!inventory) return result("sends_before_leaving", ctx, "undetermined", "the plan's event list is not known, so which clicks leave with a full page load is unknown")
+      return commerceResult("sends_before_leaving", ctx, leaveFindings({ files: itemFiles(input), inventory }), "every Meta event a full page load follows is out before the page leaves")
     }),
 
     // Review r3: a browser Meta event carries only the event id the server got back, or none.

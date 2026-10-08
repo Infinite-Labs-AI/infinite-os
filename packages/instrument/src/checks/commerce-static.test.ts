@@ -14,8 +14,11 @@ import {
   adMatchFindings,
   bodyView,
   canonicalEvent,
+  clickPathFindings,
   commerceFindings,
   doubleCountFindings,
+  leadFindings,
+  leaveFindings,
   metaEventIdFindings,
   piiFindings,
   promiseFindings,
@@ -419,5 +422,53 @@ describe("the outcome helper's own reporters (lib/infinite-outcome)", () => {
     expect(sendsIn("src/events.ts", text).map((send) => send.tool)).toEqual(["meta"])
     const both = 'infiniteTrack("add_to_cart", { item_id: "a" }, { destinations: ["meta", "posthog"] })\n'
     expect(sendsIn("src/events.ts", both).map((send) => send.tool).sort()).toEqual(["meta", "posthog"])
+  })
+})
+
+describe("P1-A: one click, one send; a full page load waits", () => {
+  const helper = [
+    'import { infiniteTrack, infiniteTrackBeforeLeaving } from "../lib/infinite-analytics"',
+    "export function addToCart(p) {",
+    '  sendGa("add_to_cart", { id: p.id })',
+    '  return infiniteTrackBeforeLeaving("add_to_cart", { item_id: p.id, price: p.price }, { destinations: ["meta", "infinite"] })',
+    "}",
+    "export function addBundle(p) {",
+    '  infiniteTrack("add_to_cart", { item_id: p.id, price: p.price }, { destinations: ["meta", "infinite"] })',
+    "}",
+    ""
+  ].join("\n")
+  const page = (body: string) => ['import { addToCart, addBundle } from "../src/events"', "export default function Page({ p }) {", `  const buy = () => {\n${body}\n  }`, "  return null", "}", ""].join("\n")
+
+  it("the helper's send plus a send in the handler, or two helpers that both send, is one click counted twice; one helper is fine", () => {
+    const twice = clickPathFindings({ files: files({ "src/events.ts": helper, "pages/a.tsx": page('    addToCart(p)\n    infiniteTrack("add_to_cart", { item_id: p.id }, { destinations: ["meta"] })') }) })
+    expect(twice.map((finding) => [finding.rule, finding.tool, finding.event, finding.file])).toEqual([["sent_twice_on_one_click", "meta", "add_to_cart", "pages/a.tsx"]])
+    const two = clickPathFindings({ files: files({ "src/events.ts": helper, "pages/a.tsx": page("    addToCart(p)\n    addBundle(p)") }) })
+    expect(two.map((finding) => finding.rule)).toEqual(["sent_twice_on_one_click"])
+    expect(two[0]!.message).toContain("through addToCart()")
+    expect(two[0]!.message).toContain("through addBundle()")
+    expect(clickPathFindings({ files: files({ "src/events.ts": helper, "pages/a.tsx": page("    addToCart(p)\n    window.location.assign(\"/cart\")") }) })).toEqual([])
+    // Two separate buttons, each sending once, are two clicks.
+    const buttons = ['import { addToCart } from "../src/events"', "export default function Page({ p }) {", '  const one = () => addToCart(p)', '  const two = () => infiniteTrack("add_to_cart", { item_id: p.id }, { destinations: ["meta"] })', "  return null", "}", ""].join("\n")
+    expect(clickPathFindings({ files: files({ "src/events.ts": helper, "pages/b.tsx": buttons }) })).toEqual([])
+  })
+
+  it("a click the scan saw leave with a full page load must wait: infiniteLeaveAfter, await or .then pass; leaving at once does not", () => {
+    const inventory: EventInventory = { rows: [{ event: "add_to_cart", tools: { meta: { state: "will_add", lane: "browser" } }, sites: [{ file: "pages/a.tsx", line: 4, via: "helper:addToCart", navigation: "full_load", helperAt: { file: "src/events.ts", line: 2 } }] }] }
+    const leave = (body: string) => leaveFindings({ files: files({ "src/events.ts": helper, "pages/a.tsx": page(body) }), inventory })
+    expect(leave("    addToCart(p)\n    window.location.assign(\"/cart\")").map((finding) => finding.rule)).toEqual(["lost_before_leaving"])
+    expect(leave("    infiniteLeaveAfter(() => addToCart(p), () => window.location.assign(\"/cart\"))")).toEqual([])
+    expect(leave("    void addToCart(p).then(() => window.location.assign(\"/cart\"))")).toEqual([])
+    // The helper must return the wait, not a plain infiniteTrack.
+    const plain = helper.replace('return infiniteTrackBeforeLeaving("add_to_cart"', 'infiniteTrack("add_to_cart"')
+    const found = leaveFindings({ files: files({ "src/events.ts": plain, "pages/a.tsx": page("    infiniteLeaveAfter(() => addToCart(p), () => window.location.assign(\"/cart\"))") }), inventory })
+    expect(found.map((finding) => [finding.rule, finding.file])).toEqual([["lost_before_leaving", "src/events.ts"]])
+    expect(found[0]!.message).toMatch(/^addToCart\(\) sends Meta AddToCart with nothing to wait on/)
+  })
+
+  it("P2-7: a lead with no fallbackId is a problem; with one it passes; unreadable options are unknown", () => {
+    const route = (options: string) => `import { reportInfiniteLead } from "../../lib/infinite-outcome"\nexport default async function handler(req, res) {\n  await reportInfiniteLead(req, ${options})\n}\n`
+    expect(leadFindings({ files: files({ "pages/api/join.ts": route("{ email, trackingAllowed: true }") }) }).map((finding) => finding.state)).toEqual(["problem"])
+    expect(leadFindings({ files: files({ "pages/api/join.ts": route("{ email, trackingAllowed: true, fallbackId: row.id }") }) })).toEqual([])
+    expect(leadFindings({ files: files({ "pages/api/join.ts": route("options") }) }).map((finding) => finding.state)).toEqual(["undetermined"])
   })
 })

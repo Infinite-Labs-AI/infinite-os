@@ -186,7 +186,7 @@ const TARGET_CHECKS: Partial<Record<JobId, (target: string, framework: string) =
   // the wizard can read also carries `posthog_improve_applied` (the setting is in the adopted init).
   posthog_improve: (target, framework) =>
     target === COMMERCE_EVENTS_TARGET
-      ? ["S:commerce_promises_met", "PV:posthog_distinct_id_receipt"]
+      ? ["S:commerce_promises_met", "S:no_double_count", "PV:posthog_distinct_id_receipt"]
       : target === "proxy"
       ? ["S:posthog_config", "S:posthog_improve_applied", ...(framework.startsWith("next") ? ["S:next_rewrites_exact"] : []), "RH:posthog_via_proxy_once", "PV:posthog_distinct_id_receipt"]
       : target === "history_change" || target === "defaults" || target === "sensitive_pages"
@@ -195,7 +195,7 @@ const TARGET_CHECKS: Partial<Record<JobId, (target: string, framework: string) =
   // R4-8: a page-change page_view is proven by the rehearsal's own page change (one GA4 page_view after it, never two).
   ga4_improve: (target) =>
     target === COMMERCE_EVENTS_TARGET
-      ? ["S:commerce_promises_met", "PV:ga4_seen_leaving"]
+      ? ["S:commerce_promises_met", "S:no_double_count", "PV:ga4_seen_leaving"]
       : target === "id"
       ? ["S:ga4_id_applied", "T1:ga4_loader_id", "RH:ga4_one_page_view", "PV:ga4_seen_leaving"]
       : target === "spa_page_view"
@@ -206,7 +206,7 @@ const TARGET_CHECKS: Partial<Record<JobId, (target: string, framework: string) =
   meta_improve: (target) =>
     target === COMMERCE_EVENTS_TARGET
       ? // Proved by the code holding every event the plan promised Meta (checks/commerce-static.ts).
-        ["S:commerce_promises_met", "S:meta_event_id_from_helper", "PV:meta_seen_leaving"]
+        ["S:commerce_promises_met", "S:no_double_count", "S:sends_before_leaving", "S:meta_event_id_from_helper", "PV:meta_seen_leaving"]
       : target === "retire_fbc_writer" || target === "capture"
       ? ["S:click_id_capture", "T0:fbc_capture", "PV:meta_seen_leaving"]
       : target === "spa_page_view"

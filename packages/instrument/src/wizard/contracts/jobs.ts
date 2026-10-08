@@ -273,9 +273,10 @@ export const JOB_TABLE: { readonly [J in JobId]: JobSpec & { jobId: J } } = {
  * it, and only there is it added.
  */
 export const TARGET_ONLY_CHECKS: { readonly [J in JobId]?: readonly JobCheckSpec[] } = {
-  posthog_improve: [p("S", "commerce_promises_met")],
-  ga4_improve: [p("S", "commerce_promises_met")],
-  meta_improve: [p("S", "commerce_promises_met")]
+  // P1-A: and never twice on one click; Meta's also waits before a full page load.
+  posthog_improve: [p("S", "commerce_promises_met"), c("S", "no_double_count")],
+  ga4_improve: [p("S", "commerce_promises_met"), c("S", "no_double_count")],
+  meta_improve: [p("S", "commerce_promises_met"), c("S", "no_double_count"), c("S", "sends_before_leaving")]
 }
 
 /**

@@ -146,6 +146,26 @@ describe("[D] store: the static checks catch a run that leaves Meta without the 
     expect(found[0]!.message).toMatch(/reports the purchase to Infinite without match data \(no adMatch\), so Meta cannot tie it to an ad click/)
   })
 
+  it("(d) P1-A: the send inside the helper AND another in the Buy handler that calls it is caught as a double count on one click", () => {
+    const index = CORRECT_EDITS.get("pages/index.tsx")!
+      .replace('import { useCart } from "../src/cart/CartContext";\n', 'import { useCart } from "../src/cart/CartContext";\nimport { infiniteTrack } from "../lib/infinite-analytics";\n')
+      .replace("    addToCart(product);\n", '    addToCart(product);\n    infiniteTrack("add_to_cart", { item_id: product.slug, price: product.priceCents / 100, quantity: 1, currency: "USD" }, { destinations: ["meta", "infinite"] });\n')
+    expect(index).toContain('infiniteTrack("add_to_cart"')
+    const now = edited(new Map([...CORRECT_EDITS, ["pages/index.tsx", index]]))
+    const found = problems(commerceFindings({ files: now, base: baseFor(now), inventory: EXPECTED, metaInUse: true }))
+    expect(found.map((finding) => `${finding.rule}:${finding.tool}:${finding.event}:${finding.file}`)).toEqual(["sent_twice_on_one_click:meta:add_to_cart:pages/index.tsx"])
+    expect(found[0]!.message).toMatch(/^One click at pages\/index\.tsx:\d+ sends Meta AddToCart twice: (through addToCart\(\) \(its send at src\/analytics\/events\.ts:\d+\)|itself at pages\/index\.tsx:\d+) and (through addToCart\(\)|itself)/)
+  })
+
+  it("(d) P2-7: a lead reported without a fallbackId (nothing is sent until LEAD_ID_SECRET is set) is caught", () => {
+    const lead = CORRECT_EDITS.get("pages/api/mailing-list.ts")!.replace(/^    fallbackId: .*\n/m, "")
+    expect(lead).not.toContain("fallbackId")
+    const now = edited(new Map([...CORRECT_EDITS, ["pages/api/mailing-list.ts", lead]]))
+    const found = problems(commerceFindings({ files: now, base: baseFor(now), inventory: EXPECTED, metaInUse: true }))
+    expect(found.map((finding) => finding.rule)).toEqual(["lead_may_send_nothing"])
+    expect(found[0]!.message).toMatch(/reports the lead with no fallbackId, so until LEAD_ID_SECRET is set it has no stable id and sends nothing/)
+  })
+
   it("the correct edits never touch the trackers file that holds the cookie banner's consent code, nor the privacy page", () => {
     expect(CORRECT_EDITS.has("src/analytics/tracking.ts")).toBe(false)
     expect(CORRECT_EDITS.has("components/CookieBanner.tsx")).toBe(false)
@@ -186,18 +206,18 @@ async function scanInventory(scan: ScanResult): Promise<EventInventory> {
   return inventory
 }
 
-async function pipeline() {
+async function pipeline(at: string = root) {
   const keys = fixtureKeys()
   const installer = createWizardInstaller({
-    root,
+    root: at,
     repoFingerprint: `sha256:${"a".repeat(64)}`,
     runId: () => RUN_ID,
     agent: () => ({ worker: "claude_code", whoPays: null }),
     consentFlag: () => null,
     productionDeniedConflict: () => []
   })
-  const scan = await installer.scan({ root, hosting: fixtureHosting() })
-  const before: BeforeFacts = { hosting: fixtureHosting(), keys, census: runCensus({ root, appRoot: "." }), dryLive: null, checks: [], observedProductionHost: "www.halden-audio.example" }
+  const scan = await installer.scan({ root: at, hosting: fixtureHosting() })
+  const before: BeforeFacts = { hosting: fixtureHosting(), keys, census: runCensus({ root: at, appRoot: "." }), dryLive: null, checks: [], observedProductionHost: "www.halden-audio.example" }
   let facts: BriefFacts | null = null
   const registry = createJobRegistry({ briefFacts: () => facts })
   const candidates = registry.seedCandidates(scan, before)
@@ -306,9 +326,10 @@ describe("store: the wizard's own scan, plan and briefs", () => {
   it("(c) [A] every seeded job's own static checks pass on the correct edits", async () => {
     const { items } = await pipeline()
     const { jobStaticCheckFunctions } = await import("../checks/job-static.js")
+    // The plan's inventory is the scan BEFORE the agent's edits (the before step's), never the edited tree's.
+    const inventory = await scanInventory((await pipeline()).scan)
     for (const [file, text] of CORRECT_EDITS) writeFileSync(join(root, file), text, { flag: "w" })
     try {
-      const inventory = await scanInventory((await pipeline()).scan)
       const functions = jobStaticCheckFunctions({ root, run: () => ({ eventInventory: inventory, metaInUse: true, conversionNames: ["purchase", "begin_checkout", "lead", "add_to_cart", "view_item"] }), readBaseFile: (_root, file) => SITE.get(file) ?? null })
       const commerceJobs = items.filter((item) => item.jobId === "server_conversions" || item.jobId === "conversions_to_tools" || item.id.endsWith(":commerce_events"))
       expect(commerceJobs.map((item) => item.id).sort()).toEqual(["meta_improve:commerce_events", "server_conversions:begin_checkout", "server_conversions:lead", "server_conversions:purchase"])
@@ -323,7 +344,15 @@ describe("store: the wizard's own scan, plan and briefs", () => {
         }
       }
       // Every job's own proving check ran (and passed above).
-      expect(graded).toEqual(expect.arrayContaining(["meta_improve:commerce_events:commerce_promises_met", "server_conversions:purchase:outcome_declared", "server_conversions:begin_checkout:outcome_declared", "server_conversions:lead:outcome_declared"]))
+      expect(graded).toEqual(expect.arrayContaining([
+        "meta_improve:commerce_events:commerce_promises_met",
+        "meta_improve:commerce_events:no_double_count",
+        "meta_improve:commerce_events:sends_before_leaving",
+        "server_conversions:purchase:outcome_declared",
+        "server_conversions:begin_checkout:outcome_declared",
+        "server_conversions:lead:outcome_declared",
+        "server_conversions:lead:event_id_stable"
+      ]))
     } finally {
       execFileSync("git", ["checkout", "--", "."], { cwd: root, stdio: "ignore" })
       execFileSync("git", ["clean", "-fdq"], { cwd: root, stdio: "ignore" })
@@ -357,5 +386,90 @@ describe("store: the wizard's own scan, plan and briefs", () => {
       execFileSync("git", ["checkout", "--", "."], { cwd: root, stdio: "ignore" })
       execFileSync("git", ["clean", "-fdq"], { cwd: root, stdio: "ignore" })
     }
+  })
+})
+
+// ---------------------------------------------------------------------------------------------
+// P1-A: the same store where the Buy buttons leave with a FULL page load (`fixtures/store/full-load`)
+// ---------------------------------------------------------------------------------------------
+
+describe("P1-A store variant: Buy leaves with a full page load", () => {
+  const FULL_SITE = tree(join(STORE, "full-load", "site"))
+  const FULL_CORRECT = tree(join(STORE, "full-load", "correct"))
+  /** The full-load site's own files. */
+  const site = new Map([...SITE, ...FULL_SITE])
+  /** The full set of correct edits on it: the store's, with the helper and the Buy handlers in their full-load shape. */
+  const correct = new Map([...CORRECT_EDITS, ...FULL_CORRECT])
+  let fullRoot = ""
+  beforeAll(() => {
+    fullRoot = mkdtempSync(join(tmpdir(), "tag-store-full-"))
+    cpSync(join(STORE, "site"), fullRoot, { recursive: true })
+    cpSync(join(STORE, "full-load", "site"), fullRoot, { recursive: true })
+    const git = (...args: string[]) => execFileSync("git", args, { cwd: fullRoot, stdio: "ignore", env: { PATH: "/usr/bin:/bin", HOME: fullRoot, GIT_CONFIG_NOSYSTEM: "1" } })
+    git("init", "-q")
+    git("add", "-A")
+    git("-c", "user.email=store@example.com", "-c", "user.name=Store", "commit", "-qm", "store")
+  })
+  afterAll(() => {
+    if (fullRoot) rmSync(fullRoot, { recursive: true, force: true })
+  })
+
+  const metaChecks = async (edits: ReadonlyMap<string, string>) => {
+    const { items, scan } = await pipeline(fullRoot)
+    const inventory = await scanInventory(scan)
+    const { jobStaticCheckFunctions } = await import("../checks/job-static.js")
+    const functions = jobStaticCheckFunctions({ root: fullRoot, run: () => ({ eventInventory: inventory, metaInUse: true, conversionNames: ["purchase", "begin_checkout", "lead"] }), readBaseFile: (_root, file) => site.get(file) ?? null })
+    const item = items.find((entry) => entry.id === "meta_improve:commerce_events")!
+    for (const [file, text] of edits) writeFileSync(join(fullRoot, file), text, { flag: "w" })
+    try {
+      const out: Record<string, { state: string; reason: string }> = {}
+      for (const check of ["commerce_promises_met", "no_double_count", "sends_before_leaving"] as const) {
+        const raw = await functions[check]({ item, root: fullRoot, appRoot: "." }, { runId: RUN_ID, now: () => new Date("2026-10-08T10:00:00.000Z") })
+        const result = (Array.isArray(raw) ? raw : [raw])[0]!
+        out[check] = { state: result.state, reason: result.reason ?? "" }
+      }
+      return out
+    } finally {
+      execFileSync("git", ["checkout", "--", "."], { cwd: fullRoot, stdio: "ignore" })
+      execFileSync("git", ["clean", "-fdq"], { cwd: fullRoot, stdio: "ignore" })
+    }
+  }
+
+  it("the scan sees both Buy handlers leave with a full page load, and the brief asks for the returned wait and the wrapped handler", async () => {
+    const { items, brief, scan } = await pipeline(fullRoot)
+    const entry = toJobScan(scan).detections.eventInventory.events.find((candidate) => candidate.event === "add_to_cart")!
+    expect(entry.sites.map((site) => [site.file, site.navigation, site.navigationVia])).toEqual([
+      ["pages/index.tsx", "full_load", "location.assign"],
+      ["pages/products/[slug].tsx", "full_load", "location.assign"]
+    ])
+    expect(items.find((item) => item.id === "meta_improve:commerce_events")!.checks.map((check) => check.id)).toEqual(expect.arrayContaining(["commerce_promises_met", "no_double_count", "sends_before_leaving"]))
+    const meta = brief.slice(brief.indexOf('### Job "meta_improve:commerce_events"'), brief.indexOf("### Job", brief.indexOf('### Job "meta_improve:commerce_events"') + 1))
+    expect(meta).toContain('return infiniteTrackBeforeLeaving(\\"add_to_cart\\"')
+    expect(meta).toContain("wrap this click handler: infiniteLeaveAfter(() => { <everything the handler did before it left>; return addToCart(…) }, () => <the handler's own navigation, exactly as written>)")
+    expect(meta).toContain('"src/analytics/events.ts":"import { infiniteTrack, infiniteTrackBeforeLeaving } from \\"../../lib/infinite-analytics\\""')
+    expect(meta).toContain('"pages/index.tsx":"import { infiniteLeaveAfter } from \\"../lib/infinite-analytics\\""')
+  })
+
+  it("the correct full-load edits pass the Meta job's own checks", async () => {
+    const results = await metaChecks(correct)
+    for (const [check, result] of Object.entries(results)) expect(result.state, `${check}: ${result.reason}`).toBe("pass")
+    expect(problems(commerceFindings({ files: new Map([...site, ...correct]), base: new Map<string, string | null>([...site, ...[...correct.keys()].filter((file) => !site.has(file)).map((file) => [file, null] as const)]), inventory: await scanInventory((await pipeline(fullRoot)).scan), metaInUse: true }))).toEqual([])
+  })
+
+  it("the client-routing shape here (no wait) fails: Meta's AddToCart can be cut off by the page load", async () => {
+    // The store's own correct edits: a plain infiniteTrack in the helper, and Buy handlers that leave at once.
+    const results = await metaChecks(new Map([...CORRECT_EDITS, ...[...FULL_SITE].map(([file, text]) => [file, text.replace(/<button type="button" className="btn btn-primary btn-(block|large)"/, '<button type="button" className="btn btn-primary btn-$1" data-infinite-conversion="add_to_cart"')] as const)]))
+    expect(results.sends_before_leaving!.state).toBe("problem")
+    expect(results.sends_before_leaving!.reason).toMatch(/sends Meta AddToCart through addToCart\(\) and then leaves with a full page load without waiting/)
+  })
+
+  it("the helper's send AND infiniteTrackThenNavigate in the Buy handler (the old brief's two halves) fail as a double count", async () => {
+    const index = FULL_CORRECT.get("pages/index.tsx")!
+      .replace('import { infiniteLeaveAfter } from "../lib/infinite-analytics";', 'import { infiniteTrackThenNavigate } from "../lib/infinite-analytics";')
+      .replace(/  const buy = \(product: Product\) =>\n    infiniteLeaveAfter\([\s\S]*?\n    \);\n/, '  const buy = (product: Product) => {\n    cart.add(product.slug);\n    void addToCart(product);\n    infiniteTrackThenNavigate(null, "/cart", "add_to_cart", { item_id: product.slug, price: product.priceCents / 100, quantity: 1, currency: "USD" }, { destinations: ["meta", "infinite"] });\n  };\n')
+    expect(index).toContain("infiniteTrackThenNavigate(null")
+    const results = await metaChecks(new Map([...correct, ["pages/index.tsx", index]]))
+    expect(results.no_double_count!.state).toBe("problem")
+    expect(results.no_double_count!.reason).toMatch(/One click at pages\/index\.tsx:\d+ sends Meta AddToCart twice/)
   })
 })
