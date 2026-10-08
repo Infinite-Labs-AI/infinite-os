@@ -123,7 +123,7 @@ describe("step `review` (§3g.4)", { timeout: 60_000 }, () => {
     })
     expect(await reviewStep.run(w.ctx, w.deps)).toMatchObject({ kind: "parked", reason: expect.stringContaining("pending") })
     expect(w.gh.read().prs[0]!.isDraft).toBe(true)
-    const f1 = w.gh.read().threads.find((thread) => thread.comments[0]!.author === "acme-dev" && thread.comments[0]!.body.includes("F1"))!
+    const f1 = w.gh.read().threads.find((thread) => thread.comments[0]!.author === "acme-dev" && thread.comments[0]!.body.includes("Edit the init in place."))!
     expect(f1.comments).toHaveLength(1)
     expect(f1.isResolved).toBe(false)
     expect(w.ctx.state.get().jobs.find((job) => job.id === "review_comments:F1")).toMatchObject({ state: "done_in_code" })

@@ -24,6 +24,7 @@ import {
   type VerdictToolFact
 } from "./contracts/report.js"
 import type { TestTool } from "./contracts/test-engine.js"
+import { FINISH_LINE_WORDS } from "./pr-summary.js"
 
 /** What the real visit measured of ONE tool under test (the contract's type). */
 export type ToolProofFact = VerdictToolFact
@@ -43,6 +44,8 @@ export interface VerdictInput {
   tools: readonly ToolProofFact[] | null
   /** Review P1-6: null = the deployed code's installed set was read; else why it could not be. */
   installedUnknown: string | null
+  /** What the pull request does, in one plain sentence; the headline opens with it. Absent/null = not known. */
+  does?: string | null
 }
 
 /** Job item states that are "in the code" (DECISIONS §5.3): `claimed` is NOT (the wizard could not check it). */
@@ -53,13 +56,26 @@ const NOT_PLAN_JOBS = new Set(["review_comments", "build_fix"])
 const SILENT_LABEL: Record<TestTool, string> = { infinite: "Infinite pixel", ga4: "GA4", posthog: "PostHog", meta: "Meta pixel" }
 const SHORT_LABEL: Record<TestTool, string> = { infinite: "Infinite", ga4: "GA4", posthog: "PostHog", meta: "Meta" }
 
-const label = (id: FinishLineId): string => id.replace(/_/g, " ")
+const label = (id: FinishLineId): string => FINISH_LINE_WORDS[id]
 const plural = (count: number, one: string, many: string) => (count === 1 ? one : many)
 
-/** At most 3 names, then `+N more` (DECISIONS §5.3). */
+/** At most 3 names, then "and N more" (DECISIONS §5.3). */
 function listNames(names: readonly string[]): string {
   const shown = names.slice(0, 3).join(", ")
-  return names.length > 3 ? `${shown} +${names.length - 3} more` : shown
+  return names.length > 3 ? `${shown} and ${names.length - 3} more` : shown
+}
+
+/**
+ * The review findings that hold the owner's pull request: blockers on the OWNER's code. A finding on Infinite's own
+ * files (a label: Infinite's managed runtime, the wizard's own change) is recorded for Infinite and never blocks it.
+ */
+export function ownerBlockers<T extends Pick<VerdictOpenFinding, "severity" | "label">>(findings: readonly T[]): T[] {
+  return findings.filter((finding) => finding.severity === "blocker" && finding.label === null)
+}
+
+/** "the review agent asks you to look at 2 things" (the merge card and the headline say the same words). */
+function reviewAsksWords(count: number): string {
+  return `the review agent asks you to look at ${count === 1 ? "one thing" : `${count} things`}`
 }
 
 /** "GA4", "GA4 and Meta", "GA4, PostHog and Meta". */
@@ -166,16 +182,16 @@ export function computeVerdict(input: VerdictInput): ReportVerdict {
     reasons.push(reason("not_live", []))
     const missing = missingApprovedFixes(input.jobs)
     if (missing.length > 0) reasons.push(reason("approved_fix_missing", missing.map((item) => item.title)))
-    const blockers = input.openFindings.filter((finding) => finding.severity === "blocker")
+    const blockers = ownerBlockers(input.openFindings)
     if (blockers.length > 0) reasons.push(reason("review_blocker_open", blockers.map(openFindingName)))
-    return { state: "not_checked_live", headline: notCheckedLiveHeadline(input).slice(0, VERDICT_LIMITS.headlineMaxChars), reasons, installed }
+    return { state: "not_checked_live", headline: withDoes(input, notCheckedLiveHeadline(input)), reasons, installed }
   }
 
   const liveProblems = input.finishLine.filter((line) => line.cells.proven_live.state === "problem").map((line) => label(line.id))
   if (liveProblems.length > 0) reasons.push(reason("live_problem", liveProblems))
   const missing = missingApprovedFixes(input.jobs)
   if (missing.length > 0) reasons.push(reason("approved_fix_missing", missing.map((item) => item.title)))
-  const blockers = input.openFindings.filter((finding) => finding.severity === "blocker")
+  const blockers = ownerBlockers(input.openFindings)
   if (blockers.length > 0) reasons.push(reason("review_blocker_open", blockers.map(openFindingName)))
   const silent = tools.filter((tool) => tool.installed && !tool.fired && !tool.ungraded)
   if (silent.length > 0) reasons.push(reason("tool_silent", silent.map((tool) => SILENT_LABEL[tool.tool])))
@@ -205,7 +221,7 @@ export function computeVerdict(input: VerdictInput): ReportVerdict {
     if (live) parts.push(`${live.count} ${plural(live.count, "problem", "problems")} on the live site (${listNames(liveProblems)})`)
     if (has("approved_fix_missing")) parts.push(...approvedFixClauses(missing))
     const open = has("review_blocker_open")
-    if (open) parts.push(`${open.count} review ${plural(open.count, "blocker", "blockers")} open (${listNames(blockers.map(openFindingName))})`)
+    if (open) parts.push(reviewAsksWords(open.count))
     if (silent.length > 0) parts.push(`${listNames(silent.map((tool) => SILENT_LABEL[tool.tool]))} sent nothing on the real visit`)
     if (withoutReceipt.length > 0) parts.push(`no receipt from the real visit for ${listNames(withoutReceipt.map((tool) => SILENT_LABEL[tool.tool]))}`)
     headline = `${input.site} does not collect properly yet: ${parts.join(" · ")}`
@@ -243,7 +259,16 @@ export function computeVerdict(input: VerdictInput): ReportVerdict {
     }).length
     headline = `${input.site} collects analytics properly now${waiting > 0 ? ` · ${waiting} ${plural(waiting, "check waits", "checks wait")} for real visitors or the 7-day check-in` : ""}`
   }
-  return { state, headline: headline.slice(0, VERDICT_LIMITS.headlineMaxChars), reasons, installed }
+  return { state, headline: withDoes(input, headline), reasons, installed }
+}
+
+/** The headline opens with what the pull request does, then the run's state (bounded; never cut mid-state). */
+function withDoes(input: VerdictInput, status: string): string {
+  const does = input.does?.trim() ?? ""
+  const room = VERDICT_LIMITS.headlineMaxChars - status.length - 1
+  if (does.length === 0 || room < 40) return status.slice(0, VERDICT_LIMITS.headlineMaxChars)
+  const lead = does.length > room ? `${does.slice(0, room - 1).trimEnd()}…` : does
+  return `${lead} ${status}`
 }
 
 /** The headline's words for a proof visit the site's own cookie banner kept silent. */
@@ -273,7 +298,7 @@ export function incompleteParts(verdict: Pick<ReportVerdict, "reasons">, jobs: r
   const parts: string[] = []
   if (verdict.reasons.some((entry) => entry.kind === "approved_fix_missing")) parts.push(...approvedFixClauses(missingApprovedFixes(jobs)))
   const blockers = verdict.reasons.find((entry) => entry.kind === "review_blocker_open")
-  if (blockers) parts.push(`${blockers.count} review ${plural(blockers.count, "blocker", "blockers")} open (${listNames(blockers.names)})`)
+  if (blockers) parts.push(`${reviewAsksWords(blockers.count)} (${listNames(blockers.names)})`)
   return parts.length > 0 ? parts.join(" · ") : null
 }
 

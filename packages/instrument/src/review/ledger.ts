@@ -145,10 +145,12 @@ function findingKey(key: string, findingId: string | null): string {
   return `${key}|${findingId ?? "-"}`
 }
 
-/** `<item> <path>:<line>` (+ the label), the verdict's name for an open finding. */
+/**
+ * `<path>:<line>`, the verdict's name for an open finding: where the owner looks, never a checklist id (the finding's
+ * own words are on the report's list, not in the headline).
+ */
 export function openFindingName(finding: { item: string | null; path: string | null; line: number | null; label: OpenFinding["label"] }): string {
-  const where = finding.path === null ? "general" : finding.line === null ? finding.path : `${finding.path}:${finding.line}`
-  return `${finding.item ?? "review"} ${where}${finding.label ? ` (${finding.label})` : ""}`
+  return finding.path === null ? "the pull request" : finding.line === null ? finding.path : `${finding.path}:${finding.line}`
 }
 
 export function emptyLedger(runId: string): ReviewLedger {

@@ -156,7 +156,7 @@ export function ownerLayoutJobs(requirements: readonly ManualRequirement[], exis
     const job: ChecklistItem = { id, jobId: "unusual_layout", n: JOB_TABLE.unusual_layout.n,
       title: `Analytics wiring left for you: ${path}`, owner: "code", state: "left_for_you", checks: [], allow: { files: [], create: [] }, note,
       ownerBoundary,
-      trigger: { finding: `${note}${wiring ? `\n\nFor you to copy into ${path}; preserve your consent code. The wizard did not add this wiring.\n\n\`\`\`js\n${wiring}\n\`\`\`` : ""}`, evidence: [{ file: path, line: first.ownerBoundary!.line }] } }
+      trigger: { finding: `${note}${wiring ? `\n\nFor you to copy into ${path}; keep your consent code as it is.\n\n\`\`\`js\n${wiring}\n\`\`\`` : ""}`, evidence: [{ file: path, line: first.ownerBoundary!.line }] } }
     occupied.push(job)
     return job
   })

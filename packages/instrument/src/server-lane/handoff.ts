@@ -73,6 +73,20 @@ export async function serverEventsPrSectionFromRepo(
   root: string,
   readText: (path: string) => Promise<string | null>
 ): Promise<string | null> {
+  const read = await serverEventsStepsFromRepo(root, readText)
+  if (!read) return null
+  const copy = serverLaneWizardCopy.handoff
+  return [`## ${copy.prHeading}`, "", copy.prIntro(read.file), "", ...read.steps.map((step, index) => `${index + 1}. ${step}`)].join("\n")
+}
+
+/**
+ * The hand-off's numbered steps (without their numbers) and its path, for a repo whose install receipt records it, or
+ * null. The report keeps them ("Before purchases reach Meta, do these steps"), word for word as the file says them.
+ */
+export async function serverEventsStepsFromRepo(
+  root: string,
+  readText: (path: string) => Promise<string | null>
+): Promise<{ file: string; steps: string[] } | null> {
   const receiptText = await readText(join(root, ".infinite", "install.json"))
   if (!receiptText) return null
   let receipt: Partial<InstallManifest>
@@ -85,9 +99,8 @@ export async function serverEventsPrSectionFromRepo(
   if (!handoffPath) return null
   const text = await readText(join(root, handoffPath))
   if (!text || !text.startsWith(SERVER_EVENTS_HANDOFF_BANNER)) return null
-  const steps = text.split("\n").filter((line) => /^\d+\. /.test(line))
-  const copy = serverLaneWizardCopy.handoff
-  return [`## ${copy.prHeading}`, "", copy.prIntro(handoffPath), "", ...steps].join("\n")
+  const steps = text.split("\n").filter((line) => /^\d+\. /.test(line)).map((line) => line.replace(/^\d+\. /, ""))
+  return { file: handoffPath, steps }
 }
 
 /**

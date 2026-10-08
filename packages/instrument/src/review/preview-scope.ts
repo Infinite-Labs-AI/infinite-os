@@ -1,3 +1,4 @@
+import { andWords } from "../wizard/pr-summary.js"
 import type { ChecklistItem, CheckResult } from "../wizard/contracts/jobs.js"
 import type { TestTool } from "../wizard/contracts/test-engine.js"
 
@@ -11,6 +12,7 @@ export function previewScope(grades: Partial<Record<TestTool, CheckResult>>, lef
   const state = states.some(grade => grade?.state === "problem" && grade.reason?.startsWith("previews_send_data")) ? "problem"
     : states.some(grade => !grade || grade.state !== "pass") ? "undetermined"
     : active.length > 0 ? "pass" : "info"
-  const labels = left.map(tool => ({ ga4: "GA4", posthog: "PostHog", meta: "Meta", infinite: "Infinite" }[tool])).join(", ")
-  return { state, note: `NOT DONE for ${labels}: guard left for the owner; preview and local visits keep counting` }
+  const labels = left.map(tool => ({ ga4: "GA4", posthog: "PostHog", meta: "Meta pixel", infinite: "Infinite" }[tool]))
+  // A short cell: the action itself ("add the preview guard to …") is said once, in the report's "For you" list.
+  return { state, note: `for you: the preview guard for ${andWords(labels)}` }
 }

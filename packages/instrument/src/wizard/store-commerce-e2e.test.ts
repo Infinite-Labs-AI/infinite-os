@@ -430,7 +430,7 @@ describe("store: the wizard's own scan, plan and briefs", () => {
     expect(lead).toContain("trackingAllowed: body.adMatch === true")
     expect(lead).toContain('"pages/mailing-list.tsx"')
     expect(lead).toContain('("pages/mailing-list.tsx" line 27, a JSON fetch)')
-    expect(lead).toContain('`adMatch: getConsent() === "granted"` in the JSON body it sends, which the route reads as `body.adMatch === true` (as the code above does).')
+    expect(lead).toContain('`adMatch: getConsent() === "granted"` in the JSON body it sends, read while the body is built for that request, which the route reads as `body.adMatch === true` (as the code above does).')
     expect(lead).toContain("`body` the parsed request body (`req.body`)")
     expect(lead).toContain("fallbackId: signupId")
     // The form's own page (live run 6: the code said "/" while the text said the form's page).

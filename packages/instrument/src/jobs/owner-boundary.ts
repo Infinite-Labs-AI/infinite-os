@@ -6,8 +6,15 @@ import type { OwnerBoundaryMeasurement } from "./owner-diff.js"
 const OLD_FINAL_BOUNDARY = "Your consent code and privacy policy are yours; this run changed neither (checked against the final diff)."
 const OLD_RECORDED_BOUNDARY = "Your consent code and privacy policy are yours; this run changed neither (checked against this run’s recorded commits)."
 const OLD_COMMIT_BOUNDARY = "This run did not edit your privacy or terms pages, or any code where it recognised a consent call (checked against the commits it made). Consent and privacy are yours: please review the files this run changed."
-/** One plain line, said only when the run's own commits were measured against the site's consent code and policy pages. */
+/**
+ * The old disclaimer, said when the run's own commits were measured against the site's consent code and policy pages.
+ * Retired (founder rule: never narrate what we did not touch): a clean measurement now shows only the files changed.
+ * Kept so a saved report or posted comment that carries it is cleaned up when it is rendered again.
+ */
 export const OWNER_BOUNDARY = "This run left your cookie banner, consent code and privacy pages as they were."
+/** The heading of the short list of files the pull request changes (old saved texts say "Changed files"). */
+export const FILES_CHANGED = "Files changed"
+const FILES_BLOCK = /^(?:Changed files|Files changed)(?: \(branch history; ownership unverified\))?:/
 const OLD_UNMEASURED = "Your consent code and privacy policy are yours; the final diff has not been checked."
 export const OWNER_BOUNDARY_UNMEASURED = "This run could not check its own commits against your consent code and policy pages (no wizard commits were measured); please review the changed files."
 const FOUND_OWNER_EDIT = "This run checked its own commits and found an edit to your consent code or policy pages"
@@ -57,32 +64,33 @@ export function withOwnerBoundary(text: string, priorPolicyEdits = false, measur
   const savedReason = /This run could not check its own commits against your consent code and policy pages \(([^\n]*?)\); please review the changed files\./.exec(text)?.[1]
   const savedFoundReason = /This run checked its own commits and found an edit to your consent code or policy pages \(([^\n]*?)\); please review the changed files\./.exec(text)?.[1]
   const foundEdit = measurement?.state === "changed" || (!measurement && savedFoundReason !== undefined)
-  const savedFiles = text.split(/\n\s*\n/).find(block => /^Changed files(?: \(branch history; ownership unverified\))?:/.test(block.trim()))
+  const savedFiles = text.split(/\n\s*\n/).find(block => FILES_BLOCK.test(block.trim()))
   const reason = foundEdit ? (measurement?.issues?.map(issue => issue.reason).join("; ") || savedFoundReason || "the measured diff contains an owner-code edit") : legacy ? "an earlier version of this run recorded policy edits" : measurement?.unverifiedReason ??
     (measurement?.issues?.length ? measurement.issues.map(issue => issue.reason).join("; ") : !measurement && savedReason ? savedReason : "no wizard commits were measured")
-  const statement = measured ? OWNER_BOUNDARY : `${foundEdit ? FOUND_OWNER_EDIT : "This run could not check its own commits against your consent code and policy pages"} (${safeDisplayText(scanner, reason).replace(/[\r\n]/g, " ").slice(0, 140)}); please review the changed files.`
+  // Measured clean: nothing to say about the owner's consent code (the list of files changed is enough).
+  const statement = measured ? "" : `${foundEdit ? FOUND_OWNER_EDIT : "This run could not check its own commits against your consent code and policy pages"} (${safeDisplayText(scanner, reason).replace(/[\r\n]/g, " ").slice(0, 140)}); please review the changed files.`
   const files = [...new Set(measurement?.files ?? [])]
   const listed = files.slice(0, 20).map(file => `- ${safeDisplayText(scanner, file).replace(/[\r\n\t]/g, " ").replace(/`/g, "'").slice(0, 240)}`)
-  const changed = !measurement && savedFiles ? safeDisplayText(scanner, savedFiles).split("\n").slice(0, 22).map(line => line.slice(0, 245)).join("\n") : files.length ? [`Changed files${measurement?.fileScope === "branch_history" ? " (branch history; ownership unverified)" : ""}:`, ...listed,
-    ...(files.length > listed.length ? [`- … ${files.length - listed.length} more changed files; review the complete Git diff.`] : [])].join("\n")
-    : measurement?.filesAvailable ? "Changed files: none found in the available diff." : "Changed files: unavailable from the saved run."
+  const changed = !measurement && savedFiles ? safeDisplayText(scanner, savedFiles).replace(/^Changed files/, FILES_CHANGED).split("\n").slice(0, 22).map(line => line.slice(0, 245)).join("\n") : files.length ? [`${FILES_CHANGED}${measurement?.fileScope === "branch_history" ? " (branch history; ownership unverified)" : ""}:`, ...listed,
+    ...(files.length > listed.length ? [`- … and ${files.length - listed.length} more (the pull request's diff lists them all)`] : [])].join("\n")
+    : measurement?.filesAvailable ? `${FILES_CHANGED}: none found in the available diff.` : `${FILES_CHANGED}: unavailable from the saved run.`
   // Re-render saved reports by replacing our exact old/new status paragraphs, including their list.
   let result = text
   for (const old of previousStatements) result = result.replaceAll(old, "")
-  result = result.split(/\n\s*\n/).filter(block => !isOwnerBoundaryStatement(block) && !/^Changed files(?: \(branch history; ownership unverified\))?:/.test(block.trim())).join("\n\n").trim()
+  result = result.split(/\n\s*\n/).filter(block => !isOwnerBoundaryStatement(block) && !FILES_BLOCK.test(block.trim())).join("\n\n").trim()
   return [result, statement, changed].filter(Boolean).join("\n\n")
 }
 
 /** Compact cloud notes keep the complete claim/reason and an explicitly bounded path summary. */
 export function ownerBoundaryNotes(text: string, priorPolicyEdits: boolean, measurement?: Partial<OwnerBoundaryMeasurement>): string[] {
   const blocks = withOwnerBoundary(text, priorPolicyEdits, measurement).split(/\n\s*\n/)
-  const statement = blocks.find(block => block.startsWith(OWNER_BOUNDARY) || block.startsWith(FOUND_OWNER_EDIT) || block.startsWith("This run could not check"))!
-  const files = blocks.find(block => block.startsWith("Changed files"))!
-  if (!files.includes("\n")) return [statement, files]
+  const statement = blocks.find(block => block.startsWith(FOUND_OWNER_EDIT) || block.startsWith("This run could not check"))
+  const files = blocks.find(block => FILES_BLOCK.test(block))!
+  if (!files.includes("\n")) return statement ? [statement, files] : [files]
   const rows = files.split("\n").slice(1).filter(row => !row.startsWith("- …"))
   const shown = rows.slice(0, 3).map(row => row.replace(/^- /, "").slice(0, 48))
   const extra = Math.max(0, (measurement?.files?.length ?? rows.length) - shown.length)
-  return [statement, `${files.split("\n")[0]} ${shown.join("; ")}${extra ? `; … ${extra} more changed files (full Git diff).` : ""}`]
+  return [...(statement ? [statement] : []), `${files.split("\n")[0]} ${shown.join("; ")}${extra ? `; and ${extra} more.` : ""}`]
 }
 
 /**
@@ -107,7 +115,7 @@ const OWNER_CHANGE: Readonly<Record<string, string>> = {
  * Why the "For you" changes are the owner's, said ONCE per report (never repeated on every line): they sit in the code
  * that starts the site's trackers after its cookie banner, which the wizard never edits.
  */
-export const OWNER_CODE_REASON = "The \"For you\" changes below are in the code that starts your trackers after your cookie banner. The wizard never edits that code, so they are yours to make."
+export const OWNER_CODE_REASON = "These changes sit in the code that starts your trackers after your cookie banner, so they are yours to make."
 
 /**
  * A setup check the wizard could not fix itself, as the concrete action left for the owner. Never the check id or an
@@ -164,7 +172,7 @@ export function ownerGuardHandoff(note: string, location: { file?: string; line?
 /** Recognize only our standalone status sentences, not words inside reviewer findings. */
 export function isOwnerBoundaryStatement(note: string): boolean {
   const text = note.trim()
-  return previousStatements.includes(text) || text.startsWith(OWNER_BOUNDARY) || text.startsWith(FOUND_OWNER_EDIT) || text.startsWith("This run could not check its own commits against your consent code and policy pages (") || /^Changed files(?: \(branch history; ownership unverified\))?:/.test(text) || text.startsWith("Your consent code and privacy policy are yours. An earlier version of this run recorded policy edits;")
+  return previousStatements.includes(text) || text.startsWith(OWNER_BOUNDARY) || text.startsWith(FOUND_OWNER_EDIT) || text.startsWith("This run could not check its own commits against your consent code and policy pages (") || FILES_BLOCK.test(text) || text.startsWith("Your consent code and privacy policy are yours. An earlier version of this run recorded policy edits;")
 }
 export function hasLegacyOwnerHistory(notes: readonly string[]): boolean {
   return notes.some(note => note === OLD_LEGACY_OWNER_BOUNDARY || note === LEGACY_OWNER_BOUNDARY || note.startsWith("Your consent code and privacy policy are yours. An earlier version of this run recorded policy edits;") || note.includes("(an earlier version of this run recorded policy edits)"))

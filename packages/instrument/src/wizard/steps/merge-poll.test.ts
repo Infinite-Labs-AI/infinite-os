@@ -125,7 +125,7 @@ describe("merge-ready: the card says incomplete, and the in-PR report reaches In
     const outcome = await step.run(ctx, deps)
     expect(outcome.kind).toBe("ok")
     const payload = ctx.asks.find((ask) => ask.kind === "merge-ready")!.payload as { number: number; summary: string; incomplete?: string; prUrl: string }
-    expect(payload.incomplete).toBe("5 approved fixes are not in the code (Remove duplicate tags, Keep previews silent (existing tags), Keep previews silent (existing tags) +2 more)")
+    expect(payload.incomplete).toBe("5 approved fixes are not in the code (Remove duplicate tags, Keep previews silent (existing tags), Keep previews silent (existing tags) and 2 more)")
     const view = mergeReadyOverlay.render(payload, {}, { sanitize: (text: string) => text, styles: { info: (text: string) => text } } as never)
     expect(view.heading).toBe("Ready to merge, but incomplete")
     expect(view.question).toMatch(/^Pull request #2 does not have everything the plan approved: 5 approved fixes are not in the code \(.*\)\. Merging ships only what is in it\./)

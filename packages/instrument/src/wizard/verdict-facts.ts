@@ -16,7 +16,10 @@ import { openFindings, parseLedger, REVIEW_LEDGER_PATH } from "../review/ledger.
 import { wizardOwnership } from "../review/ownership.js"
 import type { WizardContext, WizardDeps } from "./contracts/deps.js"
 import type { WizardGitOps } from "./contracts/git-host.js"
-import type { VerdictFacts } from "./contracts/report.js"
+import type { OwnerSetupSteps, VerdictFacts } from "./contracts/report.js"
+import { jobStaticRunContext } from "./deps.js"
+import { findingSentence, prDoesSentence } from "./pr-summary.js"
+import { serverEventsStepsFromRepo } from "../server-lane/handoff.js"
 
 export async function verdictFactsFor(ctx: WizardContext, deps: WizardDeps): Promise<VerdictFacts> {
   const reanchoredJobs = await reanchorOwnerLocations(ctx.root, ctx.state.get().jobs)
@@ -76,9 +79,38 @@ export async function verdictFactsFor(ctx: WizardContext, deps: WizardDeps): Pro
       return { ...job, title: display(job.title), allow: { files: job.allow.files.map(display), create: job.allow.create.map(display) },
         ...(boundary ? { ownerBoundary: boundary } : {}), ...(note ? { note } : {}) }
     }),
-    openFindings: openFindings(ledger, state.jobs, ownership.classify, ownership.writtenByRun).map(finding => ({ ...finding, path: finding.path === null ? null : display(finding.path) })),
+    openFindings: openFindings(ledger, state.jobs, ownership.classify, ownership.writtenByRun).map(finding => {
+      // The finding in the reviewer's own words (its first sentences), scanned: the report lists it in plain words.
+      const recorded = (ledger.findings ?? []).find(entry => entry.findingId === finding.findingId && entry.path === finding.path && entry.item === finding.item)?.body ??
+        [...ledger.rounds].reverse().flatMap(round => round.review?.findings ?? []).find(entry => entry.id === finding.findingId && entry.path === finding.path)?.body
+      return { ...finding, path: finding.path === null ? null : display(finding.path), summary: recorded ? display(findingSentence(recorded)) : null }
+    }),
+    does: (() => {
+      const does = prDoesSentence(state.jobs, { metaInUse: metaInUseFor(ctx.root, runId) })
+      return does === null ? null : display(does)
+    })(),
+    ownerSteps: await ownerStepsFor(ctx, deps, state.jobs),
     tools: state.proof?.tools ?? null,
     installedUnknown: state.proof?.installedUnknown ?? null
   }
 }
 import { consentActivationFor } from "../install/consent-handoff.js"
+
+/** Whether Meta gets this site's conversions (connected in Infinite, or the site runs a pixel); unknown = undefined. */
+function metaInUseFor(root: string, runId: string): boolean | undefined {
+  try {
+    return jobStaticRunContext(root, runId || null).metaInUse
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * The owner's setup steps for the server conversions this pull request wires, read from the hand-off file it adds
+ * (`docs/infinite-server-events.md`, the same words as the pull request's section). Null when it wires none.
+ */
+async function ownerStepsFor(ctx: WizardContext, deps: WizardDeps, jobs: readonly { jobId: string; id: string }[]): Promise<OwnerSetupSteps | null> {
+  const read = await serverEventsStepsFromRepo(ctx.root, (path) => deps.fs.readText(path)).catch(() => null)
+  if (!read || read.steps.length === 0) return null
+  return { ...read, purchase: jobs.some((job) => job.id === "server_conversions:purchase") }
+}

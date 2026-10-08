@@ -28,6 +28,7 @@ import { WizardEventEmitter } from "./events.js"
 import { nodeWizardFs, systemClock } from "./fs.js"
 import { acquireRunLock, type RunLockHandle } from "./lock.js"
 import { renderTerminal } from "./report.js"
+import { serverEventsStepsFromRepo } from "../server-lane/handoff.js"
 import { RunStateFile, WIZARD_REPORT_PATHS, createRunState, firstOpenStep, loadRunState, setStateAside, stateFilePath } from "./run-state.js"
 import { WIZARD_PATHS } from "./contracts/state.js"
 import { installInterruptHandlers, runInterruptSequence, type SignalSource } from "./signals.js"
@@ -393,11 +394,15 @@ async function runLocked(input: LockedRun): Promise<number> {
         const display = (text: string) => safeDisplayText(scanner, text)
         const ownerBoundary = { ...measured, files: measured.files.map(display), issues: measured.issues.map(issue => ({ file: display(issue.file), reason: display(issue.reason) })),
           ...(measured.unverifiedReason ? { unverifiedReason: display(measured.unverifiedReason) } : {}) }
+        // The owner's setup steps before server conversions reach Meta, word for word from the hand-off file.
+        const handoff = await serverEventsStepsFromRepo(root, (path) => fsp.readFile(path, "utf8").catch(() => null)).catch(() => null)
+        const ownerSteps = handoff && handoff.steps.length > 0 ? { ...handoff, purchase: (state?.jobs ?? []).some((job) => job.id === "server_conversions:purchase") } : null
         store.setOutro(
           renderTerminal(report, outroWidth(io.stdout.columns), {
             displayId: state?.displayId ?? null,
             ownerBoundary,
             ownerJobs: state?.jobs ?? [],
+            ownerSteps,
             durationMs: Number.isFinite(startedAt) ? Math.max(0, systemClock.now().getTime() - startedAt) : null
           })
         )

@@ -920,8 +920,28 @@ export function withDistinctTitles(items: readonly ChecklistItem[]): ChecklistIt
   const perJob = new Map<string, number>()
   for (const item of items) perJob.set(item.jobId, (perJob.get(item.jobId) ?? 0) + 1)
   return items.map((item) =>
-    item.jobId in JOB_TABLE && item.title === JOB_TABLE[item.jobId as keyof typeof JOB_TABLE].title && (perJob.get(item.jobId) ?? 0) > 1 ? { ...item, title: `${item.title}: ${itemTarget(item)}` } : item
+    item.jobId in JOB_TABLE && item.title === JOB_TABLE[item.jobId as keyof typeof JOB_TABLE].title && (perJob.get(item.jobId) ?? 0) > 1 ? { ...item, title: `${item.title}: ${targetWords(itemTarget(item))}` } : item
   )
+}
+
+/** A job target in plain words for a title ("history_change" is a key; "page-change counting" is what it does). */
+const TARGET_WORDS: Readonly<Record<string, string>> = {
+  history_change: "page-change counting",
+  defaults: "recommended settings",
+  sensitive_pages: "sensitive pages",
+  proxy: "your own domain route",
+  spa_page_view: "page-change counting",
+  autoconfig_off_adopted: "automatic events off",
+  click_id_capture: "ad click capture",
+  silent_form: "a form that sends nothing",
+  commerce_events: "shop events",
+  capture: "ad click capture",
+  retire_fbc_writer: "the old click cookie writer",
+  mirror: "the server's event id"
+}
+
+export function targetWords(target: string): string {
+  return TARGET_WORDS[target] ?? target.replace(/[_:]+/g, " ").trim()
 }
 
 // ---------------------------------------------------------------------------------------------

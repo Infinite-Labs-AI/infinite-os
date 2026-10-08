@@ -37,15 +37,19 @@ it("gives the owner the exact guard and edit location as copyable plan text and 
   expect(report.notes.every(note => note.length <= 300 && !note.includes("```"))).toBe(true)
   expect(renderMarkdown(report, undefined, saved)).toContain(saved[0]!.ownerBoundary!.guard!)
 })
-it("shows previews silent as NOT DONE for the affected tool, with no run failure", () => {
+it("shows previews silent as the owner's preview guard for the affected tool (said once, in For you), with no run failure", () => {
   const pass: Cell = { state: "pass", value: "pass", display: "previews silent", provenance: { source: "wizard_check", at: "2026-10-07T00:00:00Z", runId: RUN } }
   const job = ownerJob()
   const report = buildReport({ runId: RUN, tagVersion: "0.0.0", site: { repoLabel: "example/site", productionHost: null }, columns: { live_today: null, in_pr: { meta: { measuredAt: "2026-10-07T00:00:00Z", sha: "a".repeat(40) }, cells: {}, finishLine: { previews_silent: pass } }, proven_live: null }, provenLivePending: null, day7: null, notes: [], verdictFacts: { jobs: [job], openFindings: [], tools: null, installedUnknown: null } })
   const cell = report.finishLine.find(line => line.id === "previews_silent")!.cells.in_pr
   expect(cell.state).toBe("info")
-  expect(cell.display).toMatch(/NOT DONE.*Meta/i)
+  expect(cell.display).toBe("for you: the preview guard for Meta pixel")
   expect(report.verdict?.reasons.some(reason => reason.kind === "approved_fix_missing")).toBe(false)
-  expect(renderMarkdown(report)).toContain("preview and local visits keep counting")
+  const text = renderMarkdown(report)
+  // The action is said ONCE, in the "For you" list; no table cell or note repeats it.
+  expect(text).toContain("### For you")
+  expect(text.split("preview and local visits count in Meta pixel")).toHaveLength(2)
+  expect(text).not.toMatch(/NOT DONE|left for the owner|keep counting/)
 })
 
 it.each([ "fbq('init', '123456789');",])("renders a real single-statement guard diff without a placeholder: %s", async statement => {
@@ -103,12 +107,14 @@ it("a setup check the owner must finish is the concrete action, never its check 
   }
 })
 
-it("the owner-boundary statement is one plain line", async () => {
+it("a clean measured run says only which files changed, never a disclaimer about what it did not touch", async () => {
   const { OWNER_BOUNDARY, withOwnerBoundary } = await import("./owner-boundary.js")
-  expect(OWNER_BOUNDARY).toBe("This run left your cookie banner, consent code and privacy pages as they were.")
   const measured = { state: "checked" as const, scope: "commit" as const, measuredCommitCount: 1, wizardCommits: ["a".repeat(40)], issues: [], files: ["lib/infinite-analytics.ts"], filesAvailable: true }
   const text = withOwnerBoundary("", false, measured)
-  expect(text.split("\n\n")[0]).toBe(OWNER_BOUNDARY)
+  expect(text).toBe("Files changed:\n- lib/infinite-analytics.ts")
+  expect(text).not.toContain(OWNER_BOUNDARY)
+  // A saved text that still carries the old disclaimer and list is cleaned to the short list.
+  expect(withOwnerBoundary(`${OWNER_BOUNDARY}\n\nChanged files:\n- lib/infinite-analytics.ts`, false, measured)).toBe(text)
   expect(text).not.toMatch(/recognised a consent call|Consent and privacy are yours/)
   // A saved report's old sentence is replaced, never shown beside the new one.
   const resaved = withOwnerBoundary("This run did not edit your privacy or terms pages, or any code where it recognised a consent call (checked against the commits it made). Consent and privacy are yours: please review the files this run changed.", false, measured)

@@ -7,7 +7,7 @@ import { safeDisplayText, neutralizeTaskCheckboxes, quoteDisplayNote, redactDisp
 // never posted. On a public repo, a provider ID that is not already in the diff is shown as `<id>`.
 import type { OwnerBoundaryMeasurement } from "../jobs/owner-diff.js"
 import { hasRecordedPolicyEdits, withOwnerBoundary } from "../jobs/owner-boundary.js"
-import { omitOwnerPolicyReview } from "./brief.js"
+import { omitOwnerPolicyReview, reviewItemTitle } from "./brief.js"
 import { sanitizeUntrustedBlock } from "../agents/sanitize.js"
 import { AGENT_LIMITS, type AgentKind, type ReviewResult } from "../wizard/contracts/agents.js"
 import { PR_MARKERS } from "../wizard/contracts/git-host.js"
@@ -73,7 +73,14 @@ export function buildPrBody(input: {
   return `${body}\n\n${PR_MARKERS.pr(input.runId)}\n`
 }
 
+/** The hidden marker naming a thread's finding (`F1`): the wizard reads it back; people never see it. */
+export function findingMarker(id: string): string {
+  return `<!-- infinite-tag:finding ${/^F\d{1,2}$/.test(id) ? id : "F0"} -->`
+}
+
 const STATUS_TEXT = { pass: "pass", fail: "fail", cant_tell: "can't tell" } as const
+/** How much a finding matters, in plain words. */
+const SEVERITY_TEXT = { blocker: "must fix", should: "should fix", nit: "minor", question: "question" } as const
 
 export interface ReviewPost {
   body: string
@@ -111,26 +118,27 @@ export function buildReviewPost(input: {
       ? `A finding on ${location} was withheld because it quoted a secret or personal data.`
       : scanned
     const ownerInfo = ownerInformationOnly(finding)
-    const label = `**[${finding.item} ${finding.severity}]** ${finding.id}`
+    const label = `**${reviewItemTitle(finding.item)} (${SEVERITY_TEXT[finding.severity as keyof typeof SEVERITY_TEXT] ?? finding.severity})**`
     if (ownerInfo) {
       inBody.push(finding.id)
       ownerFindings.push(`- ${label} ${location}: ${text.replace(/\n+/g, " ")}`)
       continue
     }
     if (finding.line !== null && path === finding.path && lineInHunk(input.diffFiles, finding.path, finding.line)) {
-      threads.push({ path: finding.path, line: finding.line, body: `${neutralizeCheckboxes(`${label}\n\n${text}`)}\n\n${marker}` })
+      // The finding's id rides in a hidden marker (the wizard matches its own thread to the finding), never on screen.
+      threads.push({ path: finding.path, line: finding.line, body: `${neutralizeCheckboxes(`${label}\n\n${text}`)}\n\n${findingMarker(finding.id)}\n${marker}` })
     } else {
       inBody.push(finding.id)
       bodyFindings.push(`- ${label} \`${location.replace(/`/g, "'")}\`: ${text.replace(/\n+/g, " ")}`)
     }
   }
   const checklist = input.review.checklist
-    .map((row) => `| ${row.item} | ${STATUS_TEXT[row.status]} | ${escapeCell(row.note, input.scanner)} |`)
+    .map((row) => `| ${reviewItemTitle(row.item)} | ${STATUS_TEXT[row.status]} | ${escapeCell(row.note, input.scanner)} |`)
     .join("\n")
   const onlyInfo = input.review.findings.length > 0 && input.review.findings.every(ownerInformationOnly)
   const protectedOpen = input.review.findings.some(protectedFinding)
   const verdict = protectedOpen ? "changes suggested" : onlyInfo && input.review.checklist.every(row => row.status !== "fail") ? "owner information only" : input.review.verdict === "looks_good" ? "looks good" : "changes suggested"
-  const unchecked = input.unchecked?.length ? input.unchecked : input.review.checklist.length === 0 ? ["no checklist rows"] : input.completeness !== "complete" ? ["read-check not verified"] : []
+  const unchecked = (input.unchecked?.length ? input.unchecked : input.review.checklist.length === 0 ? ["no checklist rows"] : input.completeness !== "complete" ? ["read-check not verified"] : []).map(reviewItemTitle)
   const header =
     unchecked.length > 0
       ? `**Second review by ${AGENT_LABEL[input.reviewer]} (round ${input.round}): incomplete — unchecked: ${unchecked.join(", ")}.** Posted by infinite-tag; a review is an opinion, not a receipt.`
@@ -139,7 +147,7 @@ export function buildReviewPost(input: {
     header,
     "Owner actions and copyable handoffs are in the pull request body.",
     `**Reviewer summary (quoted):**\n\n${safeDisplayText(input.scanner, input.review.summary).split("\n").map(line => `> ${line}`).join("\n")}`,
-    checklist ? `| Item | Status | Note |\n|---|---|---|\n${checklist}` : "",
+    checklist ? `| Check | Status | Note |\n|---|---|---|\n${checklist}` : "",
     ownerFindings.length > 0 ? `**${OWNER_INFORMATION_HEADING}**\n\n${ownerFindings.join("\n")}` : "",
     bodyFindings.length > 0 ? `**Notes outside the changed lines**\n\n${bodyFindings.join("\n")}` : ""
   ]
@@ -212,7 +220,7 @@ export function buildReply(scanner: Scanner, decision: TriageDecision, fix: FixR
           ? `Changed in ${fix.sha.slice(0, 7)}. The required checks had not finished, so the wizard has not marked it done; it stays open.`
           : notFixedReply(fix?.kind === "not_fixed" ? (fix.outcome ?? "checks_failed") : "checks_failed", fix?.kind === "not_fixed" ? fix.why : null, scanner)
       : decision.action === "INFINITE"
-        ? `This is ${decision.label ?? "Infinite's own code"} (${safeDisplayText(scanner, decision.item.path ?? "general")}), which the wizard never hands to your agent. The finding is recorded in this run's report for Infinite to fix.`
+        ? `This is in Infinite's own file (${safeDisplayText(scanner, decision.item.path ?? "general")}): Infinite fixes it in its own code. It is not yours to change and it does not hold this pull request.`
       : decision.action === "ASK" && decision.leftByOwner && !ownerInformationOnly(decision.item)
         ? safeDisplayText(scanner, decision.reason)
       : decision.action === "ASK"
@@ -253,6 +261,10 @@ export function jobStateCell(job: ChecklistItem): string {
   return `${state}${job.blockedReason ? ` (${job.blockedReason.replace(/_/g, " ")})` : ""}`
 }
 
+/** The heading of the per-job states (the wizard's own checks). Old comments carry the earlier heading. */
+const CHECKLIST_HEADING = "**Each job, as the wizard checked it**"
+const OLD_CHECKLIST_HEADING = "**Checklist (the wizard's own checks"
+
 /** Fence length is chosen from the source so a comment/string cannot escape into live Markdown. */
 function ownerSnippet(text: string, language: string, scanner: Scanner): string {
   if (safeText(scanner, text) !== text) return "The copyable snippet was withheld because it contains private data, terminal controls, or exceeds the display limit. Review the named file locally."
@@ -266,21 +278,21 @@ export function buildChecklist(jobs: readonly ChecklistItem[], scanner: Scanner 
   const unfinished = new Set(notDoneJobs(jobs).map(item => item.id))
   const notDone = alreadyShownOwnerText.includes("### Not done, left for you") ? "" : unfinished.size > 0
     ? `### Not done, left for you\n\n${notDoneJobs(jobs).map(item => `- ${escapeCell(notDoneDescription(item), scanner)}`).join("\n")}` : ""
-  const rows = jobs.filter(job => !unfinished.has(job.id)).map((job) => {
-    const ownerShown = job.state === "left_for_you" && job.ownerBoundary && job.note && alreadyShownOwnerText.includes(safeDisplayText(scanner, job.note))
-    return `| ${escapeCell(job.title, scanner)} | ${escapeCell(ownerShown ? "Left for you; see the owner action above." : jobStateCell(job), scanner)} |`
-  }).join("\n")
+  // A job the report's "For you" list already carries is said there once, never again as a row here.
+  const ownerShown = (job: ChecklistItem) => job.state === "left_for_you" && !!job.ownerBoundary && !!job.note &&
+    (alreadyShownOwnerText.includes(safeDisplayText(scanner, job.note)) || alreadyShownOwnerText.includes(safeDisplayText(scanner, job.note.replace(/^For you:\s*/, "")).replace(/^./, (c) => c.toUpperCase())))
+  const rows = jobs.filter(job => !unfinished.has(job.id) && !ownerShown(job)).map((job) => `| ${escapeCell(job.title, scanner)} | ${escapeCell(jobStateCell(job), scanner)} |`).join("\n")
   const guards = jobs.filter(job => job.state === "left_for_you" && job.ownerBoundary?.kind === "frozen_unit" && job.ownerBoundary.guard && !alreadyShownOwnerText.includes(job.ownerBoundary.guard)).map(job => {
     const scope = job.ownerBoundary!
     const where = escapeCell(`${scope.file ?? job.allow.files[0] ?? "the noted file"}:${scope.line ?? 1}`, scanner)
-    return `**For the site owner: ${escapeCell(job.title, scanner)}**\n\nApply this condition to the analytics start-up at ${where}. Keep your consent, grant and revoke code outside the guard. This snippet is for you to copy; the wizard did not edit that unit.\n\n${ownerSnippet(scope.guard!, scope.guard!.startsWith("--- a/") ? "diff" : "js", scanner)}`
+    return `**For you: ${escapeCell(job.title, scanner)}**\n\nAdd this condition to the analytics start-up at ${where}. Keep your consent, grant and revoke code outside it.\n\n${ownerSnippet(scope.guard!, scope.guard!.startsWith("--- a/") ? "diff" : "js", scanner)}`
   })
   const wiring = jobs.filter(job => job.state === "left_for_you" && job.ownerBoundary?.wiring && !alreadyShownOwnerText.includes(job.ownerBoundary.wiring)).map(job => {
     const scope = job.ownerBoundary!
     const where = escapeCell(scope.file ?? job.allow.files[0] ?? "the noted entrypoint", scanner)
-    return `**For the site owner: wiring at ${where}**\n\nThe wizard left this entrypoint untouched. The import, mount or script below is for you to place; it has not been applied.\n\n${ownerSnippet(scope.wiring!, "text", scanner)}`
+    return `**For you: wiring at ${where}**\n\nAdd this import, mount or script there.\n\n${ownerSnippet(scope.wiring!, "text", scanner)}`
   })
-  return [notDone, `**Checklist (the wizard's own checks, never the agent's word)**\n\n| Job | State |\n|---|---|\n${rows}`, ...guards, ...wiring].filter(Boolean).join("\n\n")
+  return [notDone, rows ? `${CHECKLIST_HEADING}\n\n| Job | State |\n|---|---|\n${rows}` : "", ...guards, ...wiring].filter(Boolean).join("\n\n")
 }
 
 /** §3g.4 step 9: the before/after table, the checklist states, declined items with reasons, and what the user decides. */
@@ -343,7 +355,7 @@ export const FINAL_COMMENT_MERGE_LINE = "Merge when you're happy. After it deplo
 export const FINAL_COMMENT_UPDATED_LINE = "Updated after the live check: the table above is the run's final report, the same one as in the terminal and in Infinite."
 
 /** The sections that follow the report in `buildFinalComment` (the report ends where the first of them starts). */
-const AFTER_REPORT = ["\n\n**Checklist (the wizard's own checks", "\n\n**Declined, with reasons**", "\n\n**You decide**", "\n\n**Left by the repo owner**", "\n\n**Questions answered from this run's checks**", "\n\n**Comments from people outside the repo", `\n\n${FINAL_COMMENT_MERGE_LINE}`, `\n\n${FINAL_COMMENT_UPDATED_LINE}`, "\n\n<!-- infinite-tag:"]
+const AFTER_REPORT = [`\n\n${CHECKLIST_HEADING}`, `\n\n${OLD_CHECKLIST_HEADING}`, "\n\n**Declined, with reasons**", "\n\n**You decide**", "\n\n**Left by the repo owner**", "\n\n**Questions answered from this run's checks**", "\n\n**Comments from people outside the repo", `\n\n${FINAL_COMMENT_MERGE_LINE}`, `\n\n${FINAL_COMMENT_UPDATED_LINE}`, "\n\n<!-- infinite-tag:"]
 
 /**
  * R2-5 (live run 2): the "what happened" comment with its report replaced by the final one (after Prove), so the PR,
@@ -373,9 +385,9 @@ export function withFinalReport(body: string, reportMarkdown: string, checklistM
   const end = Math.min(...ends)
   let tail = body.slice(end)
   if (checklistMarkdown !== undefined) {
-    const checklistStart = tail.indexOf(AFTER_REPORT[0]!)
+    const checklistStart = [AFTER_REPORT[0]!, AFTER_REPORT[1]!].map((marker) => tail.indexOf(marker)).filter((index) => index >= 0).sort((a, b) => a - b)[0] ?? -1
     if (checklistStart >= 0) {
-      const following = AFTER_REPORT.slice(1).map((marker) => tail.indexOf(marker, checklistStart + 2)).filter((index) => index >= 0)
+      const following = AFTER_REPORT.slice(2).map((marker) => tail.indexOf(marker, checklistStart + 2)).filter((index) => index >= 0)
       if (notesStart > end + checklistStart) following.push(notesStart - end)
       const checklistEnd = following.length > 0 ? Math.min(...following) : tail.length
       tail = tail.slice(0, checklistStart) + tail.slice(checklistEnd)

@@ -206,6 +206,18 @@ export interface VerdictOpenFinding {
   path: string | null
   line: number | null
   label: "Infinite's own code" | "the wizard's own change" | null
+  /** The finding in the reviewer's own words, scanned for display (its first sentences); absent = not recorded. */
+  summary?: string | null
+}
+
+/** The owner's setup steps for server conversions, from the hand-off file the pull request adds. */
+export interface OwnerSetupSteps {
+  /** The hand-off file in the repo (`docs/infinite-server-events.md`). */
+  file: string
+  /** The numbered steps, in order, without their numbers. */
+  steps: string[]
+  /** The run reports a purchase from the server (the steps then come before purchases reach Meta). */
+  purchase: boolean
 }
 
 /** §3x.6 The run facts the verdict reads beyond the report's own columns. */
@@ -220,6 +232,10 @@ export interface VerdictFacts {
   priorPolicyEdits?: boolean
   jobs: readonly ChecklistItem[]
   openFindings: readonly VerdictOpenFinding[]
+  /** What the pull request does, in one plain sentence (from the event inventory and the jobs that are done). */
+  does?: string | null
+  /** The owner's setup steps before server conversions reach Meta; absent = the run wires none. */
+  ownerSteps?: OwnerSetupSteps | null
   /** Per tool under test; null = no real-visit facts this run. */
   tools: readonly VerdictToolFact[] | null
   /**
@@ -610,8 +626,8 @@ export interface ReportBuilder {
      */
     verdictFacts: VerdictFacts | null
   }): ReportV2
-  renderTerminal(report: ReportV2, width: number, options?: { ownerBoundary?: import("../../jobs/owner-diff.js").OwnerBoundaryMeasurement; ownerJobs?: readonly ChecklistItem[] }): string
+  renderTerminal(report: ReportV2, width: number, options?: { ownerBoundary?: import("../../jobs/owner-diff.js").OwnerBoundaryMeasurement; ownerJobs?: readonly ChecklistItem[]; ownerSteps?: OwnerSetupSteps | null }): string
   /** Plain-text statuses; never a literal `- [ ]`. */
-  renderMarkdown(report: ReportV2, ownerBoundary?: import("../../jobs/owner-diff.js").OwnerBoundaryMeasurement, ownerJobs?: readonly ChecklistItem[], excludedLines?: readonly string[]): string
+  renderMarkdown(report: ReportV2, ownerBoundary?: import("../../jobs/owner-diff.js").OwnerBoundaryMeasurement, ownerJobs?: readonly ChecklistItem[], excludedLines?: readonly string[], extras?: { ownerSteps?: OwnerSetupSteps | null; findings?: readonly VerdictOpenFinding[] }): string
   payload(report: ReportV2): ReportV2
 }
