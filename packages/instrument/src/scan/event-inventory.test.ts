@@ -274,6 +274,27 @@ describe("P1-A: how each Buy click leaves the page", () => {
   })
 })
 
+describe("Finding 7: the route-change hook counts only when its own callback does the full load", () => {
+  const events = `export function addToCart(id: string) {\n  window.gtag?.("event", "add_to_cart", { id })\n}\n`
+  const page = `import { addToCart } from "../src/events"\nexport default function A() {\n  const buy = () => {\n    addToCart("a")\n    void router.push("/cart")\n  }\n  return null\n}\n`
+  const hookOf = (app: string) => inline({ "src/events.ts": events, "pages/a.tsx": page, "pages/_app.tsx": app })
+
+  it("a progress bar on routeChangeStart beside an unrelated location.href is not the hook; router.push stays client routing", () => {
+    const app = `export default function App() {\n  useEffect(() => {\n    const start = () => document.body.classList.add("loading")\n    router.events.on("routeChangeStart", start)\n  }, [])\n  const signOut = () => { window.location.href = "/" }\n  return null\n}\n`
+    const inventory = hookOf(app)
+    expect(inventory.routeChangeFullLoad).toBeNull()
+    expect(inventoryEntry(inventory, "add_to_cart")!.sites.map((site) => site.navigation)).toEqual(["client"])
+  })
+
+  it("a named or inline callback that assigns the location is the hook", () => {
+    const named = `export default function App() {\n  useEffect(() => {\n    const hard = (url: string) => { window.location.assign(url) }\n    router.events.on("routeChangeStart", hard)\n  }, [])\n  return null\n}\n`
+    expect(hookOf(named).routeChangeFullLoad).toEqual({ file: "pages/_app.tsx", line: 4, via: "routeChangeStart" })
+    const inlined = `export default function App() {\n  useEffect(() => {\n    router.events.on("routeChangeStart", (url: string) => { window.location.href = url })\n  }, [])\n  return null\n}\n`
+    expect(hookOf(inlined).routeChangeFullLoad).toEqual({ file: "pages/_app.tsx", line: 3, via: "routeChangeStart" })
+    expect(inventoryEntry(hookOf(inlined), "add_to_cart")!.sites.map((site) => [site.navigation, site.leavesBy])).toEqual([["full_load", "route_hook"]])
+  })
+})
+
 describe("P1-B: the page's 'visitor allowed tracking' signal", () => {
   const signal = (files: Record<string, string>) => inline({ "src/events.ts": `export function addToCart() {\n  window.gtag?.("event", "add_to_cart")\n}\n`, ...files }).trackingSignal
 

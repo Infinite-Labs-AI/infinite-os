@@ -703,14 +703,29 @@ function navigationAt(view: FileView, offset: number, callee?: Callee): Navigati
   return null
 }
 
-/** P1-A: the site's own route-change hook that forces a full page load (`routeChangeStart` → `location.assign`), or null. */
+/**
+ * P1-A / Finding 7: the site's own route-change hook that forces a full page load, or null. Only when the location call
+ * is inside the hook's OWN callback (`router.events.on("routeChangeStart", cb)`: an inline function, or a function of
+ * that name in the same file): a progress bar on the same event beside an unrelated `location.href = "/"` is not one.
+ */
 function routeChangeFullLoadOf(views: readonly FileView[]): EventSite | null {
   for (const view of views) {
     if (view.server || view.generated) continue
-    const hook = /(['"`])routeChangeStart\1/.exec(view.comments)
-    if (!hook || !isCode(view, hook.index, 1)) continue
-    if (!FULL_LOAD_PATTERNS.slice(0, 2).some(({ pattern }) => pattern.test(view.code))) continue
-    return { file: view.path, line: lineAt(view, hook.index), via: "routeChangeStart" }
+    for (const hook of view.comments.matchAll(/\.\s*on\s*\(\s*(['"`])routeChangeStart\1\s*,/g)) {
+      const index = hook.index ?? 0
+      if (!isCode(view, index, 1)) continue
+      const open = view.comments.indexOf("(", index)
+      const args = callArgs(view, open)
+      const callback = args[1]
+      if (!callback) continue
+      const text = view.code.slice(callback[0], callback[1]).trim()
+      const named = /^[A-Za-z_$][\w$]*$/.test(text) ? view.functions.find((fn) => fn.name === text) : undefined
+      const inline = view.functions.find((fn) => fn.start >= callback[0] && fn.end <= callback[1])
+      const body = named ?? inline
+      if (!body) continue
+      if (!FULL_LOAD_PATTERNS.slice(0, 2).some(({ pattern }) => pattern.test(view.code.slice(body.start, body.end)))) continue
+      return { file: view.path, line: lineAt(view, index), via: "routeChangeStart" }
+    }
   }
   return null
 }
