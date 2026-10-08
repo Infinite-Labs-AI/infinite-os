@@ -71,37 +71,88 @@ const planData = (brief: string, id: string): Record<string, unknown> => {
 }
 
 describe("browser commerce briefs (review P0-5)", () => {
-  it("the Buy button that already sends GA4 add_to_cart: add Meta AddToCart ONLY, at the named file and line, and wait before leaving", () => {
+  it("the Buy button that already sends GA4 add_to_cart: add Meta AddToCart ONLY, inside the site's helper, once", () => {
     const brief = buildBrief([item("meta_improve:commerce_events", [ADD_TO_CART, VIEW_ITEM], ["lib/store-events.ts", "pages/index.tsx", "pages/trail-pack.tsx"])], facts)
     expect(brief).toContain('### Job "meta_improve:commerce_events" (5. Adding Meta AddToCart and ViewContent with product and price)')
     const data = planData(brief, "meta_improve:commerce_events")
     // Meta, and Infinite's ledger (every commerce event reaches Infinite too); never GA4 or PostHog, which have it.
     expect(data.destinations).toEqual(["meta", "infinite"])
-    expect(data.events).toEqual([
-      {
-        event: "add_to_cart",
-        metaEventName: "AddToCart",
-        firesAt: ["pages/index.tsx:42 (helper:addToCartEvent)", "pages/trail-pack.tsx:88 (helper:addToCartEvent)"],
-        alreadySentTo: { GA4: ["lib/store-events.ts:152 (gtag)"], PostHog: ["lib/store-events.ts:157 (posthog.capture)"] },
-        add: ["Meta"]
-      },
-      {
-        event: "view_item",
-        metaEventName: "ViewContent",
-        firesAt: ["pages/trail-pack.tsx:30 (helper:viewItem)"],
-        alreadySentTo: { GA4: ["lib/store-events.ts:146 (gtag)"] },
-        add: ["Meta"]
-      }
+    const events = data.events as Array<Record<string, unknown>>
+    expect(events.map((entry) => [entry.event, entry.metaEventName, entry.alreadySentTo, entry.add])).toEqual([
+      ["add_to_cart", "AddToCart", { GA4: ["lib/store-events.ts:152 (gtag)"], PostHog: ["lib/store-events.ts:157 (posthog.capture)"] }, ["Meta"]],
+      ["view_item", "ViewContent", { GA4: ["lib/store-events.ts:146 (gtag)"] }, ["Meta"]]
     ])
-    expect(data.helperImport).toBe('import { infiniteTrack, infiniteTrackThenNavigate } from "./infinite-analytics"')
+    // ONE place per event: inside the site's own helper (where it sends today when the scan names no definition).
+    const places = events[0]!.places as Array<Record<string, unknown>>
+    expect(places).toHaveLength(1)
+    expect(places[0]!.firesThrough).toBe("your helper addToCartEvent() at lib/store-events.ts:152")
+    // The scan could not tell how these clicks leave: the brief says how to tell, and never asks for two sends.
+    expect((places[0]!.callers as Array<Record<string, unknown>>).map((caller) => [caller.at, caller.leaves])).toEqual([
+      ["pages/index.tsx:42", "unknown: tell it apart yourself"],
+      ["pages/trail-pack.tsx:88", "unknown: tell it apart yourself"]
+    ])
+    expect(brief).toContain("never also in a click handler that calls the helper (that sends the event twice)")
+    expect(brief).toContain("A full page load is `window.location…`")
+    expect(data.imports).toEqual({ "lib/store-events.ts": 'import { infiniteTrack } from "./infinite-analytics"' })
     expect(brief).toContain('{ destinations: ["meta", "infinite"] }')
-    expect(brief).toContain("infiniteTrackThenNavigate(event, <where the click goes>")
     expect(brief).toContain("at most 400 ms")
     expect(brief).toContain("Never invent a price")
     expect(brief).toContain("currency the site prices in")
     expect(brief).toContain("Never add a tool already listed in alreadySentTo")
     // The wizard's rehearsal and prove click `[data-infinite-conversion="add_to_cart"]`.
     expect(brief).toContain('add the attribute data-infinite-conversion="add_to_cart" to the button element itself')
+  })
+
+  it("P1-A: a helper whose caller does a FULL page load returns the wait, and only that caller is wrapped; client routing is left alone", () => {
+    const helperAt = { file: "src/analytics/events.ts", line: 27 }
+    const entry: EventInventoryEntry = {
+      ...ADD_TO_CART,
+      sites: [
+        { file: "pages/index.tsx", line: 17, via: "helper:addToCart", navigation: "full_load", navigationVia: "window.location.assign", helperAt },
+        { file: "pages/products/[slug].tsx", line: 29, via: "helper:addToCart", navigation: "client", navigationVia: 'router.push("/cart")', helperAt }
+      ],
+      tools: { ga4: [{ file: "src/analytics/events.ts", line: 28, via: "gtag" }] }
+    }
+    const brief = buildBrief([item("meta_improve:commerce_events", [entry], ["pages/index.tsx", "pages/products/[slug].tsx", "src/analytics/events.ts"])], facts)
+    const data = planData(brief, "meta_improve:commerce_events")
+    const place = ((data.events as Array<Record<string, unknown>>)[0]!.places as Array<Record<string, unknown>>)[0]!
+    expect(place.firesThrough).toBe("your helper addToCart() at src/analytics/events.ts:27")
+    expect(place.inTheHelper).toMatch(/^return infiniteTrackBeforeLeaving\("add_to_cart", \{ item_id: .*\}, \{ destinations: \["meta", "infinite"\] \}\) beside its existing sends/)
+    expect(place.callers).toEqual([
+      { at: "pages/index.tsx:17", leaves: "with a full page load: window.location.assign", do: "wrap this click handler: infiniteLeaveAfter(() => { <everything the handler did before it left>; return addToCart(…) }, () => <the handler's own navigation, exactly as written>)" },
+      { at: "pages/products/[slug].tsx:29", leaves: 'by client-side routing: router.push("/cart")', do: "leave this handler as it is" }
+    ])
+    // P2-1: each import is relative to the file it goes in.
+    expect(data.imports).toEqual({
+      "pages/index.tsx": 'import { infiniteLeaveAfter } from "../lib/infinite-analytics"',
+      "src/analytics/events.ts": 'import { infiniteTrackBeforeLeaving } from "../../lib/infinite-analytics"'
+    })
+    expect(brief).toContain("Never turn client routing into a full page load.")
+  })
+
+  it("P1-A: an event sent inline in a click handler gets infiniteTrack there, and infiniteTrackThenNavigate ONLY when that handler does a full page load", () => {
+    const entry: EventInventoryEntry = {
+      event: "add_to_cart",
+      sites: [
+        { file: "components/BuyButton.tsx", line: 9, via: "gtag", navigation: "full_load", navigationVia: "location.href =" },
+        { file: "components/QuickAdd.tsx", line: 14, via: "gtag", navigation: "none", navigationVia: "no navigation" }
+      ],
+      tools: { ga4: [{ file: "components/BuyButton.tsx", line: 9, via: "gtag" }, { file: "components/QuickAdd.tsx", line: 14, via: "gtag" }] },
+      missing: ["meta_browser"]
+    }
+    const brief = buildBrief([item("meta_improve:commerce_events", [entry], ["components/BuyButton.tsx", "components/QuickAdd.tsx"])], facts)
+    const data = planData(brief, "meta_improve:commerce_events")
+    const places = (data.events as Array<Record<string, unknown>>)[0]!.places as Array<Record<string, unknown>>
+    expect(places.map((place) => [place.firesThrough, place.leaves])).toEqual([
+      ["inline at components/BuyButton.tsx:9 (gtag), not through a helper", "with a full page load: location.href ="],
+      ["inline at components/QuickAdd.tsx:14 (gtag), not through a helper", "it does not leave the page"]
+    ])
+    expect(places[0]!.do).toMatch(/^replace the handler's own navigation with infiniteTrackThenNavigate\(event, <where the click goes>, "add_to_cart", \{/)
+    expect(places[1]!.do).toMatch(/^infiniteTrack\("add_to_cart", \{.*\) beside the site's own send$/)
+    expect(data.imports).toEqual({
+      "components/BuyButton.tsx": 'import { infiniteTrackThenNavigate } from "../lib/infinite-analytics"',
+      "components/QuickAdd.tsx": 'import { infiniteTrack } from "../lib/infinite-analytics"'
+    })
   })
 
   it("a GA4 job names GA4 only, and a PostHog job PostHog only", () => {

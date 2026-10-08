@@ -321,9 +321,121 @@ function conversionGist(target: string, data: Record<string, unknown> | Error): 
 }
 
 /**
- * Review P0-5 / P1-7: the browser commerce job (`<tool>_improve:commerce_events`). Each entry names the exact file and
- * line where the event already fires and the tool this job adds; the agent adds ONLY that tool, through
- * `destinations`, with the product and price from the site's own data, and waits before a navigation.
+ * P1-A: ONE place to add each event, and ONE shape per place, so an agent that follows the brief never sends an event
+ * twice on one click and never lets a full page load cancel it. Built from the scan's trigger sites (`EventSite`):
+ *   • the event fires through the site's OWN helper (`addToCart()`): the send goes INSIDE the helper, once for every
+ *     caller. When a caller then does a FULL page load, the helper returns `infiniteTrackBeforeLeaving(…)` (the bounded
+ *     wait: Meta's request out, at most 400 ms) and that caller's handler is wrapped in `infiniteLeaveAfter(start, go)`
+ *     with its own navigation kept as `go`. A caller that routes on the client changes nothing (no wait, never a reload);
+ *   • the event fires inline in a click handler: `infiniteTrack(…)` beside the site's send, or, ONLY when that handler
+ *     does a full page load, `infiniteTrackThenNavigate(…)` in place of its own navigation.
+ */
+interface CommercePlace {
+  event: FunnelEvent
+  /** The site's own helper the event fires through (null: inline in a handler). */
+  helper: { name: string; file: string; line: number } | null
+  /** The helper's callers, or the one inline site. */
+  sites: EventSite[]
+}
+
+/** Where a helper is defined: the scan's `helperAt`, else where the helper sends today (the inventory's tool sites). */
+function helperDefinition(entry: EventInventoryEntry, site: EventSite): { file: string; line: number } | null {
+  if (site.helperAt) return site.helperAt
+  const sends = Object.values(entry.tools).flatMap((list) => (list ?? []).filter((send) => !SERVER_VIAS.has(send.via)))
+  return sends[0] ? { file: sends[0].file, line: sends[0].line } : null
+}
+
+function commercePlaces(entry: EventInventoryEntry): CommercePlace[] {
+  const places: CommercePlace[] = []
+  for (const site of entry.sites.filter((candidate) => !SERVER_VIAS.has(candidate.via))) {
+    const name = site.via.startsWith("helper:") ? site.via.slice("helper:".length) : null
+    const at = name ? helperDefinition(entry, site) : null
+    const helper = name && at ? { name, ...at } : null
+    const same = helper ? places.find((place) => place.helper?.name === helper.name && place.helper.file === helper.file) : undefined
+    if (same) same.sites.push(site)
+    else places.push({ event: entry.event, helper, sites: [site] })
+  }
+  return places
+}
+
+const HOW_TO_TELL =
+  "A full page load is `window.location…` / `location.href = …`, `location.assign` / `location.replace`, a form that posts, a plain `<a href>` (not the framework's link), or client routing that your own code turns into a full load (a route-change hook such as `router.events.on(\"routeChangeStart\", …)` that calls `location.assign`). Client-side routing is `router.push` / `router.replace`, `<Link>` or `navigate(…)` with no such hook."
+
+function placeWord(site: EventSite): string {
+  return `${site.file}:${site.line}`
+}
+
+function leavesWords(site: EventSite): string {
+  if (site.navigation === "full_load") return `with a full page load: ${site.navigationVia ?? "the scan saw one"}`
+  if (site.navigation === "client") return `by client-side routing: ${site.navigationVia ?? "the router"}`
+  if (site.navigation === "none") return "it does not leave the page"
+  return "unknown: tell it apart yourself"
+}
+
+/** The plan data of one place: where it fires, how its click leaves, and the ONE thing to do there. */
+function placeData(place: CommercePlace, call: (name: string) => string): Record<string, unknown> {
+  if (place.helper) {
+    const helper = place.helper
+    const wait = place.sites.some((site) => site.navigation === "full_load")
+    const unknown = place.sites.some((site) => site.navigation === undefined)
+    const wrap = `wrap this click handler: infiniteLeaveAfter(() => { <everything the handler did before it left>; return ${helper.name}(…) }, () => <the handler's own navigation, exactly as written>)`
+    return {
+      firesThrough: `your helper ${helper.name}() at ${helper.file}:${helper.line}`,
+      inTheHelper: wait
+        ? `return ${call("infiniteTrackBeforeLeaving")} beside its existing sends (the helper now returns that promise)`
+        : `${call("infiniteTrack")} beside its existing sends${unknown ? " (if a caller turns out to do a full page load, return infiniteTrackBeforeLeaving(…) with the same arguments instead)" : ""}`,
+      callers: place.sites.map((site) => ({
+        at: placeWord(site),
+        leaves: leavesWords(site),
+        do: site.navigation === "full_load"
+          ? wrap
+          : site.navigation === undefined
+            ? `a full page load: ${wrap.replace(/^wrap this click handler: /, "wrap it in ")} (import infiniteLeaveAfter from the same module as the other helpers); client routing or no navigation: leave this handler as it is`
+            : "leave this handler as it is"
+      }))
+    }
+  }
+  const site = place.sites[0]!
+  const thenNavigate = `infiniteTrackThenNavigate(event, <where the click goes>, ${call("").slice(1)}`
+  return {
+    firesThrough: `inline at ${placeWord(site)} (${site.via}), not through a helper`,
+    leaves: leavesWords(site),
+    do: site.navigation === "full_load"
+      ? `replace the handler's own navigation with ${thenNavigate}`
+      : site.navigation === undefined
+        ? `a full page load: ${thenNavigate} in place of its own navigation; client routing or no navigation: ${call("infiniteTrack")} beside the site's own send`
+        : `${call("infiniteTrack")} beside the site's own send`
+  }
+}
+
+/** The calls a commerce job makes, with its destinations. */
+function commerceCall(tool: InventoryTool, event: FunnelEvent): (name: string) => string {
+  const destination = commerceDestinations(tool).map((name) => JSON.stringify(name)).join(", ")
+  return (name) => `${name}(${JSON.stringify(event)}, ${PRODUCT_PROPS}, { destinations: [${destination}] })`
+}
+
+/** The import line each file this job edits needs (`helperImport` relative to THAT file, P2-1). */
+function commerceImports(places: readonly CommercePlace[], module: string): Record<string, string> {
+  const names = new Map<string, Set<string>>()
+  const need = (file: string, name: string) => (names.get(file) ?? names.set(file, new Set()).get(file)!).add(name)
+  for (const place of places) {
+    if (place.helper) {
+      const wait = place.sites.some((site) => site.navigation === "full_load")
+      need(place.helper.file, wait ? "infiniteTrackBeforeLeaving" : "infiniteTrack")
+      for (const site of place.sites) if (site.navigation === "full_load") need(site.file, "infiniteLeaveAfter")
+      continue
+    }
+    const site = place.sites[0]!
+    need(site.file, site.navigation === "full_load" ? "infiniteTrackThenNavigate" : "infiniteTrack")
+  }
+  const order = ["infiniteTrack", "infiniteTrackBeforeLeaving", "infiniteTrackThenNavigate", "infiniteLeaveAfter"]
+  return Object.fromEntries([...names].sort(([a], [b]) => (a < b ? -1 : 1)).map(([file, set]) => [file, helperImportFor(file, module, order.filter((name) => set.has(name)))]))
+}
+
+/**
+ * Review P0-5 / P1-7 / P1-A: the browser commerce job (`<tool>_improve:commerce_events`). For each event, the ONE place
+ * the send goes and the ONE shape it takes there (Plan data `events[].places`), the product and price from the site's
+ * own data, and a wait only where a click really does a full page load.
  */
 function commerceGist(tool: InventoryTool, events: readonly FunnelEvent[]): string {
   const meta = tool === "meta_browser"
@@ -331,13 +443,17 @@ function commerceGist(tool: InventoryTool, events: readonly FunnelEvent[]): stri
   return [
     // The wizard's own test clicks `[data-infinite-conversion="add_to_cart"]` (rehearsal and prove) to see the event leave.
     ...(events.includes("add_to_cart")
-      ? ['On every Buy / Add-to-cart button whose click sends the add_to_cart (the places in firesAt), add the attribute data-infinite-conversion="add_to_cart" to the button element itself, so the wizard\'s test can click it. Only the attribute: never change the button\'s text, handler or look.']
+      ? ['On every Buy / Add-to-cart button whose click sends the add_to_cart (the callers in Plan data), add the attribute data-infinite-conversion="add_to_cart" to the button element itself, so the wizard\'s test can click it. Only the attribute: never change the button\'s text, handler or look.']
       : []),
-    `Here: at each place in "events" (firesAt is where the site already tracks it; alreadySentTo is what it sends there today), add ONE call that sends the event to ${TOOL_WORD[tool]}${meta ? " and Infinite" : ""} ONLY: infiniteTrack(<event>, ${PRODUCT_PROPS}, { destinations: [${destination}] }).`,
-    "Put it beside the site's existing send for that event (inside the site's own helper when firesAt names one, so every caller is covered once), with the product id, name, unit price and quantity the site already has there or in its own product catalog. Never invent a price or a product; pass the currency the site prices in.",
-    `When the click then leaves the page (a Buy button that goes to the cart), use infiniteTrackThenNavigate(event, <where the click goes>, <event>, <the same props>, { destinations: [${destination}] }) in that click handler instead of the handler's own navigation, so ${meta ? "Meta's request is out (at most 400 ms)" : "the event is out"} before the page leaves; it ignores a second click while the first is on its way.`,
-    "If another job in this brief adds a different tool at the same place, make it ONE call with both tools in destinations. Never add a tool already listed in alreadySentTo, never call gtag, posthog or fbq yourself, and never add a Meta eventID."
-  ].join(" ")
+    `Here: send each event in Plan data "events" to ${TOOL_WORD[tool]}${meta ? " and Infinite" : ""} ONLY, with { destinations: [${destination}] }, exactly ONCE per click, at the ONE place Plan data names for it ("places"), in the ONE shape it gives ("inTheHelper" / "do"):`,
+    "- When the event fires through the site's own helper (firesThrough names it), the send goes INSIDE that helper, beside its existing sends, and nowhere else: never also in a click handler that calls the helper (that sends the event twice).",
+    `- A caller whose click then does a FULL page load (callers[].leaves) loses ${meta ? "Meta's request" : "the request"} unless it waits. There the helper RETURNS infiniteTrackBeforeLeaving(…) (it settles once the request is out, at most ${meta ? "400 ms" : "1 s"}, and never rejects) and that caller's click handler becomes infiniteLeaveAfter(() => { <what it did before leaving>; return <helper>(…) }, () => <its own navigation, unchanged>). infiniteLeaveAfter ignores a second click while the first is leaving.`,
+    "- A caller that routes on the client (router.push, <Link>) or does not leave keeps its code as it is: the page stays loaded, so it needs no wait. Never turn client routing into a full page load.",
+    "- When the event fires inline in a click handler (no helper), add infiniteTrack(…) beside the site's own send there; ONLY when that handler does a full page load, use infiniteTrackThenNavigate(event, <where the click goes>, <event>, <the same props>, { destinations }) in place of its own navigation (a form that posts: wrap the submit in infiniteLeaveAfter with infiniteTrackBeforeLeaving instead, so the post is kept).",
+    `- Where Plan data says "unknown", tell the two apart yourself: ${HOW_TO_TELL}`,
+    "Use the product id, name, unit price (in the currency's main unit, not cents) and quantity the site already has there or in its own product catalog. Never invent a price or a product; pass the currency the site prices in (Plan data \"currency\" when it names one).",
+    "Import each helper with the line Plan data gives for that file (\"imports\"). If another job in this brief adds a different tool at the same place, make it ONE call with both tools in destinations. Never add a tool already listed in alreadySentTo, never call gtag, posthog or fbq yourself, and never add a Meta eventID."
+  ].join("\n")
 }
 
 /** Strips control, bidi and zero-width characters: untrusted text stays on one inert line. */
@@ -558,12 +674,19 @@ function commerceData(item: ChecklistItem, facts: BriefFacts): Record<string, un
     (entry) => allowed.has(entry.event) && entry.missing.includes(tool) && entry.sites.some((site) => !SERVER_VIAS.has(site.via))
   )
   if (entries.length === 0) return new Error(`the brief for ${item.id} has no browser event that ${TOOL_WORD[tool]} misses`)
-  const file = item.allow.files[0] ?? null
+  const places = entries.flatMap((entry) => commercePlaces(entry))
   return {
     tool: TOOL_WORD[tool],
     destinations: commerceDestinations(tool),
-    events: entries.map((entry) => inventoryData(entry, [tool])),
-    ...(facts.helpers.module && file ? { helperImport: helperImportFor(file, facts.helpers.module) } : {})
+    // The currency the site prices in, from its own code (its checkout), when the scan found one.
+    ...(facts.inventory?.siteCurrency ? { currency: facts.inventory.siteCurrency } : {}),
+    events: entries.map((entry) => {
+      // `places` says where it fires (the old `firesAt`), how each click leaves and what to do there.
+      const { firesAt: _firesAt, ...data } = inventoryData(entry, [tool])
+      return { ...data, places: commercePlaces(entry).map((place) => placeData(place, commerceCall(tool, entry.event))) }
+    }),
+    // P2-1: one import line per file, relative to THAT file (a helper in src/analytics/ imports "../../lib/…").
+    ...(facts.helpers.module ? { imports: commerceImports(places, facts.helpers.module) } : {})
   }
 }
 
