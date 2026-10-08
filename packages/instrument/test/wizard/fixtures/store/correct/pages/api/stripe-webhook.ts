@@ -7,7 +7,7 @@ import Stripe from "stripe"
 import { reportStripeCheckoutPurchase } from "../../lib/infinite-outcome"
 
 // Use the site's existing Stripe client here instead, if it already has one.
-const stripe = new Stripe(process.env.STRIPE_SECRET_KEY ?? "")
+const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "sk_webhook_signature_only")
 
 // Stripe signs the raw bytes, so Next must not parse the body.
 export const config = { api: { bodyParser: false } }

@@ -61,8 +61,9 @@ export function stripeWebhookRouteSource(input: RecipeInput & { successPath?: st
   const successPath = JSON.stringify(input.successPath ?? "/success")
   const importHelper = `import { reportStripeCheckoutPurchase } from ${JSON.stringify(input.importSpecifier)}`
   const client = [
-    "// Use the site's existing Stripe client here instead, if it already has one.",
-    'const stripe = new Stripe(process.env.STRIPE_SECRET_KEY ?? "")'
+    "// Use the site's existing Stripe client here instead, if it already has one. Checking a webhook signature needs only",
+    "// the signing secret, never the API key, so a missing key must not throw when this file loads.",
+    'const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "sk_webhook_signature_only")'
   ]
   if (input.router === "next-pages") {
     return [
