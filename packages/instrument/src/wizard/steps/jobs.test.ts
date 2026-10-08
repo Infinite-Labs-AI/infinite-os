@@ -161,7 +161,7 @@ describe("step jobs: claims are only claims; the wizard checks", () => {
     const [first, second] = runs(t.fakes, "claude")
     expect(second!.argv).toContain("--resume")
     expect(second!.argv![second!.argv!.indexOf("--resume") + 1]).toBe(first!.argv![first!.argv!.indexOf("--session-id") + 1])
-    expect(second!.argv![second!.argv!.indexOf("--append-system-prompt") + 1]).toContain("the wizard's checks failed: click_test")
+    expect(second!.argv![second!.argv!.indexOf("--append-system-prompt") + 1]).toContain("the wizard's checks failed: The right buttons send conversions: click_test problem (fixture)")
     expect(stateOf(t.current().jobs, "conversions_to_tools:trial")).toBe("waiting_real_event")
     expect(t.bridgeCalls.patchRun).toHaveLength(1)
   })
@@ -217,7 +217,7 @@ describe("step jobs: check reasons are secret-scanned (review I1 P2-6)", () => {
     await step.run(t.ctx, t.deps)
     const [, second] = runs(t.fakes, "claude")
     const brief = second!.argv![second!.argv!.indexOf("--append-system-prompt") + 1]!
-    expect(brief).toContain("the wizard's checks failed: build")
+    expect(brief).toContain("the wizard's checks failed: The site builds")
     expect(brief).not.toContain(leaked)
     expect(brief).toContain("[redacted: env_value]")
     expect(JSON.stringify(t.recorded.events)).not.toContain(leaked)
@@ -385,5 +385,52 @@ describe("step jobs: live run 2 replay (the lead and the silent form on one page
     for (const note of notes) {
       expect(note).not.toMatch(/check failed|did not pass|sends its request|Add adMatch|put back/)
     }
+  })
+})
+
+describe("step jobs: the wizard never fails a verified job because of its own put-back", () => {
+  it("a verified job whose re-check fails once an unverified job's lines are put back keeps its verdict; the put-back is undone and the other job's lines are listed for review", async () => {
+    const lead: ChecklistItem = {
+      ...agentItem("server_conversions:lead", [LEAD_ROUTE, LEAD_PAGE]),
+      title: "Report the lead conversion from the server",
+      trigger: { finding: "The mailing-list route stores the sign-up", evidence: [{ file: LEAD_ROUTE, line: 30 }] },
+      checks: [{ id: "outcome_declared", tier: "S", state: "not_run" }, { id: "build", tier: "B", state: "not_run" }]
+    }
+    const silent: ChecklistItem = {
+      ...agentItem("setup_check_fixes:silent_form", [LEAD_PAGE]),
+      title: "Wire the silent form's success",
+      trigger: { finding: "A form that submits and sends nothing", evidence: [{ file: LEAD_PAGE, line: 58 }] },
+      checks: [{ id: "setup_rerun_clean", tier: "S", state: "not_run" }, { id: "build", tier: "B", state: "not_run" }]
+    }
+    const t = setup({
+      scenario: { turns: [
+        { steps: [
+          { edit: { path: LEAD_PAGE, content: leadPage() } },
+          { edit: { path: LEAD_ROUTE, content: leadRoute() } },
+          claim(lead.id),
+          { edit: { path: LEAD_PAGE, content: silentFormPage() } },
+          claim(silent.id)
+        ] },
+        { steps: [] }
+      ] },
+      // The lead passes on the tree the agent left (at its claim and after the turn); its re-check after the silent form's
+      // lines are put back fails.
+      checks: { results: { outcome_declared: ["pass", "pass", "problem"], setup_rerun_clean: ["problem"] } },
+      items: [lead, silent]
+    })
+    write(t.root, LEAD_PAGE, BASE_PAGE)
+    write(t.root, LEAD_ROUTE, BASE_ROUTE)
+    runGit(t.root, ["add", LEAD_PAGE, LEAD_ROUTE])
+    runGit(t.root, ["commit", "-m", "store pages"])
+    expect((await step.run(t.ctx, t.deps)).kind).toBe("ok")
+    const jobs = t.current().jobs
+    const leadJob = jobs.find((job) => job.id === lead.id)!
+    const silentJob = jobs.find((job) => job.id === silent.id)!
+    expect(leadJob.state).toMatch(/done_in_code|waiting_real_event|waiting_deploy/)
+    expect(leadJob.note ?? "").not.toMatch(/check failed|put back|did not pass/)
+    // Every block stays: the put-back was undone.
+    expect(readFileSync(join(t.root, LEAD_PAGE), "utf8")).toBe(silentFormPage())
+    expect(silentJob.keptForReview).toEqual({ with: [lead.id], files: [LEAD_PAGE], why: "needed_by" })
+    expect(silentJob.note).toContain(`"${silent.title}": not verified on its own; its lines stay because "${lead.title}" builds on them`)
   })
 })

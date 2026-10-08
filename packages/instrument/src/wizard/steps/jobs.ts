@@ -554,18 +554,20 @@ async function settleRound(
         const others = problems.filter((result) => result.checkId !== TURN_GATE_CHECK_ID)
         // Live run 5 (P2): a job sent back by a check that did not run this round (the rehearsal's RH verdict on the same
         // code) has no result here; its reason is that check's own, never an empty "The wizard's check failed:.".
+        // Item 8: a check is named in plain words (its label), never by its id, on screen, in the pull request and to the agent.
+        const named = (checkId: string, reason: string | undefined) => `${CHECK_LABELS[checkId] ?? "A wizard check"}: ${sanitizeUntrusted(reason ?? "problem", 600)}`
         const thisRound = [
           ...hits.map((hit) => hit.note),
-          ...others.map((result) => `${result.checkId}: ${sanitizeUntrusted(result.reason ?? "problem", 200)}`)
+          ...others.map((result) => named(result.checkId, result.reason))
         ]
-        const held = next.checks.filter((check) => check.state === "problem").map((check) => `${check.id}: ${sanitizeUntrusted(check.reason ?? "problem", 200)}`)
+        const held = next.checks.filter((check) => check.state === "problem").map((check) => named(check.id, check.reason))
         const why = (thisRound.length > 0 ? thisRound : held).join("; ")
         io.noteFailure(item.id, why)
         note = hits.length > 0 && others.length === 0 ? why : `The wizard's check failed: ${why}`
         withNote(next, note, io.noteScanner)
         if (next.state === "pending") {
           for (const hit of hits) feedback.push(gateFeedbackLine(item.id, hit))
-          if (others.length > 0) feedback.push(`- ${item.id}: the wizard's checks failed: ${others.map((result) => `${result.checkId}: ${sanitizeUntrusted(result.reason ?? "problem", 200)}`).join("; ")}`)
+          if (others.length > 0) feedback.push(`- ${item.id}: the wizard's checks failed: ${others.map((result) => named(result.checkId, result.reason)).join("; ")}`)
         }
       } else if (next.state === "claimed" && onTree.has(item.id)) {
         // LF4-P1-2: nothing claimed and nothing decided: back to pending, so the caller says it as it is. LF4 close round 2
@@ -1236,15 +1238,23 @@ class JobsIo {
       } else {
         // The wizard's own put-back broke a verified job (it needed lines only unverified jobs owned): undo the put-back.
         // Every block stays; the verified jobs keep the verdict they earned on that tree.
-        await unsettle(this.deps, this.ctx.root, settled)
-        kept = entries.map(({ credited: _credited, ...entry }) => entry)
-        for (const id of settled.undone) {
+        try {
+          await unsettle(this.deps, this.ctx.root, settled)
+        } catch {
+          // The put-back could not be undone: the broken jobs fail, and say why in the wizard's words, never the agent's.
+          const others = [...settled.undone].filter((id) => !keep.has(id)).map((id) => `"${this.item(id)?.title ?? id}"`)
+          for (const item of broken) this.put(failItem(item, `Put back because it shared lines with ${others.join(" and ") || "a job the wizard could not verify"}: the wizard put back that job's unverified lines, and this job's code needed them.`, this.noteScanner))
+          kept = settled.kept
+          broken.length = 0
+        }
+        if (broken.length > 0) kept = entries.map(({ credited: _credited, ...entry }) => entry)
+        for (const id of broken.length > 0 ? settled.undone : []) {
           if (keep.has(id)) continue
           const files = [...new Set(entries.filter((entry) => entry.textEditItems.some((ids) => ids.includes(id))).map((entry) => entry.edit.file))]
           const previous = keptWith.get(id)
           keptWith.set(id, { with: [...new Set([...(previous?.with ?? []), ...broken.map((item) => item.id)])], files: [...new Set([...(previous?.files ?? []), ...files])], why: "needed_by" })
         }
-        undone = new Set()
+        if (broken.length > 0) undone = new Set()
       }
     }
     if (kept.length > 0) await this.deps.installer.recordEdits(kept.map(entry => entry.edit))
