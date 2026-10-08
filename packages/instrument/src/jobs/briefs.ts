@@ -375,8 +375,8 @@ export function operatorRules(facts: BriefFacts): string {
     ...(facts.helpers
       ? [
           facts.helpers.module
-            ? `The conversion helpers are already in your repo, exported by ${quoted(facts.helpers.module)} (\`infiniteTrack\`, \`infiniteTrackThenNavigate\`, \`infiniteIdentify\`, \`infiniteReset\`, \`infiniteMetaMirror\`). Never re-implement them.`
-            : "The conversion helpers are already on every page as globals (`window.infiniteTrack`, `window.infiniteTrackThenNavigate`, `window.infiniteIdentify`, `window.infiniteReset`, `window.infiniteMetaMirror`). Never re-implement them."
+            ? `The conversion helpers are already in your repo, exported by ${quoted(facts.helpers.module)} (\`infiniteTrack\`, \`infiniteTrackThenNavigate\`, \`infiniteIdentify\`, \`infiniteReset\`, \`infiniteMetaMirror\`, \`infiniteAdMatchAllowed\`). Never re-implement them.`
+            : "The conversion helpers are already on every page as globals (`window.infiniteTrack`, `window.infiniteTrackThenNavigate`, `window.infiniteIdentify`, `window.infiniteReset`, `window.infiniteMetaMirror`, `window.infiniteAdMatchAllowed`). Never re-implement them."
         ]
       : []),
     // R4-6 (live run 4): the agent opened the 56 KB managed module and thought 4.2 minutes before its first edit.
