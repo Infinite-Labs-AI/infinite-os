@@ -842,9 +842,55 @@ function pageRequestsOf(views: readonly FileView[], routes: readonly string[], a
 
 /** A setter or an action, never a reader (`setConsent`, `acceptTracking`, `trackPageView`). */
 const NOT_A_READER = /^(?:set|write|save|store|apply|accept|decline|deny|grant|revoke|withdraw|open|close|show|hide|update|parse|clear|remember|forget|init|initialize|start|stop|on|handle|use|render|track|send|capture|disable|enable|reset|load)[A-Z_]/
-const BOOLEAN_READER = /(?:Allowed|Granted|Given|Accepted|Enabled|Ok)$|^(?:has|is|can)[A-Z]/
-const STATE_READER = /^(?:get|read|current)\w*Consent\w*$|^(?:consent|cookieConsent|trackingConsent)(?:State|Status|Choice|Value)?$/
+/**
+ * Finding 5 (privacy): a reader that answers "did the visitor answer / see the banner" is never the signal: true for a
+ * visitor who said NO would send their match data to Meta. Any name with one of these words is refused.
+ */
+const NOT_A_GRANT_WORDS = new Set(["choice", "choices", "answer", "answered", "set", "banner", "open", "opened", "dismiss", "dismissed", "asked", "shown", "seen", "made", "decided", "known"])
+/** A boolean reader whose name says the visitor ALLOWED tracking (`trackingAllowed`, `hasMarketingConsent`, `canTrack`). */
+const BOOLEAN_READER = /(?:Allowed|Granted|Given|Accepted|Enabled|Ok)$|^(?:has|is|can)(?:[A-Z][a-z]+)*(?:Consent|Consented|Track|Tracking)$/
+/** A reader that returns the stored consent STATE (`getConsent()` → "granted" | "denied"), compared with its yes word. */
+const STATE_READER = /^(?:get|read|current)\w*Consent\w*$|^(?:consent|cookieConsent|trackingConsent)(?:State|Status|Value)?$/
 const GRANTED_WORDS = ["granted", "accepted", "allowed", "accept", "allow", "all", "yes"] as const
+
+/** The camel-case words of a name, lower case (`hasConsentChoice` → has, consent, choice). */
+function nameWords(name: string): string[] {
+  return name.replace(/([a-z0-9])([A-Z])/g, "$1 $2").replace(/_/g, " ").toLowerCase().split(/\s+/).filter(Boolean)
+}
+
+/** The string literals a type annotation allows: `"granted" | "denied"`, or a same-file `type X = "a" | "b"` it names. */
+function annotationLiterals(view: FileView, annotation: string): string[] {
+  const literal = (text: string) => [...text.matchAll(/(['"`])([^'"`]*)\1/g)].map((match) => match[2]!)
+  if (/['"`]/.test(annotation)) return literal(annotation)
+  const name = /^([A-Za-z_$][\w$]*)(?:\s*\|\s*(?:null|undefined))*$/.exec(annotation.trim())?.[1]
+  if (!name) return []
+  const alias = new RegExp(`\\btype\\s+${name.replace(/\$/g, "\\$")}\\s*=\\s*([^;\\n]+)`).exec(view.comments)
+  return alias ? literal(alias[1]!) : []
+}
+
+/**
+ * Finding 5: the values a state reader can return, from the reader's OWN code, never the whole file (a Consent Mode
+ * `'granted'` elsewhere in the file is not what it returns): the literals of its return type, the literals in its body,
+ * and, when it returns a stored value (`localStorage.getItem(KEY)`, a cookie), the literals the file stores under that
+ * same key.
+ */
+function readerValues(view: FileView, fn: FunctionDef, annotation: string): string[] {
+  const values = new Set(annotationLiterals(view, annotation))
+  const body = view.comments.slice(fn.start, fn.end)
+  for (const match of body.matchAll(/(['"`])([A-Za-z_-]{1,20})\1/g)) values.add(match[2]!)
+  for (const match of body.matchAll(/\bgetItem\s*\(\s*([^)]+?)\s*\)/g)) {
+    const key = match[1]!.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+    for (const stored of view.comments.matchAll(new RegExp(`\\bsetItem\\s*\\(\\s*${key}\\s*,\\s*(['"\`])([^'"\`]*)\\1`, "g"))) values.add(stored[2]!)
+  }
+  return [...values]
+}
+
+/** The reader returns a boolean although its name reads as a state (`return localStorage.getItem("c") === "yes"`). */
+function returnsBoolean(view: FileView, fn: FunctionDef): boolean {
+  const body = view.code.slice(fn.start, fn.end)
+  const returns = view.code[fn.start - 1] === "{" ? [...body.matchAll(/\breturn\b([^;\n]*)/g)].map((match) => match[1]!.trim()) : [body.trim()]
+  return returns.length > 0 && returns.every((expression) => /^(?:true|false)$|^!|[=!]==?|[<>]=?/.test(expression) && !/\?/.test(expression))
+}
 
 /** P1-B: the site's own exported consent reader the page can call with no arguments, as the signal's expression. */
 function siteConsentReaderOf(views: readonly FileView[]): Extract<TrackingSignal, { kind: "site_getter" }> | null {
@@ -858,6 +904,7 @@ function siteConsentReaderOf(views: readonly FileView[]): Extract<TrackingSignal
     for (const match of exports) {
       const name = match[1]!
       if (NOT_A_READER.test(name) || !/consent|tracking|track|marketing|cookie/i.test(name)) continue
+      if (nameWords(name).some((word) => NOT_A_GRANT_WORDS.has(word))) continue
       const boolean = BOOLEAN_READER.test(name)
       if (!boolean && !STATE_READER.test(name)) continue
       const open = (match.index ?? 0) + match[0].length - 1
@@ -866,13 +913,19 @@ function siteConsentReaderOf(views: readonly FileView[]): Extract<TrackingSignal
       // Callable with no arguments: every parameter optional or defaulted.
       const params = splitTopLevel(view.code, open + 1, close).map(([from, to]) => view.code.slice(from, to).trim())
       if (params.some((param) => param !== "" && !/^[A-Za-z_$][\w$]*\s*\?\s*:|=/.test(param))) continue
-      const annotation = /^\s*:\s*([^{=]*?)\s*(?:=>|\{)/.exec(view.code.slice(close + 1, close + 200))?.[1]?.trim() ?? ""
+      // Read with strings kept (a `"granted" | "denied"` annotation is literals).
+      const annotation = /^\s*:\s*([^{=]*?)\s*(?:=>|\{)/.exec(view.comments.slice(close + 1, close + 200))?.[1]?.trim() ?? ""
+      const fn = view.functions.find((candidate) => candidate.name === name && candidate.start > close)
       let expression: string | null = null
       if (annotation === "boolean" || (boolean && annotation === "")) expression = `${name}()`
-      else {
-        // A state reader: the value it returns when the visitor said yes, as the site's own code spells it.
-        const word = GRANTED_WORDS.find((candidate) => new RegExp(`(['"\`])${candidate}\\1`).test(view.comments))
-        if (word) expression = `${name}() === ${JSON.stringify(word)}`
+      else if (!boolean && fn) {
+        if (annotation === "" && returnsBoolean(view, fn)) expression = `${name}()`
+        else {
+          // A state reader: compared with the value IT returns when the visitor said yes (unsure: not this reader).
+          const values = readerValues(view, fn, annotation)
+          const word = GRANTED_WORDS.find((candidate) => values.includes(candidate))
+          if (word) expression = `${name}() === ${JSON.stringify(word)}`
+        }
       }
       if (!expression) continue
       found.push({ kind: "site_getter", expression, name, file: view.path, line: lineAt(view, match.index ?? 0), rank: boolean ? (/track|marketing/i.test(name) ? 0 : 1) : 2 })

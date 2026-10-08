@@ -290,6 +290,26 @@ describe("P1-B: the page's 'visitor allowed tracking' signal", () => {
     })).toEqual({ kind: "site_getter", expression: "trackingAllowed()", name: "trackingAllowed", file: "src/consent.ts", line: 2 })
   })
 
+  it("Finding 5: a 'has answered' reader is never the signal (it is true for a visitor who said no); unsure falls back to the tag's helper", () => {
+    const gate = { "components/CookieBanner.tsx": `export default function CookieBanner() {\n  window.gtag?.("consent", "update", { analytics_storage: "granted" })\n  return null\n}\n` }
+    for (const name of ["hasConsentChoice", "isConsentSet", "isCookieBannerOpen", "hasAnsweredConsent", "wasConsentAsked", "consentBannerShown", "isConsentDismissed"]) {
+      expect(signal({ ...gate, "src/consent.ts": `export function ${name}(): boolean {\n  return localStorage.getItem("c") !== null\n}\n` }), name).toEqual({ kind: "tag_helper" })
+    }
+    // A choice-named state reader is refused too.
+    expect(signal({ ...gate, "src/consent.ts": `export function consentChoice(): "granted" | "denied" | null {\n  return null\n}\n` })).toEqual({ kind: "tag_helper" })
+    // A reader whose own code never says which value means yes: unsure, so not the reader.
+    expect(signal({ ...gate, "src/consent.ts": `export function getConsent() {\n  return localStorage.getItem("c")\n}\nexport function grantMode() {\n  window.gtag?.("consent", "update", { ad_storage: "granted" })\n}\n` })).toEqual({ kind: "tag_helper" })
+  })
+
+  it("Finding 5: the yes word comes from the reader's own return type, return values or stored values, never the whole file", () => {
+    const consentMode = 'export function syncConsentMode() {\n  window.gtag?.("consent", "update", { ad_storage: "granted" })\n}\n'
+    expect(signal({ "src/consent.ts": `${consentMode}export function getConsent() {\n  return localStorage.getItem("c") === "1" ? "accepted" : "rejected"\n}\n` })).toMatchObject({ kind: "site_getter", expression: 'getConsent() === "accepted"' })
+    expect(signal({ "src/consent.ts": `${consentMode}export function getConsent(): "accepted" | "rejected" | null {\n  return read()\n}\n` })).toMatchObject({ expression: 'getConsent() === "accepted"' })
+    expect(signal({ "src/consent.ts": `${consentMode}const KEY = "choice"\nexport function getConsent() {\n  return localStorage.getItem(KEY)\n}\nexport function acceptAll() {\n  localStorage.setItem(KEY, "accepted")\n}\nexport function rejectAll() {\n  localStorage.setItem(KEY, "rejected")\n}\n` })).toMatchObject({ expression: 'getConsent() === "accepted"' })
+    // A state-named reader that returns a comparison is a boolean.
+    expect(signal({ "src/consent.ts": 'export function getConsent() {\n  return localStorage.getItem("c") === "yes"\n}\n' })).toMatchObject({ expression: "getConsent()" })
+  })
+
   it("is true on a site with no consent gate at all, and the tag's helper where a gate exists but no reader can be imported", () => {
     expect(signal({})).toEqual({ kind: "always" })
     expect(signal({ "components/CookieBanner.tsx": `export default function CookieBanner() {\n  window.gtag?.("consent", "update", { analytics_storage: "granted" })\n  return null\n}\n` })).toEqual({ kind: "tag_helper" })
