@@ -521,7 +521,7 @@ it("does not call a browser conversion unwired when only its server job is unava
   expect(plan.lines.find(line => line.id === "user_action:conversions_unwired")?.text).toContain("Other conversion jobs shown in this plan can still run")
 })
 
-const inv = (events: EventInventory["events"], extra: Partial<EventInventory> = {}): EventInventory => ({ events, checkoutCreates: [], paymentWebhook: null, pixelRestrictedRoutes: [], ...extra })
+const inv = (events: EventInventory["events"], extra: Partial<EventInventory> = {}): EventInventory => ({ events, checkoutCreates: [], paymentWebhook: null, pixelRestrictedRoutes: [], siteCurrency: null, ...extra })
 const site = (file: string, line: number, via: string) => ({ file, line, via })
 /** A store shaped like the reference: GA4 + PostHog get every step, Meta gets page views only. */
 const STORE_INVENTORY = inv([

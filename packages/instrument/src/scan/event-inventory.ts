@@ -29,7 +29,18 @@ export type InventoryTool = "ga4" | "posthog" | "meta_browser" | "meta_server" |
 export type FunnelEvent = "view_item" | "add_to_cart" | "begin_checkout" | "purchase" | "lead" | "sign_up" | "start_trial"
 export interface EventSite { file: string; line: number; via: string } // via: "gtag", "posthog.capture", "fbq", "dataLayer", "helper:<fn>", "stripe.checkout.sessions.create", "success-page", "form-api", …
 export interface EventInventoryEntry { event: FunnelEvent; sites: EventSite[]; tools: Partial<Record<InventoryTool, EventSite[]>>; missing: InventoryTool[] }
-export interface EventInventory { events: EventInventoryEntry[]; checkoutCreates: EventSite[]; paymentWebhook: EventSite | null; pixelRestrictedRoutes: string[] }
+export interface EventInventory {
+  events: EventInventoryEntry[]
+  checkoutCreates: EventSite[]
+  paymentWebhook: EventSite | null
+  pixelRestrictedRoutes: string[]
+  /**
+   * The currency the site prices in (ISO 4217, upper case), from its own code: the currency its Stripe Checkout
+   * sessions charge in, else the one currency its code names (`currency: "USD"`, `Intl.NumberFormat(…, { currency })`).
+   * Null when the code names none, or more than one with no checkout to settle it.
+   */
+  siteCurrency: string | null
+}
 
 export const FUNNEL_EVENTS: readonly FunnelEvent[] = ["view_item", "add_to_cart", "begin_checkout", "purchase", "lead", "sign_up", "start_trial"]
 export const INVENTORY_TOOLS: readonly InventoryTool[] = ["ga4", "posthog", "meta_browser", "meta_server", "infinite"]
@@ -460,6 +471,9 @@ interface FoundEvent {
   via: string
 }
 
+/** `currency: "usd"`, `currency = 'EUR'`, `"currency": "GBP"` (a literal three-letter code), in code. */
+const CURRENCY_LITERAL = /\b(['"]?)currency\1\s*[:=]\s*(['"`])([A-Za-z]{3})\2/g
+
 const PURCHASE_SUCCESS_ROUTE = /(?:^|\/)(?:success|thank-you|thankyou|thanks|order-confirmation|order-complete|confirmation)(?:\/|$)/i
 const CHECKOUT_MARKER = /\b(?:session_id|checkout_session|checkout\.session|payment_intent|stripe|order_id|orderId)\b/
 
@@ -663,6 +677,21 @@ export function buildEventInventory(snapshot: RepoSnapshot, outcomes: readonly O
   const restricted = new Set<string>()
   for (const view of views) for (const path of restrictedRoutesOf(view)) restricted.add(path)
 
+  // The site's currency: what its checkout charges in, else the one its code names.
+  const checkoutCurrencies = new Set<string>()
+  const codeCurrencies = new Set<string>()
+  const checkoutFiles = new Set(checkoutCreates.map((site) => site.file))
+  for (const view of views) {
+    if (view.generated) continue
+    for (const match of view.comments.matchAll(CURRENCY_LITERAL)) {
+      if (!isCode(view, match.index ?? 0, "currency".length)) continue
+      const code = match[3]!.toUpperCase()
+      codeCurrencies.add(code)
+      if (checkoutFiles.has(view.path)) checkoutCurrencies.add(code)
+    }
+  }
+  const siteCurrency = checkoutCurrencies.size === 1 ? [...checkoutCurrencies][0]! : codeCurrencies.size === 1 ? [...codeCurrencies][0]! : null
+
   const events: EventInventoryEntry[] = []
   for (const event of FUNNEL_EVENTS) {
     const entry = entries.get(event)
@@ -674,7 +703,7 @@ export function buildEventInventory(snapshot: RepoSnapshot, outcomes: readonly O
     entry.missing = EXPECTED_TOOLS[event].filter((tool) => !tools[tool]?.length)
     events.push(entry)
   }
-  return { events, checkoutCreates: sortSites(checkoutCreates), paymentWebhook, pixelRestrictedRoutes: [...restricted].sort() }
+  return { events, checkoutCreates: sortSites(checkoutCreates), paymentWebhook, pixelRestrictedRoutes: [...restricted].sort(), siteCurrency }
 }
 
 /** The inventory entry of one event, or null. */

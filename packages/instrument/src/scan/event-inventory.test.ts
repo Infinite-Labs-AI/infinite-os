@@ -196,3 +196,21 @@ describe("server facts", () => {
     expect(inventory.checkoutCreates).toEqual([])
   })
 })
+
+describe("the site's currency (one source for the browser helpers' default currency)", () => {
+  it("the currency the Stripe Checkout charges in wins; else the one currency the code names; several with no checkout = unknown", () => {
+    expect(inventoryOf("store-halden").siteCurrency).toBe("USD")
+    const checkout = 'export default async function handler(req, res) {\n  await stripe.checkout.sessions.create({ line_items: [{ price_data: { currency: "eur", unit_amount: 100 } }] })\n}\n'
+    expect(inline({ "pages/api/checkout.ts": checkout, "src/price.ts": 'export const fmt = new Intl.NumberFormat("en", { style: "currency", currency: "GBP" })\n' }).siteCurrency).toBe("EUR")
+    expect(inline({ "src/price.ts": 'export const fmt = new Intl.NumberFormat("en", { style: "currency", currency: "GBP" })\n' }).siteCurrency).toBe("GBP")
+    expect(inline({ "src/a.ts": 'const a = { currency: "GBP" }\n', "src/b.ts": 'const b = { currency: "EUR" }\n' }).siteCurrency).toBeNull()
+    // A comment or a string is not the site's currency.
+    expect(inline({ "src/a.ts": '// currency: "JPY"\nconst text = "currency: \'JPY\'"\n' }).siteCurrency).toBeNull()
+  })
+
+  it("the recipe reporters count as Infinite and Meta-from-the-server sends of their conversion", () => {
+    const webhook = 'import { reportStripeCheckoutPurchase } from "../../lib/infinite-outcome"\nexport default async function handler(req, res) {\n  res.status(await reportStripeCheckoutPurchase(event, { path: "/success" })).end()\n}\n'
+    const purchase = inventoryEntry(inline({ "pages/api/stripe-webhook.ts": webhook }), "purchase")
+    expect(Object.keys(purchase?.tools ?? {}).sort()).toEqual(["infinite", "meta_server"])
+  })
+})

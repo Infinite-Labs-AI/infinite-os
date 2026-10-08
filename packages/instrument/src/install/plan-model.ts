@@ -1180,7 +1180,7 @@ const FUNNEL_ORDER: readonly FunnelEvent[] = ["view_item", "add_to_cart", "begin
 function inventoryFromCandidates(candidates: readonly ChecklistItem[]): EventInventory {
   const events = new Map<FunnelEvent, NonNullable<ChecklistItem["inventory"]>[number]>()
   for (const item of candidates) for (const entry of item.inventory ?? []) if (!events.has(entry.event)) events.set(entry.event, entry)
-  return { events: FUNNEL_ORDER.filter((event) => events.has(event)).map((event) => events.get(event)!), checkoutCreates: [], paymentWebhook: null, pixelRestrictedRoutes: [] }
+  return { events: FUNNEL_ORDER.filter((event) => events.has(event)).map((event) => events.get(event)!), checkoutCreates: [], paymentWebhook: null, pixelRestrictedRoutes: [], siteCurrency: null }
 }
 
 export interface ToolHeadlineInput {

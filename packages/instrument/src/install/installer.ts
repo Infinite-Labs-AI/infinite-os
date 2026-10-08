@@ -71,6 +71,8 @@ import { applyImproveEdit, detectAdoptedFacts, improveLinesFor, withSensitivePat
 import { artifactsFromKeys, manifestIdsFor, posthogProxyFor, withConversionHelpers, wizardInstallWorkspaceId, type WizardInstallArtifacts } from "./keys-adapter.js"
 import { buildCreatedMiddlewareSource, buildServerLaneModuleSource } from "../server-lane/runtime-source.js"
 import { SERVER_LANE_GUIDE_FILE } from "../server-lane/copy.js"
+import { buildEventInventory } from "../scan/event-inventory.js"
+import { snapshotFromFiles } from "../jobs/repo-files.js"
 import { renderServerEventsHandoff, SERVER_EVENTS_HANDOFF_FILE, serverConversionsOf, withHandoffInReceipt } from "../server-lane/handoff.js"
 import { hasDependency, normalizeAppRelativePath, writeFileAtomic } from "../frameworks/shared.js"
 import { DEFAULT_POSTHOG_PROXY_PATH, INFINITE_API_ORIGIN, infiniteCollectDestination } from "../workspace-artifacts.js"
@@ -136,7 +138,10 @@ export interface WizardScanResult extends ScanResult {
   unmanagedNextConfig?: string | null
   /** D17: the app's sensitive routes (`detectSensitivePages`), for the sensitive-pages plan lines. */
   sensitivePaths?: string[]
-  /** The commerce scan's facts the browser wiring reads (`BrowserScanFacts`); absent = none found. */
+  /**
+   * The commerce facts the browser wiring reads (`BrowserScanFacts`), from the scan's event inventory
+   * (`EventInventory.pixelRestrictedRoutes` / `siteCurrency`): one source, never a second detector.
+   */
   pixelRestrictedRoutes?: string[]
   siteCurrency?: string | null
 }
@@ -306,7 +311,14 @@ export class WizardInstaller implements Installer {
         ? { commandLine: packageInstallCommandLine(lockfile.lockfile.manager, serverLane.installPackages) }
         : { refused: lockfile.reason === "no_lockfile" ? "no lockfile, so the package manager is unknown" : `${lockfile.reason.replace("_", " ")}: ${lockfile.detail}` }
     }
+    // The commerce facts the browser wiring reads come from the scan's ONE event inventory (`src/scan/event-inventory.ts`,
+    // the same function the before step and the plan run): the routes the site keeps its pixels off, and its currency.
+    const commerce = buildEventInventory(
+      snapshotFromFiles(Object.fromEntries(source.files.map((file) => [normalizeAppRelativePath(phase.inspect.appRoot, file), readFileSync(join(phase.appRootAbsolute, file), "utf8")])), { appRoot: phase.inspect.appRoot })
+    )
     const result: WizardScanResult = {
+      pixelRestrictedRoutes: commerce.pixelRestrictedRoutes,
+      siteCurrency: commerce.siteCurrency,
       unmanagedNextConfig: unmanagedNextConfigOf(phase.appRootAbsolute, phase.inspect.appRoot, framework),
       sensitivePaths: sensitiveRoutesOf(phase.appRootAbsolute),
       root: opts.root,
