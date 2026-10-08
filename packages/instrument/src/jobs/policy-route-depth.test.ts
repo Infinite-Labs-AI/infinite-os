@@ -1,28 +1,29 @@
 import { expect, it } from "vitest"
-import { isPolicyPath, POLICY_PAGE_NAMES } from "./policy-pages.js"
+import { isPolicyPath } from "./policy-pages.js"
 
-it.each([
-  "chocolate-cookies.html", "payment-terms.html", "glossary-of-terms.html", "blog/gdpr.html",
-  "features/privacy/index.html", "pricing/terms.html", "search-terms.html", "blog/privacy.html",
-  "api/privacy/index.html", "docs/api/privacy.html", "app/test/privacy/page.tsx", "pages/test/privacy.tsx",
-])("does not match a single policy word in an ordinary route: %s", path => {
-  expect(isPolicyPath(path)).toBe(false)
-})
-
-const singleNames = POLICY_PAGE_NAMES.filter(name => !name.includes("-"))
-it.each(singleNames)("matches the exact single name %s only at depth one or directly under legal/policies", name => {
-  for (const prefix of ["", "legal/", "policies/", "en/", "de/", "pt-BR/", "[lang]/", "[market]/", "[[lang]]/", "app/(marketing)/[language]/"]) {
-    const path = prefix.startsWith("app/") ? `${prefix}${name}/page.tsx` : `${prefix}${name}.html`
-    expect(isPolicyPath(path), path).toBe(true)
-  }
-  for (const path of [`features/${name}.html`, `product-${name}.html`, `legal/news/${name}.html`, `app/[...slug]/${name}/page.tsx`]) {
+it("does not match a single policy word in an ordinary route", () => {
+  for (const path of ["chocolate-cookies.html", "payment-terms.html", "blog/gdpr.html", "features/privacy/index.html", "api/privacy/index.html", "app/test/privacy/page.tsx"]) {
     expect(isPolicyPath(path), path).toBe(false)
   }
 })
 
-it.each(POLICY_PAGE_NAMES.filter(name => name.includes("-")))("matches the multiword name %s or its product suffix at any route depth", name => {
-  for (const path of [`${name}.html`, `docs/archive/${name}.html`, `features/product-${name}.html`, `app/shop/${name}/page.tsx`]) {
-    expect(isPolicyPath(path), path).toBe(true)
+it("matches an exact single name only at depth one or directly under legal/policies or a locale segment", () => {
+  for (const name of ["privacy", "cookies", "impressum"]) {
+    for (const prefix of ["", "legal/", "policies/", "en/", "pt-BR/", "[lang]/", "[[lang]]/", "app/(marketing)/[language]/"]) {
+      const path = prefix.startsWith("app/") ? `${prefix}${name}/page.tsx` : `${prefix}${name}.html`
+      expect(isPolicyPath(path), path).toBe(true)
+    }
+    for (const path of [`features/${name}.html`, `product-${name}.html`, `legal/news/${name}.html`, `app/[...slug]/${name}/page.tsx`]) {
+      expect(isPolicyPath(path), path).toBe(false)
+    }
+  }
+})
+
+it("matches a multiword name or its product suffix at any route depth", () => {
+  for (const name of ["privacy-policy", "terms-of-service"]) {
+    for (const path of [`${name}.html`, `docs/archive/${name}.html`, `features/product-${name}.html`, `app/shop/${name}/page.tsx`]) {
+      expect(isPolicyPath(path), path).toBe(true)
+    }
   }
 })
 

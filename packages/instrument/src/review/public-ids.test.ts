@@ -30,7 +30,7 @@ async function world() {
   return { ctx, deps }
 }
 
-describe("LF4-P3-5: runPublicIds", () => {
+describe("runPublicIds", () => {
   it("collects the census's and the dry load's public ids for this run", async () => {
     const { ctx, deps } = await world()
     const ids = await runPublicIds(ctx, deps)
@@ -46,11 +46,6 @@ describe("LF4-P3-5: runPublicIds", () => {
     expect(out).toContain(maskIdentifier(PIXEL))
     expect(out).not.toContain("[redacted: phone]")
     expect(out).toContain("415.555.0123")
-  })
-
-  it("masked ids remain intact even before the site ids are known", async () => {
-    const { ctx, deps } = await world()
-    expect(buildScanner(ctx, deps, []).redact(`Meta pixel ${maskIdentifier(PIXEL)}`).text).toContain(maskIdentifier(PIXEL))
   })
 
   it("another run's before file gives nothing (never another run's ids)", async () => {

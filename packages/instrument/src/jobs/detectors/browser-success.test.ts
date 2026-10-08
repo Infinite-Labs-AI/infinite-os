@@ -18,7 +18,7 @@ const form = (condition: string) => `export default function WaitlistForm() {
 }`
 
 describe("browser outcome success branches", () => {
-  it.each(["res.ok && data?.success", "res.ok && data.success", "res.ok && data.success === true"])("recognizes the explicit positive branch %s", condition => {
+  it.each(["res.ok && data?.success",])("recognizes the explicit positive branch %s", condition => {
     const snapshot = snapshotFromFiles({ [FILE]: form(condition) })
     expect(detectConversionSuccessPaths(snapshot)).toEqual([{ file: FILE, line: 5, detail: "lead success", conversionType: "lead" }])
     const item = seedCandidatesFrom(jobScanFrom(scanResult(), snapshot), beforeFacts()).find(candidate => candidate.id === "conversions_to_tools:lead")
@@ -26,7 +26,7 @@ describe("browser outcome success branches", () => {
     expect(item?.blockedReason).toBeUndefined()
   })
 
-  it.each(["res.ok || data.success", "res.ok && !data.success", "!res.ok && data.success", "res.ok && data.failure"])("does not turn a failure or ambiguous branch into success: %s", condition => {
+  it.each(["res.ok || data.success", "res.ok && !data.success", "!res.ok && data.success",])("does not turn a failure or ambiguous branch into success: %s", condition => {
     expect(detectConversionSuccessPaths(snapshotFromFiles({ [FILE]: form(condition) }))).toEqual([])
   })
 

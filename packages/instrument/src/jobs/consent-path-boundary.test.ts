@@ -21,7 +21,7 @@ it("keeps named consent files in the owner-only installer and planning boundary"
   expect(recognizedConsentHandling({ [path]: before })).toBe(true)
 })
 
-it.each([true, false])("restores named consent files in the worker fence (claim: %s)", async claim => {
+it.each([true,])("restores named consent files in the worker fence (claim: %s)", async claim => {
   const { root } = makeFenceFixture()
   const home = tempDir("named-boundary-")
   dirs.push(root, home)

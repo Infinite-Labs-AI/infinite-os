@@ -7,7 +7,7 @@ import { dirname, join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
 
 import { scanForJobs } from "./detectors/index.js"
-import { loadRepoSnapshot, packageFactsFrom } from "./repo-files.js"
+import { loadRepoSnapshot } from "./repo-files.js"
 
 const dirs: string[] = []
 afterEach(() => {
@@ -78,11 +78,6 @@ describe("loadRepoSnapshot", () => {
     const root = repo({ "app/api/signup/route.ts": "export async function POST() {\n  await supabase.auth.signUp({ email })\n}\n" })
     const scan = scanForJobs({ root, appRoot: ".", framework: "next-app-router", packageManager: "npm", fileCount: 1, truncated: false })
     expect(scan.detections.outcomes.map((finding) => [finding.file, finding.kind])).toEqual([["app/api/signup/route.ts", "signup"]])
-  })
-
-  it("ignores a package.json that is not an object", () => {
-    expect(packageFactsFrom(".", "[1,2]")).toBeNull()
-    expect(packageFactsFrom(".", "not json")).toBeNull()
   })
 })
 

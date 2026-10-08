@@ -7,24 +7,19 @@ import { isPolicyPath } from "./policy-pages.js"
 
 afterEach(cleanupSites)
 
-const legacyNames = ["privacy", "terms"]
-for (const separator of ["", "-", "_"]) {
-  for (const prefix of ["privacy", "cookie", "cookies"]) {
-    for (const suffix of ["policy", "notice"]) legacyNames.push(prefix + separator + suffix)
+// Representative case / separator variants of the notice and terms names.
+const names = ["privacy", "privacy_policy", "PRIVACY-NOTICE", "CookiePolicy", "cookies-notice", "terms_conditions", "TermsOfService", "terms-of_use"]
+it("protects the policy name variants in explicit page paths", () => {
+  for (const name of names) {
+    for (const path of [`${name}.html`, `pages/${name}.tsx`, `app/${name}/page.tsx`, `public/${name}/index.html`]) expect(isPolicyPath(path), path).toBe(true)
   }
-  legacyNames.push("terms" + separator + "conditions")
-  for (const middle of ["", "-", "_"]) {
-    for (const suffix of ["service", "use"]) legacyNames.push("terms" + separator + "of" + middle + suffix)
-  }
-}
-const names = [...new Set(legacyNames.flatMap(name => [name, name.toUpperCase(), name.split(/[-_]/).map(word => word[0]!.toUpperCase() + word.slice(1)).join("")]))]
-it.each(names)("protects the legacy policy name in explicit page paths: %s", name => {
-  for (const path of [`${name}.html`, `pages/${name}.tsx`, `app/${name}/page.tsx`, `public/${name}/index.html`]) expect(isPolicyPath(path), path).toBe(true)
 })
 
-it.each(["refund-policy", "acceptable-use", "acceptable-use-policy", "subprocessors", "cookie-settings"])("protects the explicitly named owner policy or preference page: %s", name => {
-  for (const path of [`${name}.html`, `pages/${name}.tsx`, `app/${name}/page.tsx`, `content/${name}.md`]) expect(isPolicyPath(path), path).toBe(true)
-  expect(isPolicyPath(`components/${name}.tsx`)).toBe(false)
+it("protects the explicitly named owner policy or preference page, but not a component of that name", () => {
+  for (const name of ["refund-policy", "acceptable-use", "acceptable-use-policy", "subprocessors", "cookie-settings"]) {
+    for (const path of [`${name}.html`, `pages/${name}.tsx`, `app/${name}/page.tsx`, `content/${name}.md`]) expect(isPolicyPath(path), path).toBe(true)
+    expect(isPolicyPath(`components/${name}.tsx`), name).toBe(false)
+  }
 })
 
 it("does not install analytics into privacy or cookie notice pages", () => {

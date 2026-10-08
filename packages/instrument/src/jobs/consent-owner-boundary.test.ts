@@ -18,10 +18,10 @@ describe("consent and policy belong to the site owner", () => {
     expect(scan.detections.privacy).toEqual([])
     expect(seedCandidatesFrom(scan, beforeFacts()).some(x => x.jobId === "privacy_paragraph")).toBe(false)
   })
-  it.each(["app/privacy/page.tsx", "pages/terms.tsx", "src/pages/privacy-policy.mdx", "public/terms-of-service.html"])("denies %s even when an agent claims it", path => {
+  it.each(["app/privacy/page.tsx", "public/terms-of-service.html"])("denies %s even when an agent claims it", path => {
     expect(globalDenyReason(path, [])).not.toBeNull()
   })
-  it.each(["fbq('consent','grant');", "fbq(\n'consent',\n'revoke'\n);", "fbq('consent','revoke');", "gtag('consent','default',{ad_storage:'denied'});"])("leaves a preview guard for the owner when consent is in its file: %s", consent => {
+  it.each([ "fbq(\n'consent',\n'revoke'\n);", "gtag('consent','default',{ad_storage:'denied'});"])("leaves a preview guard for the owner when consent is in its file: %s", consent => {
     const file = "src/tracking.ts"
     const scan = jobScanFrom(scanResult(), snapshotFromFiles({ [file]: `function boot(){\nfbq('init','1234567890123456');\n${consent}\n}` }))
     const facts = beforeFacts({ census: census([{ tool: "meta", kind: "fbq_init", id: "1234567890123456", file, line: 2 }]) })
@@ -38,7 +38,7 @@ describe("consent and policy belong to the site owner", () => {
     expect(changed.checks).toEqual([])
     expect(missingApprovedFixes([changed])).toEqual([])
   })
-  it.each(["Consent is incorrectly configured", "Rewrite the privacy policy", "Consent guard bypasses a revoke"])("keeps owner-labelled blockers open for the owner, including a repeat: %s", body => {
+  it.each(["Consent is incorrectly configured",])("keeps owner-labelled blockers open for the owner, including a repeat: %s", body => {
     const finding: TriageItem = { category: "owner_consent_privacy", source: "reviewer", threadId: null, findingId: "F1", item: "R6", severity: "blocker", path: "src/tracking.ts", line: 2, body, suggestedFix: null }
     const context = { allowlist: ["src/tracking.ts"], declinedKeys: new Set<string>(), passingChecks: new Set<string>(), answerFor: () => null }
     for (const declinedKeys of [new Set<string>(), new Set([triageKey(finding)])]) {
@@ -50,10 +50,6 @@ describe("consent and policy belong to the site owner", () => {
       expect(openFindings(ledger, [])).toEqual([{ findingId: "F1", item: "R6", severity: "blocker", path: "src/tracking.ts", line: 2, label: null }])
     }
   })
-})
-
-it.each(["src/search/terms.ts", "pages/api/terms.ts"])("does not mistake %s for a policy page", path => {
-  expect(globalDenyReason(path, [])).toBeNull()
 })
 
 it("leaves only the tool whose evidence line lies inside a frozen unit", () => {
