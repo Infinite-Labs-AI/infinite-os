@@ -234,7 +234,8 @@ export function serverConversionInstructions(target: ServerConversionTarget, ctx
       `2. The checkout route (where the site calls \`stripe.checkout.sessions.create\`${checkout ? `; the scan points at ${whereAt(checkout)}` : ""}) must save the cart and the buyer's device data on the session, or the webhook has nothing to report from (\`siteCheckout\` stays false and it answers 200). If the begin_checkout job does not already cover that route, apply its edit there:`,
       ...codeBlock(
         language,
-        stripeCheckoutEdit({ language, router, importSpecifier: checkout ? importFor(checkout.file) : "<the helper, imported from that route>" })
+        // The same read as the begin_checkout job's edit of that route (Finding 1: where the cart page sends the signal).
+        stripeCheckoutEdit({ language, router, importSpecifier: checkout ? importFor(checkout.file) : "<the helper, imported from that route>", signal: signalSourceOf(signalPagesFor(ctx.pageRequests, checkout ? [checkout.file] : [], [])) ?? "query" })
       ),
       "   `contentIds` are the cart's product or price ids and `numItems` its item count; keep the route's own metadata and parameters.",
       "Do not also report the purchase anywhere else (no success-page call, no browser Purchase): the session id is the one event id, so the webhook alone counts it once.",

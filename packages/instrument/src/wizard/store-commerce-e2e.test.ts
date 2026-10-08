@@ -300,6 +300,9 @@ describe("store: the wizard's own scan, plan and briefs", () => {
     expect(purchase).toContain('the scan points at "pages/api/checkout.ts" line 67')
     expect(purchase).toContain("reportStripeCheckoutPurchase")
     expect(purchase).toContain("PAYER's hashed match data")
+    // Finding 1: its copy of the checkout edit reads the cart form's field from the body, like the begin_checkout job.
+    expect(purchase).toContain('const trackingAllowed = req.body?.ad_match === "1"')
+    expect(purchase).not.toContain("req.query")
     const checkout = block("server_conversions:begin_checkout")
     expect(checkout).toContain('"pages/api/checkout.ts" line 67')
     expect(checkout).toContain("reportStripeCheckoutStarted")

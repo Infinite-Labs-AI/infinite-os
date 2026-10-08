@@ -173,6 +173,15 @@ describe("Finding 1: the route reads the signal from where the page is told to s
     expect(checkout("form", "app")).toContain('const trackingAllowed = form.get("ad_match") === "1"')
   })
 
+  it("the purchase job's copy of the checkout edit reads the signal from the same place as the begin_checkout job's", () => {
+    const text = serverConversionInstructions(
+      { event: "purchase", entry: null, file: "pages/api/checkout.ts", line: 67 },
+      { ...PAGES, checkoutCreates: [{ file: "pages/api/checkout.ts", line: 67, via: "stripe.checkout.sessions.create" }], trackingSignal: signal, pageRequests: [{ route: "pages/api/checkout.ts", file: "pages/cart.tsx", line: 68, how: "form", via: "a form that posts" }] }
+    )
+    expect(text).toContain('const trackingAllowed = req.body?.ad_match === "1"')
+    expect(text).not.toContain("req.query")
+  })
+
   it("unknown: each way the page may send it, with the route read that matches it", () => {
     const text = checkout("unknown")
     expect(text).toContain("make the route's `trackingAllowed` read it from that same place (replace the read in the code above)")
