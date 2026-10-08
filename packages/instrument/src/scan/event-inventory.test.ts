@@ -8,17 +8,20 @@ import { describe, expect, it } from "vitest"
 
 import { detectOutcomes } from "../jobs/detectors/outcomes.js"
 import { loadRepoSnapshot, snapshotFromFiles } from "../jobs/repo-files.js"
-import { buildEventInventory, funnelEventOf, inventoryEntry, type EventInventory } from "./event-inventory.js"
+import { buildEventInventory, funnelEventOf, inventoryEntry, type EventInventory, type EventSite } from "./event-inventory.js"
 
 const fixture = (name: string) => fileURLToPath(new URL(`../../test/scan/fixtures/${name}`, import.meta.url))
 const inventoryOf = (name: string): EventInventory => buildEventInventory(loadRepoSnapshot(fixture(name), "."))
 const inline = (files: Record<string, string>): EventInventory => buildEventInventory(snapshotFromFiles(files))
+/** A trigger site without what P1-A adds (how its click leaves, where its helper is): asserted on their own below. */
+const bare = (site: EventSite): EventSite => ({ file: site.file, line: site.line, via: site.via })
+const bareEntries = (entries: EventInventory["events"]) => entries.map((entry) => ({ ...entry, sites: entry.sites.map(bare) }))
 
 describe("the store with a one-level sender (store-halden)", () => {
   const inventory = inventoryOf("store-halden")
 
   it("finds view_item, add_to_cart, begin_checkout, purchase and lead, each with the tools that already get it", () => {
-    expect(inventory.events).toEqual([
+    expect(bareEntries(inventory.events)).toEqual([
       {
         event: "view_item",
         sites: [{ file: "pages/products/[slug].tsx", line: 21, via: "helper:viewItem" }],
@@ -89,7 +92,7 @@ describe("the store with a two-level sender chain (store-chain)", () => {
     expect(inventory.checkoutCreates).toEqual([{ file: "pages/api/checkout.ts", line: 14, via: "stripe.checkout.sessions.create" }])
     expect(inventory.paymentWebhook).toBeNull()
     expect(inventoryEntry(inventory, "purchase")).toMatchObject({ sites: [{ file: "pages/success.tsx", line: 13 }], missing: ["meta_server", "infinite"] })
-    expect(inventoryEntry(inventory, "lead")?.sites).toEqual([
+    expect(inventoryEntry(inventory, "lead")?.sites.map(bare)).toEqual([
       { file: "components/MailingListForm.tsx", line: 11, via: "helper:generateLead" },
       { file: "pages/api/mailing-list.ts", line: 7, via: "form-api" }
     ])
@@ -212,5 +215,60 @@ describe("the site's currency (one source for the browser helpers' default curre
     const webhook = 'import { reportStripeCheckoutPurchase } from "../../lib/infinite-outcome"\nexport default async function handler(req, res) {\n  res.status(await reportStripeCheckoutPurchase(event, { path: "/success" })).end()\n}\n'
     const purchase = inventoryEntry(inline({ "pages/api/stripe-webhook.ts": webhook }), "purchase")
     expect(Object.keys(purchase?.tools ?? {}).sort()).toEqual(["infinite", "meta_server"])
+  })
+})
+
+describe("P1-A: how each Buy click leaves the page", () => {
+  const events = `export function addToCart(id: string) {\n  sendGa("add_to_cart", { id })\n}\nfunction sendGa(name: string, params: object) {\n  window.gtag?.("event", name, params)\n}\n`
+  const sites = (files: Record<string, string>) => inventoryEntry(inline({ "src/events.ts": events, ...files }), "add_to_cart")!.sites
+
+  it("client routing, a full page load, a form post, a plain link and no navigation are told apart; the helper's place is named", () => {
+    const got = sites({
+      "pages/a.tsx": `import { addToCart } from "../src/events"\nexport default function A() {\n  const buy = () => {\n    addToCart("a")\n    void router.push("/cart")\n  }\n  return null\n}\n`,
+      "pages/b.tsx": `import { addToCart } from "../src/events"\nexport default function B() {\n  const buy = () => {\n    addToCart("b")\n    window.location.assign("/cart")\n  }\n  return null\n}\n`,
+      "pages/c.tsx": `import { addToCart } from "../src/events"\nexport default function C() {\n  return <form method="POST" action="/api/cart" onSubmit={() => addToCart("c")}><button>Add</button></form>\n}\n`,
+      "pages/d.tsx": `import { addToCart } from "../src/events"\nexport default function D() {\n  return <a href="/cart" onClick={() => addToCart("d")}>Buy</a>\n}\n`,
+      "pages/e.tsx": `import { addToCart } from "../src/events"\nexport default function E() {\n  useEffect(() => { addToCart("e") }, [])\n  return null\n}\n`
+    })
+    expect(got.map((site) => [site.file, site.navigation, site.navigationVia])).toEqual([
+      ["pages/a.tsx", "client", 'router.push("/cart")'],
+      ["pages/b.tsx", "full_load", "location.assign"],
+      ["pages/c.tsx", "full_load", "a form post"],
+      ["pages/d.tsx", "full_load", "a plain link"],
+      ["pages/e.tsx", "none", "no navigation"]
+    ])
+    expect(new Set(got.map((site) => JSON.stringify(site.helperAt)))).toEqual(new Set([JSON.stringify({ file: "src/events.ts", line: 1 })]))
+  })
+
+  it("router navigation the site's own route-change hook turns into a full page load is a full page load (into a pixel-free route)", () => {
+    const hook = `const NO_PIXEL_ROUTES = ["/cart"]\nexport function Guard() {\n  useEffect(() => {\n    const force = (url: string) => { window.location.assign(url) }\n    router.events.on("routeChangeStart", force)\n  }, [])\n  return null\n}\n`
+    const page = (target: string) => `import { addToCart } from "../src/events"\nexport default function A() {\n  const buy = () => {\n    addToCart("a")\n    void router.push("${target}")\n  }\n  return null\n}\n`
+    const inventory = inline({ "src/events.ts": events, "components/Guard.tsx": hook, "pages/a.tsx": page("/cart"), "pages/b.tsx": page("/about") })
+    expect(inventory.routeChangeFullLoad).toEqual({ file: "components/Guard.tsx", line: 5, via: "routeChangeStart" })
+    const got = inventoryEntry(inventory, "add_to_cart")!.sites
+    expect(got.map((site) => [site.file, site.navigation])).toEqual([["pages/a.tsx", "full_load"], ["pages/b.tsx", "client"]])
+    expect(got[0]!.navigationVia).toBe('router.push("/cart"), which the site turns into a full page load (components/Guard.tsx:5)')
+  })
+})
+
+describe("P1-B: the page's 'visitor allowed tracking' signal", () => {
+  const signal = (files: Record<string, string>) => inline({ "src/events.ts": `export function addToCart() {\n  window.gtag?.("event", "add_to_cart")\n}\n`, ...files }).trackingSignal
+
+  it("names the site's own consent reader, read only: a state reader compared with the site's own 'granted' word", () => {
+    expect(signal({
+      "src/analytics/tracking.ts": `export type ConsentState = "granted" | "denied" | "unset"\nexport function getConsent(): ConsentState {\n  return (localStorage.getItem("c") as ConsentState) ?? "unset"\n}\nexport function acceptTracking() {}\nexport function setConsent(value: ConsentState) {}\n`
+    })).toEqual({ kind: "site_getter", expression: 'getConsent() === "granted"', name: "getConsent", file: "src/analytics/tracking.ts", line: 2 })
+  })
+
+  it("prefers a boolean tracking reader; never a setter, an action, or a reader that needs an argument", () => {
+    expect(signal({
+      "src/consent.ts": `export function readConsent(raw: string) { return raw === "granted" ? "granted" : "denied" }\nexport function trackingAllowed(): boolean {\n  return localStorage.getItem("x") === "yes"\n}\nexport function startTracking() {}\n`,
+      "src/state.ts": `export function getCookieConsent(storage?: Storage) { return storage ? "accepted" : null }\n`
+    })).toEqual({ kind: "site_getter", expression: "trackingAllowed()", name: "trackingAllowed", file: "src/consent.ts", line: 2 })
+  })
+
+  it("is true on a site with no consent gate at all, and the tag's helper where a gate exists but no reader can be imported", () => {
+    expect(signal({})).toEqual({ kind: "always" })
+    expect(signal({ "components/CookieBanner.tsx": `export default function CookieBanner() {\n  window.gtag?.("consent", "update", { analytics_storage: "granted" })\n  return null\n}\n` })).toEqual({ kind: "tag_helper" })
   })
 })

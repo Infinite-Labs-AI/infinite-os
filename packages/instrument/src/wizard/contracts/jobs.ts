@@ -765,7 +765,9 @@ const EVIDENCE_SHAPE = oneOf(
   shapeOf<{ url: string }>()("UrlEvidence", ["url"], [])
 )
 
-const EVENT_SITE_SHAPE = shapeOf<EventSite>()("EventSite", ["file", "line", "via"], [])
+const EVENT_SITE_SHAPE = shapeOf<EventSite>()("EventSite", ["file", "line", "via"], ["navigation", "navigationVia", "helperAt"], {
+  helperAt: shapeOf<NonNullable<EventSite["helperAt"]>>()("EventSite.helperAt", ["file", "line"], [])
+})
 
 export const CHECKLIST_ITEM_SHAPE = shapeOf<ChecklistItem>()(
   "ChecklistItem",

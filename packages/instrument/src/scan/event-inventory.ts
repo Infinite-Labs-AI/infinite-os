@@ -14,7 +14,14 @@
 //   • server facts: Stripe Checkout session creation (begin_checkout on the server, and a purchase that needs a
 //     payment webhook), an existing payment webhook, success / thank-you pages, signup and mailing-list API routes;
 //   • the routes the site keeps its ad pixel off (`pixelRestrictedRoutes`, from a path list such as
-//     `const META_RESTRICTED_ROUTES = ["/cart", "/success"]`).
+//     `const META_RESTRICTED_ROUTES = ["/cart", "/success"]`);
+//   • P1-A: for each browser trigger site, how the click LEAVES the page (`navigation`): a full page load
+//     (`location.assign`, `location.href =`, a form post, a plain `<a href>`), client-side routing (`router.push`,
+//     `<Link>`), or no navigation; and the site's own route-change hook that turns router navigations into full page
+//     loads (`routeChangeFullLoad`, e.g. `router.events.on("routeChangeStart", …)` calling `location.assign`);
+//   • P1-B: the signal a page sends its own API routes when the visitor allowed tracking (`trackingSignal`): the
+//     site's own exported consent reader (`getConsent() === "granted"`, `trackingAllowed()`), read only, never edited;
+//     `true` when the site has no consent gate at all; else the tag's `infiniteAdMatchAllowed()`.
 //
 // Pure: a function of a RepoSnapshot. Comments never count; tests, fixtures and mocks are never evidence; the
 // wizard's own generated helpers (`infinite-*` files) are never read as the site's senders.
@@ -24,16 +31,44 @@ import { codeView, isCodeFile, isHtmlFile, isNonProductPath, routePathOf } from 
 import { detectOutcomes, isServerFile, type OutcomeFinding } from "../jobs/detectors/outcomes.js"
 import type { RepoSnapshot } from "../jobs/repo-files.js"
 import { outcomesIn } from "../checks/commerce-static.js"
+import { isConsentFile, isConsentText } from "../jobs/consent-units.js"
 
 export type InventoryTool = "ga4" | "posthog" | "meta_browser" | "meta_server" | "infinite"
 export type FunnelEvent = "view_item" | "add_to_cart" | "begin_checkout" | "purchase" | "lead" | "sign_up" | "start_trial"
-export interface EventSite { file: string; line: number; via: string } // via: "gtag", "posthog.capture", "fbq", "dataLayer", "helper:<fn>", "stripe.checkout.sessions.create", "success-page", "form-api", …
+/** How a browser trigger site's click leaves the page (P1-A). Absent = the scan could not tell. */
+export type SiteNavigation = "full_load" | "client" | "none"
+export interface EventSite {
+  file: string
+  line: number
+  via: string // "gtag", "posthog.capture", "fbq", "dataLayer", "helper:<fn>", "stripe.checkout.sessions.create", "success-page", "form-api", …
+  /** A browser trigger site: what its handler does after the event (P1-A). */
+  navigation?: SiteNavigation
+  /** The navigation as written, in plain words (`router.push("/cart")`, `window.location.assign`, `a form post`). */
+  navigationVia?: string
+  /** A `helper:<fn>` trigger site: where the site's own helper is defined. */
+  helperAt?: { file: string; line: number }
+}
+
+/**
+ * P1-B: what a page sends its own API route as "the visitor allowed tracking" (`ad_match=1` / `adMatch: true`).
+ *   site_getter — the site's own exported consent reader, read only (`expression` is the call, `name` its export);
+ *   always      — the site has no consent gate at all: the signal is `true`;
+ *   tag_helper  — a gate exists but no reader the page can import: the tag's `infiniteAdMatchAllowed()`.
+ */
+export type TrackingSignal =
+  | { kind: "site_getter"; expression: string; name: string; file: string; line: number }
+  | { kind: "always" }
+  | { kind: "tag_helper" }
 export interface EventInventoryEntry { event: FunnelEvent; sites: EventSite[]; tools: Partial<Record<InventoryTool, EventSite[]>>; missing: InventoryTool[] }
 export interface EventInventory {
   events: EventInventoryEntry[]
   checkoutCreates: EventSite[]
   paymentWebhook: EventSite | null
   pixelRestrictedRoutes: string[]
+  /** P1-A: the site's own route-change hook that turns a router navigation into a full page load, or null. */
+  routeChangeFullLoad?: EventSite | null
+  /** P1-B: the signal the page sends its own API routes when the visitor allowed tracking. */
+  trackingSignal?: TrackingSignal
   /**
    * The currency the site prices in (ISO 4217, upper case), from its own code: the currency its Stripe Checkout
    * sessions charge in, else the one currency its code names (`currency: "USD"`, `Intl.NumberFormat(…, { currency })`).
@@ -282,6 +317,13 @@ function viewOf(path: string, text: string): FileView {
   return view
 }
 
+/** The line a named function is declared on (its name, else its body). */
+function helperLine(view: FileView, fn: FunctionDef): number {
+  const head = view.code.slice(Math.max(0, fn.start - 300), fn.start)
+  const at = fn.name ? head.lastIndexOf(fn.name) : -1
+  return lineAt(view, at < 0 ? fn.start : Math.max(0, fn.start - 300) + at)
+}
+
 /** The functions enclosing `offset`, innermost first. */
 function enclosing(view: FileView, offset: number): FunctionDef[] {
   return view.functions.filter((fn) => fn.start <= offset && offset < fn.end).sort((a, b) => b.start - a.start || a.end - b.end)
@@ -371,7 +413,7 @@ function rawCallsOf(view: FileView): RawCall[] {
     }
   }
   // The wizard's own browser helpers: `infiniteTrack(name, props, { destinations })`, `infiniteTrackThenNavigate(e, target, name)`.
-  for (const match of view.comments.matchAll(/\binfiniteTrack(ThenNavigate)?\s*\(/g)) {
+  for (const match of view.comments.matchAll(/\binfiniteTrack(ThenNavigate|BeforeLeaving)?\s*\(/g)) {
     const index = match.index ?? 0
     const paren = index + match[0].length - 1
     if (!isCode(view, index, paren - index)) continue
@@ -386,11 +428,11 @@ function rawCallsOf(view: FileView): RawCall[] {
     const tools: InventoryTool[] = []
     for (const [key, tool] of [["ga4", "ga4"], ["posthog", "posthog"]] as const) if (set(key) ?? true) tools.push(tool)
     // The helper sends Meta's ViewContent / AddToCart for those two events unless Meta is turned off.
-    const argIndex = match[1] ? 2 : 0
+    const argIndex = match[1] === "ThenNavigate" ? 2 : 0
     const name = nameArg(view, { openParen: paren, argIndex })
     const metaByName = name?.arg.kind === "literal" && BROWSER_COMMERCE_EVENTS.includes(funnelEventOf(name.arg.value) as FunnelEvent)
     if (set("meta") === true || ((metaByName || /\bmetaEventName\s*:/.test(callText)) && set("meta") !== false)) tools.push("meta_browser")
-    calls.push({ tools, via: match[1] ? "infiniteTrackThenNavigate" : "infiniteTrack", openParen: paren, argIndex })
+    calls.push({ tools, via: `infiniteTrack${match[1] ?? ""}`, openParen: paren, argIndex })
   }
   return calls
 }
@@ -509,6 +551,142 @@ function restrictedRoutesOf(view: FileView): string[] {
   return out
 }
 
+// ---------------------------------------------------------------------------------------------
+// P1-A: how a click leaves the page
+// ---------------------------------------------------------------------------------------------
+
+/** A full page load, in code (strings blanked): `location.href = …`, `window.location = …`, `location.assign(…)`. */
+const FULL_LOAD_PATTERNS: ReadonlyArray<{ pattern: RegExp; words: string }> = [
+  { pattern: /\b(?:window\s*\.\s*|document\s*\.\s*|globalThis\s*\.\s*)?location\s*\.\s*(assign|replace)\s*\(/, words: "location.$1" },
+  { pattern: /\b(?:window\s*\.\s*|document\s*\.\s*|globalThis\s*\.\s*)?location\s*(?:\.\s*href\s*)?=(?![=>])/, words: "location.href =" },
+  { pattern: /\.\s*(?:requestSubmit|submit)\s*\(\s*\)/, words: "a form submit" }
+]
+/** Client-side routing: the page stays and the router swaps the view. */
+const CLIENT_ROUTE_PATTERN = /\b(router|Router|history|navigate)\s*(?:\.\s*(push|replace)\s*)?\(/g
+
+interface Navigation {
+  kind: SiteNavigation
+  via: string
+  /** A literal destination path, when written as one. */
+  target: string | null
+}
+
+/** The handler's navigation after the trigger at `offset`, or null when no enclosing function holds the call. */
+function navigationAt(view: FileView, offset: number): Navigation | null {
+  if (view.server) return null
+  const fn = enclosing(view, offset)[0]
+  if (!fn) return null
+  const code = view.code.slice(fn.start, fn.end)
+  for (const { pattern, words } of FULL_LOAD_PATTERNS) {
+    const match = pattern.exec(code)
+    if (match) return { kind: "full_load", via: words.replace("$1", match[1] ?? ""), target: null }
+  }
+  for (const match of code.matchAll(CLIENT_ROUTE_PATTERN)) {
+    const [, object, method] = match
+    // `navigate(…)` alone (a router hook), or `router.push` / `router.replace` / `history.push`.
+    if (object === "navigate" ? method !== undefined : method === undefined) continue
+    const open = fn.start + (match.index ?? 0) + match[0].length - 1
+    const target = argAt(view, open + 1)
+    return { kind: "client", via: `${object}${method ? `.${method}` : ""}(${target.kind === "literal" ? JSON.stringify(target.value) : "…"})`, target: target.kind === "literal" ? target.value : null }
+  }
+  // An inline handler on the element that leaves: a form's submit or a plain link's click, unless the handler stops it.
+  const before = view.code.slice(Math.max(0, fn.start - 400), fn.start)
+  const attribute = /\bon(Submit|Click)\s*=\s*\{\s*(?:\([^()]*\)|[A-Za-z_$][\w$]*)?\s*(?:=>\s*)?\{?\s*$/.exec(before)
+  if (attribute && !/\bpreventDefault\s*\(/.test(code)) {
+    const tag = /<([A-Za-z][\w.]*)\b[^<]*$/.exec(view.comments.slice(Math.max(0, fn.start - 400), fn.start))?.[1] ?? ""
+    if (attribute[1] === "Submit" && tag === "form") return { kind: "full_load", via: "a form post", target: null }
+    if (attribute[1] === "Click" && tag === "a") return { kind: "full_load", via: "a plain link", target: null }
+    if (attribute[1] === "Click" && /^(?:Link|NextLink|RouterLink|NavLink)$/.test(tag)) return { kind: "client", via: `<${tag}>`, target: null }
+  }
+  return { kind: "none", via: "no navigation", target: null }
+}
+
+/** P1-A: the site's own route-change hook that forces a full page load (`routeChangeStart` → `location.assign`), or null. */
+function routeChangeFullLoadOf(views: readonly FileView[]): EventSite | null {
+  for (const view of views) {
+    if (view.server || view.generated) continue
+    const hook = /(['"`])routeChangeStart\1/.exec(view.comments)
+    if (!hook || !isCode(view, hook.index, 1)) continue
+    if (!FULL_LOAD_PATTERNS.slice(0, 2).some(({ pattern }) => pattern.test(view.code))) continue
+    return { file: view.path, line: lineAt(view, hook.index), via: "routeChangeStart" }
+  }
+  return null
+}
+
+/** A path on a pixel-free route (`/cart`, `/cart/…`). */
+function onRoute(routes: readonly string[], path: string): boolean {
+  const clean = path.split(/[?#]/)[0] || "/"
+  return routes.some((route) => clean === route || clean.startsWith(`${route.replace(/\/$/, "")}/`))
+}
+
+/**
+ * The site's navigation, settled against its route-change hook: router navigation the site turns into a full page load
+ * (into a pixel-free route, or anywhere when the scan cannot tell which) is a full page load.
+ */
+function settleNavigation(navigation: Navigation | null, hook: EventSite | null, restricted: readonly string[]): Pick<EventSite, "navigation" | "navigationVia"> {
+  if (!navigation) return {}
+  if (navigation.kind === "client" && hook && (navigation.target === null || restricted.length === 0 || onRoute(restricted, navigation.target))) {
+    return { navigation: "full_load", navigationVia: `${navigation.via}, which the site turns into a full page load (${hook.file}:${hook.line})` }
+  }
+  return { navigation: navigation.kind, navigationVia: navigation.via }
+}
+
+// ---------------------------------------------------------------------------------------------
+// P1-B: the page's "visitor allowed tracking" signal
+// ---------------------------------------------------------------------------------------------
+
+/** A setter or an action, never a reader (`setConsent`, `acceptTracking`, `trackPageView`). */
+const NOT_A_READER = /^(?:set|write|save|store|apply|accept|decline|deny|grant|revoke|withdraw|open|close|show|hide|update|parse|clear|remember|forget|init|initialize|start|stop|on|handle|use|render|track|send|capture|disable|enable|reset|load)[A-Z_]/
+const BOOLEAN_READER = /(?:Allowed|Granted|Given|Accepted|Enabled|Ok)$|^(?:has|is|can)[A-Z]/
+const STATE_READER = /^(?:get|read|current)\w*Consent\w*$|^(?:consent|cookieConsent|trackingConsent)(?:State|Status|Choice|Value)?$/
+const GRANTED_WORDS = ["granted", "accepted", "allowed", "accept", "allow", "all", "yes"] as const
+
+/** P1-B: the site's own exported consent reader the page can call with no arguments, as the signal's expression. */
+function siteConsentReaderOf(views: readonly FileView[]): Extract<TrackingSignal, { kind: "site_getter" }> | null {
+  const found: Array<Extract<TrackingSignal, { kind: "site_getter" }> & { rank: number }> = []
+  for (const view of [...views].sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0))) {
+    if (view.server || view.generated || !isCodeFile(view.path)) continue
+    const exports = [
+      ...view.code.matchAll(/\bexport\s+(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\s*(?:<[^>()]*>)?\s*\(/g),
+      ...view.code.matchAll(/\bexport\s+const\s+([A-Za-z_$][\w$]*)\s*(?::[^=;]*)?=\s*(?:async\s*)?\(/g)
+    ]
+    for (const match of exports) {
+      const name = match[1]!
+      if (NOT_A_READER.test(name) || !/consent|tracking|track|marketing|cookie/i.test(name)) continue
+      const boolean = BOOLEAN_READER.test(name)
+      if (!boolean && !STATE_READER.test(name)) continue
+      const open = (match.index ?? 0) + match[0].length - 1
+      const close = matchingClose(view.code, open)
+      if (close < 0) continue
+      // Callable with no arguments: every parameter optional or defaulted.
+      const params = splitTopLevel(view.code, open + 1, close).map(([from, to]) => view.code.slice(from, to).trim())
+      if (params.some((param) => param !== "" && !/^[A-Za-z_$][\w$]*\s*\?\s*:|=/.test(param))) continue
+      const annotation = /^\s*:\s*([^{=]*?)\s*(?:=>|\{)/.exec(view.code.slice(close + 1, close + 200))?.[1]?.trim() ?? ""
+      let expression: string | null = null
+      if (annotation === "boolean" || (boolean && annotation === "")) expression = `${name}()`
+      else {
+        // A state reader: the value it returns when the visitor said yes, as the site's own code spells it.
+        const word = GRANTED_WORDS.find((candidate) => new RegExp(`(['"\`])${candidate}\\1`).test(view.comments))
+        if (word) expression = `${name}() === ${JSON.stringify(word)}`
+      }
+      if (!expression) continue
+      found.push({ kind: "site_getter", expression, name, file: view.path, line: lineAt(view, match.index ?? 0), rank: boolean ? (/track|marketing/i.test(name) ? 0 : 1) : 2 })
+    }
+  }
+  const best = found.sort((a, b) => a.rank - b.rank)[0]
+  if (!best) return null
+  const { rank: _rank, ...signal } = best
+  return signal
+}
+
+/** P1-B: the site's tracking signal (its own reader; `true` with no consent gate at all; else the tag's helper). */
+function trackingSignalOf(views: readonly FileView[]): TrackingSignal {
+  const reader = siteConsentReaderOf(views)
+  if (reader) return reader
+  const gate = views.some((view) => !view.server && !view.generated && (isConsentFile(view.path) || isConsentText(view.text)))
+  return gate ? { kind: "tag_helper" } : { kind: "always" }
+}
+
 /** Pure: the event × tool inventory of a snapshot. `outcomes` defaults to `detectOutcomes(snapshot)`. */
 export function buildEventInventory(snapshot: RepoSnapshot, outcomes: readonly OutcomeFinding[] = detectOutcomes(snapshot)): EventInventory {
   const views: FileView[] = []
@@ -594,6 +772,12 @@ export function buildEventInventory(snapshot: RepoSnapshot, outcomes: readonly O
     if (!learned) break
   }
 
+  // P1-A: the pixel-free routes and the site's own route-change hook decide whether a router navigation leaves the page.
+  const restricted = new Set<string>()
+  for (const view of views) for (const path of restrictedRoutesOf(view)) restricted.add(path)
+  const routeChangeFullLoad = routeChangeFullLoadOf(views)
+  const leaves = (view: FileView, offset: number) => settleNavigation(navigationAt(view, offset), routeChangeFullLoad, [...restricted])
+
   // Trigger sites: the callers of the event helper holding a send (one level), else the send itself.
   const entries = new Map<FunnelEvent, EventInventoryEntry>()
   const entryOf = (event: FunnelEvent): EventInventoryEntry => {
@@ -605,25 +789,25 @@ export function buildEventInventory(snapshot: RepoSnapshot, outcomes: readonly O
     return entry
   }
   const helperCallers = new Map<string, EventSite[]>()
-  const callersOf = (view: FileView, helper: string): EventSite[] => {
-    const key = `${view.path}\u0000${helper}`
+  const callersOf = (view: FileView, helper: FunctionDef & { name: string }): EventSite[] => {
+    const key = `${view.path}\u0000${helper.name}`
     const cached = helperCallers.get(key)
     if (cached) return cached
     const sites: EventSite[] = []
     for (const other of views) {
       const local = other.path === view.path
-      const imported = imports.get(other.path)?.get(helper) === view.path
+      const imported = imports.get(other.path)?.get(helper.name) === view.path
       if (!local && !imported) continue
-      for (const match of other.comments.matchAll(new RegExp(`(?<![\\w$.])${helper.replace(/\$/g, "\\$")}\\s*\\(`, "g"))) {
+      for (const match of other.comments.matchAll(new RegExp(`(?<![\\w$.])${helper.name.replace(/\$/g, "\\$")}\\s*\\(`, "g"))) {
         const index = match.index ?? 0
-        if (!isCode(other, index, helper.length)) continue
+        if (!isCode(other, index, helper.name.length)) continue
         if (/\bfunction\s*\*?\s*$/.test(other.code.slice(Math.max(0, index - 20), index))) continue
         const openParen = index + match[0].length - 1
         const close = matchingClose(other.code, openParen)
         if (close > 0 && /^\s*(?::\s*[^{;=]*?)?\s*\{/.test(other.code.slice(close + 1, close + 100)) && !/[=(,:?]\s*$/.test(other.code.slice(Math.max(0, index - 10), index))) continue
         // The helper's own body is not a caller of itself.
-        if (local && view.functions.some((fn) => fn.name === helper && fn.start <= index && index < fn.end)) continue
-        pushSite(sites, { file: other.path, line: lineAt(other, index), via: `helper:${helper}` })
+        if (local && view.functions.some((fn) => fn.name === helper.name && fn.start <= index && index < fn.end)) continue
+        pushSite(sites, { file: other.path, line: lineAt(other, index), via: `helper:${helper.name}`, ...leaves(other, index), helperAt: { file: view.path, line: helperLine(view, helper) } })
       }
     }
     helperCallers.set(key, sites)
@@ -634,10 +818,10 @@ export function buildEventInventory(snapshot: RepoSnapshot, outcomes: readonly O
     const entry = entryOf(send.event)
     const site: EventSite = { file: send.view.path, line: lineAt(send.view, send.offset), via: send.via }
     for (const tool of send.tools) pushSite((entry.tools[tool] ??= []), site)
-    const helper = enclosing(send.view, send.offset).find((fn) => fn.name !== null && !isSenderName(send.view.path, fn.name))
-    const callers = helper?.name ? callersOf(send.view, helper.name) : []
+    const helper = enclosing(send.view, send.offset).find((fn): fn is FunctionDef & { name: string } => fn.name !== null && !isSenderName(send.view.path, fn.name))
+    const callers = helper ? callersOf(send.view, helper) : []
     if (callers.length > 0) for (const caller of callers) pushSite(entry.sites, caller)
-    else pushSite(entry.sites, site)
+    else pushSite(entry.sites, { ...site, ...leaves(send.view, send.offset) })
   }
 
   // Server facts.
@@ -674,9 +858,6 @@ export function buildEventInventory(snapshot: RepoSnapshot, outcomes: readonly O
   // A checkout session with no webhook and no success page still means a purchase happens (on the provider's page).
   if (checkoutCreates.length > 0 && !entries.has("purchase")) for (const site of checkoutCreates) pushSite(entryOf("purchase").sites, site)
 
-  const restricted = new Set<string>()
-  for (const view of views) for (const path of restrictedRoutesOf(view)) restricted.add(path)
-
   // The site's currency: what its checkout charges in, else the one its code names.
   const checkoutCurrencies = new Set<string>()
   const codeCurrencies = new Set<string>()
@@ -703,7 +884,15 @@ export function buildEventInventory(snapshot: RepoSnapshot, outcomes: readonly O
     entry.missing = EXPECTED_TOOLS[event].filter((tool) => !tools[tool]?.length)
     events.push(entry)
   }
-  return { events, checkoutCreates: sortSites(checkoutCreates), paymentWebhook, pixelRestrictedRoutes: [...restricted].sort(), siteCurrency }
+  return {
+    events,
+    checkoutCreates: sortSites(checkoutCreates),
+    paymentWebhook,
+    pixelRestrictedRoutes: [...restricted].sort(),
+    routeChangeFullLoad,
+    trackingSignal: trackingSignalOf(views),
+    siteCurrency
+  }
 }
 
 /** The inventory entry of one event, or null. */
