@@ -29,6 +29,7 @@ import { openTagBridge } from "../bridge/client.js"
 import { envProxyFetch } from "../checks/live/env-proxy-fetch.js"
 import { registerJobStaticChecks, type JobStaticRunContext } from "../checks/job-static.js"
 import { readEventInventory } from "../checks/commerce-inventory.js"
+import type { EventInventory } from "../scan/event-inventory.js"
 import { registerO9Checks, type O9RunContext } from "../checks/o9.js"
 import { runCensus } from "../checks/census.js"
 import { lexicalStates } from "../lexical-states.js"
@@ -90,6 +91,16 @@ export function readBeforeFactsSync(root: string, runId: string | null): BeforeF
   const parsed = readJsonSync(join(root, WIZARD_PATHS.beforeFacts))
   if (!isRecord(parsed) || parsed.schema !== BEFORE_FACTS_SCHEMA || parsed.runId !== runId || !isRecord(parsed.facts)) return null
   return parsed as unknown as BeforeFactsFile
+}
+
+/**
+ * The scan's own event × tool inventory as `before` wrote it (`src/scan/event-inventory.ts` shape), or null when the
+ * file holds none (an older run, or no store facts).
+ */
+export function scanInventoryOf(before: BeforeFactsFile | null): EventInventory | null {
+  const value = (before as { eventInventory?: unknown } | null)?.eventInventory
+  if (!isRecord(value) || !Array.isArray(value.events) || !Array.isArray(value.checkoutCreates) || !Array.isArray(value.pixelRestrictedRoutes)) return null
+  return value as unknown as EventInventory
 }
 
 /** THIS run's `keys` step result (its stream / pixel choices), or null. */
@@ -202,7 +213,8 @@ export function briefFactsFor(root: string, state: Readonly<WizardRunState> | nu
     helpers: writtenHelpers(root),
     guardSites: adoptedInitSites(root, state.appRoot),
     consentMode: state.plan?.answers.consentMode ?? null,
-    managedFiles: managedModules(root)
+    managedFiles: managedModules(root),
+    inventory: scanInventoryOf(before)
   }
 }
 

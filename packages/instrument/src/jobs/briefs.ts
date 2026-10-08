@@ -25,43 +25,40 @@ import { buildMetaClickIdCaptureJavascript, buildMetaClickIdCaptureScript, build
 import { adoptedMetaModuleGuardRecipe } from "../providers/meta.js"
 import { escapeForTemplateLiteral, escapeRegExp } from "../text-escape.js"
 import { sensitivePosthogOptions } from "../install/posthog-sensitive.js"
+import {
+  BROWSER_COMMERCE_EVENTS,
+  COMMERCE_EVENTS_TARGET,
+  META_EVENT_NAME,
+  SERVER_SITE_VIAS,
+  type EventInventory,
+  type EventInventoryEntry,
+  type EventSite,
+  type FunnelEvent,
+  type InventoryTool
+} from "../scan/event-inventory.js"
 
 export { escapeForTemplateLiteral }
 
 // ---------------------------------------------------------------------------------------------
 // The event × tool inventory a browser-event job carries (review P0-5, instruction side)
 // ---------------------------------------------------------------------------------------------
-//
-// LOCAL COPY of the shapes lane A's scan exports from `src/scan/event-inventory.ts` (and seeds on
-// `ChecklistItem.inventory`). Copied, not imported, until that lane merges; replace these with an import then.
-export type InventoryTool = "ga4" | "posthog" | "meta_browser" | "meta_server" | "infinite"
-export type FunnelEvent = "view_item" | "add_to_cart" | "begin_checkout" | "purchase" | "lead" | "sign_up" | "start_trial"
-export interface EventSite { file: string; line: number; via: string }
-export interface EventInventoryEntry { event: FunnelEvent; sites: EventSite[]; tools: Partial<Record<InventoryTool, EventSite[]>>; missing: InventoryTool[] }
+// The shapes are the scan's own (`src/scan/event-inventory.ts`), seeded on `ChecklistItem.inventory`.
+export type { EventInventoryEntry, EventSite, FunnelEvent, InventoryTool } from "../scan/event-inventory.js"
 
 /** The item's inventory entries (set by the registry's seeding from the scan, never by an agent). */
 function inventoryOf(item: ChecklistItem): EventInventoryEntry[] {
-  const entries = (item as ChecklistItem & { inventory?: unknown }).inventory
-  return Array.isArray(entries) ? (entries as EventInventoryEntry[]) : []
+  return item.inventory ?? []
 }
 
 /** Meta's standard event for each funnel event. */
-const META_EVENT: Readonly<Record<FunnelEvent, string>> = {
-  view_item: "ViewContent",
-  add_to_cart: "AddToCart",
-  begin_checkout: "InitiateCheckout",
-  purchase: "Purchase",
-  lead: "Lead",
-  sign_up: "CompleteRegistration",
-  start_trial: "StartTrial"
-}
+const META_EVENT = META_EVENT_NAME
 
 /** The events the page may send from the browser at all. Purchase, checkout starts and leads are the server's. */
 const BROWSER_EVENTS: ReadonlySet<FunnelEvent> = new Set(["view_item", "add_to_cart", "begin_checkout"])
 /** The events Meta gets from the browser (no event id). Every other Meta event comes from the server. */
-const META_BROWSER_EVENTS: ReadonlySet<FunnelEvent> = new Set(["view_item", "add_to_cart"])
+const META_BROWSER_EVENTS: ReadonlySet<FunnelEvent> = new Set(BROWSER_COMMERCE_EVENTS)
 /** Trigger sites in server code: never where a browser call goes. */
-const SERVER_VIAS: ReadonlySet<string> = new Set(["stripe.checkout.sessions.create", "form-api", "payment-webhook", "reportInfiniteOutcome"])
+const SERVER_VIAS = SERVER_SITE_VIAS
 
 /** The browser helper's `destinations` name for an inventory tool (null: not a browser destination). */
 const DESTINATION: Readonly<Record<InventoryTool, string | null>> = { ga4: "ga4", posthog: "posthog", meta_browser: "meta", meta_server: null, infinite: "infinite" }
@@ -70,8 +67,7 @@ const TOOL_WORD: Readonly<Record<InventoryTool, string>> = { ga4: "GA4", posthog
 /** The browser commerce job's tool, from its job (`meta_improve:commerce_events` → Meta). */
 const COMMERCE_JOB_TOOL: Readonly<Record<string, InventoryTool>> = { meta_improve: "meta_browser", ga4_improve: "ga4", posthog_improve: "posthog" }
 
-/** The item target lane A seeds browser commerce jobs under (`<tool>_improve:commerce_events`). */
-export const COMMERCE_EVENTS_TARGET = "commerce_events"
+export { COMMERCE_EVENTS_TARGET }
 
 function listWords(words: readonly string[]): string {
   if (words.length <= 1) return words.join("")
@@ -149,6 +145,12 @@ export interface BriefFacts {
    * that they are never opened or edited.
    */
   managedFiles?: string[] | null
+  /**
+   * The scan's event × tool inventory (`before-facts.json` `eventInventory`): the server-conversion briefs read its
+   * checkout session creations and payment webhook (where to report begin_checkout, where the purchase webhook is or
+   * goes). Absent = the items' own inventory entries and evidence are used.
+   */
+  inventory?: EventInventory | null
 }
 
 /**

@@ -47,6 +47,8 @@ import { isJobScan, scanForJobs, type JobScan } from "./detectors/index.js"
 import { approvedConversionNames, boundConversionNames } from "./plan-data.js"
 import {
   BROWSER_COMMERCE_EVENTS,
+  COMMERCE_EVENTS_TARGET,
+  SERVER_SITE_VIAS,
   inventoryEntry,
   META_EVENT_NAME,
   type EventInventory,
@@ -378,10 +380,10 @@ function problemChecks(facts: BeforeFacts, pattern: RegExp, tiers: readonly Chec
 // ---------------------------------------------------------------------------------------------
 
 /** The target of the browser commerce-event items (jobs 3, 4 and 5): `meta_improve:commerce_events`, … */
-export const COMMERCE_EVENTS_TARGET = "commerce_events"
+export { COMMERCE_EVENTS_TARGET }
 
 /** Trigger sites in server code (the server lane's to report from, never a browser job's). */
-const SERVER_VIAS: ReadonlySet<string> = new Set(["stripe.checkout.sessions.create", "form-api", "payment-webhook", "reportInfiniteOutcome"])
+const SERVER_VIAS = SERVER_SITE_VIAS
 
 /** The trigger sites of an inventory entry that run in the browser. */
 export function browserSites(entry: EventInventoryEntry): EventSite[] {

@@ -33,6 +33,12 @@ export interface EventInventory { events: EventInventoryEntry[]; checkoutCreates
 export const FUNNEL_EVENTS: readonly FunnelEvent[] = ["view_item", "add_to_cart", "begin_checkout", "purchase", "lead", "sign_up", "start_trial"]
 export const INVENTORY_TOOLS: readonly InventoryTool[] = ["ga4", "posthog", "meta_browser", "meta_server", "infinite"]
 
+/** The item target the browser commerce-event jobs (3, 4 and 5) are seeded under: `meta_improve:commerce_events`, … */
+export const COMMERCE_EVENTS_TARGET = "commerce_events"
+
+/** The `via` of a trigger site in server code: the server lane reports from there, never a browser call. */
+export const SERVER_SITE_VIAS: ReadonlySet<string> = new Set(["stripe.checkout.sessions.create", "form-api", "payment-webhook", "reportInfiniteOutcome"])
+
 /** The browser-only commerce steps (Meta gets them from the pixel). */
 export const BROWSER_COMMERCE_EVENTS: readonly FunnelEvent[] = ["view_item", "add_to_cart"]
 /** The events Meta gets from the server (through Infinite's relay) and Infinite records as conversions. */

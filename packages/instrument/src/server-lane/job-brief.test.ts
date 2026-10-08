@@ -10,7 +10,7 @@ const PAGES = { framework: "next-pages-router", router: "pages" as const, outcom
 
 describe("serverConversionInstructions", () => {
   it("purchase: create the Stripe webhook route when there is none, from the webhook only", () => {
-    const text = serverConversionInstructions({ event: "purchase", file: "pages/api/checkout.ts", line: 40, kind: "stripe_checkout_session" }, PAGES)
+    const text = serverConversionInstructions({ event: "purchase" }, { ...PAGES, checkoutCreates: [{ file: "pages/api/checkout.ts", line: 40, via: "stripe.checkout.sessions.create" }] })
     expect(text).toContain('The repo has no Stripe webhook route: create "pages/api/stripe-webhook.ts"')
     expect(text).toContain('import { reportStripeCheckoutPurchase } from "../../lib/infinite-outcome"')
     expect(text).toContain("export const config = { api: { bodyParser: false } }")
@@ -27,7 +27,7 @@ describe("serverConversionInstructions", () => {
   })
 
   it("purchase with an existing webhook: keep it and add the report after its signature check", () => {
-    const text = serverConversionInstructions({ event: "purchase", file: null }, { ...PAGES, stripeWebhookFile: "pages/api/webhooks/stripe.ts" })
+    const text = serverConversionInstructions({ event: "purchase", file: null }, { ...PAGES, paymentWebhook: { file: "pages/api/webhooks/stripe.ts", line: 9, via: "payment-webhook" } })
     expect(text).toContain('already has a Stripe webhook at "pages/api/webhooks/stripe.ts"')
     expect(text).toContain('import { reportStripeCheckoutPurchase } from "../../../lib/infinite-outcome"')
     expect(text).toContain("const infiniteStatus = await reportStripeCheckoutPurchase(event")

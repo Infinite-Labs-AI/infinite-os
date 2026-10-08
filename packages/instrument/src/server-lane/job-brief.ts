@@ -16,6 +16,7 @@ import { posix } from "node:path"
 
 import { sanitizeUntrusted } from "../agents/sanitize.js"
 import type { ChecklistItem } from "../wizard/contracts/jobs.js"
+import { SERVER_SITE_VIAS, type EventInventory, type EventInventoryEntry, type EventSite } from "../scan/event-inventory.js"
 
 import {
   defaultStripeWebhookRoute,
@@ -31,21 +32,18 @@ import {
 } from "./recipes.js"
 
 /**
- * One event the scan found or expects, and where. LOCAL COPY of `EventInventoryEntry` from
- * `src/scan/event-inventory.ts` (Builder A's module, not merged yet): only the fields this brief reads.
- * Replace with `import type { EventInventoryEntry } from "../scan/event-inventory.js"` once it lands.
+ * One server conversion to brief: the job's target, the scan's inventory entry for it (`src/scan/event-inventory.ts`)
+ * when there is one, and the route the scan found it in (a server trigger site, else the job's first evidence).
  */
-export interface EventInventoryEntry {
+export interface ServerConversionTarget {
   /** The conversion name: purchase, begin_checkout, lead, sign_up, start_trial, ... */
   event: string
-  /** Repo-relative file where it happens (or where it should be reported from); null when unknown. */
+  /** The scan's own entry for the event (where it fires, which tools already get it, which miss it). */
+  entry?: EventInventoryEntry | null
+  /** The server route to report from (or, for a purchase, the checkout route the scan points at). */
   file?: string | null
   /** 1-based line in `file`, when known. */
   line?: number | null
-  /** The payment provider behind it, when there is one ("stripe"). */
-  provider?: string | null
-  /** What the scan saw there, e.g. "stripe_checkout_session", "stripe_webhook", "api_route", "success_page". */
-  kind?: string | null
 }
 
 export interface ServerConversionBriefContext {
@@ -57,8 +55,12 @@ export interface ServerConversionBriefContext {
   outcomeHelper: string | null
   /** The approved conversion name the plan uses for this event (defaults to the event itself). */
   conversionName?: string
-  /** An existing Stripe webhook route, repo-relative, when the scan found one. */
-  stripeWebhookFile?: string | null
+  /** The scan's payment webhook (`EventInventory.paymentWebhook`), when the site already has one. */
+  paymentWebhook?: EventSite | null
+  /** The scan's Stripe Checkout Session creations (`EventInventory.checkoutCreates`): where begin_checkout is reported. */
+  checkoutCreates?: readonly EventSite[]
+  /** The webhook route this job may create (the job's `allow.create`), when the site has none. */
+  newWebhookFile?: string | null
   /** The app root ("." for the repo root), so a new route lands inside the app. */
   appRoot?: string
 }
@@ -95,9 +97,21 @@ function quotedPath(path: string): string {
   return JSON.stringify(sanitizeUntrusted(path.replace(/[\u2028\u2029]/g, " "), 100_000))
 }
 
-function where(entry: EventInventoryEntry): string {
-  if (!entry.file) return "where it becomes real (the scan found no single place: find it)"
-  return entry.line ? `${quotedPath(entry.file)} line ${Math.trunc(entry.line)}` : quotedPath(entry.file)
+function whereAt(site: { file?: string | null; line?: number | null } | null | undefined): string {
+  if (!site?.file) return "where it becomes real (the scan found no single place: find it)"
+  return site.line ? `${quotedPath(site.file)} line ${Math.trunc(site.line)}` : quotedPath(site.file)
+}
+
+/** The pages that send this conversion's request (the entry's browser trigger sites), for the tracking signal. */
+function pageSites(entry: EventInventoryEntry | null | undefined): EventSite[] {
+  return (entry?.sites ?? []).filter((site) => !SERVER_SITE_VIAS.has(site.via))
+}
+
+/** The page side: the request carries the visitor's tracking signal, read from the page, never from cookies. */
+function pageSignalLine(entry: EventInventoryEntry | null | undefined, field: "query" | "body"): string {
+  const pages = [...new Set(pageSites(entry).map((site) => site.file))]
+  const where = pages.length > 0 ? ` (${pages.slice(0, 3).map(quotedPath).join(", ")})` : ""
+  return `On the page that sends this request${where}, add the visitor's tracking signal to it and change nothing else there: \`adMatch: infiniteAdMatchAllowed()\` in a JSON body, or ${field === "query" ? "\`ad_match=1\` on the request (a query parameter or a hidden form field)" : "a hidden \`adMatch\` field"} only when it is true; read the route side to match. A site that keeps its own consent state may read that instead (read only).`
 }
 
 const COMMON_RULES = [
@@ -116,19 +130,23 @@ function helperLine(helper: string): string {
  * plan withholds it otherwise), so the helper exists; `ctx.outcomeHelper` names its exact file, and without
  * that record the lane's own default (`<app>/lib/infinite-outcome.ts`) is named.
  */
-export function serverConversionInstructions(entry: EventInventoryEntry, ctx: ServerConversionBriefContext): string {
+export function serverConversionInstructions(target: ServerConversionTarget, ctx: ServerConversionBriefContext): string {
   const helper = ctx.outcomeHelper ?? `${ctx.appRoot && ctx.appRoot !== "." ? `${ctx.appRoot}/` : ""}lib/infinite-outcome.ts`
   const language = languageOf(helper)
   const router = routerFor(ctx)
-  const name = ctx.conversionName ?? entry.event
+  const name = ctx.conversionName ?? target.event
   const appPrefix = ctx.appRoot && ctx.appRoot !== "." ? `${ctx.appRoot}/` : ""
   const srcDir = /(^|\/)src\/lib\//.test(helper)
   const importFor = (file: string) => outcomeImportFrom(file, helper)
+  const entry = target.entry ?? null
+  const at = target.file ? { file: target.file, line: target.line ?? null } : null
+  // The scan's checkout session creation (the inventory), else the job's own place when it is not a webhook.
+  const checkout = ctx.checkoutCreates?.[0] ?? (at && !/webhook/i.test(at.file) ? at : null)
 
-  if (PURCHASE_EVENTS.has(entry.event)) {
-    const existing = ctx.stripeWebhookFile ?? (entry.kind === "stripe_webhook" ? entry.file ?? null : null)
+  if (PURCHASE_EVENTS.has(target.event)) {
+    const existing = ctx.paymentWebhook?.file ?? null
     const route = defaultStripeWebhookRoute(router, language, srcDir)
-    const routeFile = `${appPrefix}${route.file}`
+    const routeFile = ctx.newWebhookFile ?? `${appPrefix}${route.file}`
     return [
       `Here: report \`${name}\` from the Stripe PAYMENT WEBHOOK only (Meta Purchase through Infinite), never from the page, the success page or a click.`,
       helperLine(helper),
@@ -142,14 +160,10 @@ export function serverConversionInstructions(entry: EventInventoryEntry, ctx: Se
           : stripeWebhookRouteSource({ language, router, importSpecifier: importFor(routeFile) })
       ),
       `   It verifies Stripe's signature on the raw body (${STRIPE_WEBHOOK_SECRET_ENV}), then \`reportStripeCheckoutPurchase\` reports only \`${STRIPE_PURCHASE_EVENTS.join("` / `")}\` for a paid, live (livemode) session that this site's checkout created, with value (major units; zero-decimal currencies kept whole), currency, content_ids, num_items, the visit key and the PAYER's hashed match data. Its answer is the route's answer: 500 only when a retry can deliver the report (not delivered, Infinite 5xx, 401, 403, 429), 200 for everything else, so Stripe never retry-storms before setup.`,
-      `2. The checkout route (where the site calls \`stripe.checkout.sessions.create\`${entry.file && entry.kind !== "stripe_webhook" ? `; the scan points at ${where(entry)}` : ""}) must save the cart and the buyer's device data on the session, or the webhook has nothing to report from (\`siteCheckout\` stays false and it answers 200). If the begin_checkout job does not already cover that route, apply its edit there:`,
+      `2. The checkout route (where the site calls \`stripe.checkout.sessions.create\`${checkout ? `; the scan points at ${whereAt(checkout)}` : ""}) must save the cart and the buyer's device data on the session, or the webhook has nothing to report from (\`siteCheckout\` stays false and it answers 200). If the begin_checkout job does not already cover that route, apply its edit there:`,
       ...codeBlock(
         language,
-        stripeCheckoutEdit({
-          language,
-          router,
-          importSpecifier: entry.file && entry.kind !== "stripe_webhook" ? importFor(entry.file) : "<the helper, imported from that route>"
-        })
+        stripeCheckoutEdit({ language, router, importSpecifier: checkout ? importFor(checkout.file) : "<the helper, imported from that route>" })
       ),
       "   `contentIds` are the cart's product or price ids and `numItems` its item count; keep the route's own metadata and parameters.",
       "Do not also report the purchase anywhere else (no success-page call, no browser Purchase): the session id is the one event id, so the webhook alone counts it once.",
@@ -157,26 +171,28 @@ export function serverConversionInstructions(entry: EventInventoryEntry, ctx: Se
     ].join("\n")
   }
 
-  if (CHECKOUT_EVENTS.has(entry.event)) {
-    const file = entry.file ?? null
+  if (CHECKOUT_EVENTS.has(target.event)) {
+    const file = checkout?.file ?? null
     return [
-      `Here: report \`${name}\` (Meta InitiateCheckout through Infinite) where the route creates the Stripe Checkout Session: ${where(entry)}. In the background: the visitor is never held more than 800 ms.`,
+      `Here: report \`${name}\` (Meta InitiateCheckout through Infinite) where the route creates the Stripe Checkout Session: ${whereAt(checkout)}. In the background: the visitor is never held more than 800 ms.`,
       helperLine(helper),
       "Wrap the route's existing `stripe.checkout.sessions.create(params)` like this (keep its own parameters and metadata; `contentIds` = the cart's product or price ids, `numItems` = its item count):",
       ...codeBlock(language, stripeCheckoutEdit({ language, router, importSpecifier: file ? importFor(file) : "<the helper, imported from this route>" })),
       "`contextMetadata` stores one metadata field per value (the cart, the visit key, and only with the page's signal the `_fbc`/`_fbp` cookies, ip and user agent); a value over Stripe's 500-character limit is left out, never cut. The purchase webhook reads them back. Report after the session exists and before the redirect.",
+      pageSignalLine(entry, "query"),
       ...COMMON_RULES.map((rule) => `- ${rule}`)
     ].join("\n")
   }
 
-  if (LEAD_EVENTS.has(entry.event)) {
-    const file = entry.file ?? null
+  if (LEAD_EVENTS.has(target.event)) {
+    const file = at?.file ?? null
     const type = name
     return [
-      `Here: report \`${type}\` from the server route that stores it: ${where(entry)}, right after the sign-up is stored (the row committed, the address subscribed), never on the click.`,
+      `Here: report \`${type}\` from the server route that stores it: ${whereAt(at)}, right after the sign-up is stored (the row committed, the address subscribed), never on the click.`,
       helperLine(helper),
       ...codeBlock(language, leadRouteEdit({ language, router, importSpecifier: file ? importFor(file) : "<the helper, imported from this route>", type, fallbackPath: "/" })),
       "`email` is the submitted address, `body` the parsed request body, `signupId` the stored row's id. The event id is `" + type + ":<HMAC of the normalized email under LEAD_ID_SECRET>` (one per person, so a re-submit counts once), and the same person's purchase carries the same external_id. Set `fallbackPath` to the page the form is on.",
+      pageSignalLine(entry, "body"),
       "Only if this route's response is what the page waits on before it fires the browser Meta event, use the mirror form instead and return its two values to the page:",
       ...codeBlock(language, mirrorRouteEdit({ language, router, importSpecifier: file ? importFor(file) : "<the helper, imported from this route>" })),
       ...COMMON_RULES.map((rule) => `- ${rule}`)
@@ -185,7 +201,7 @@ export function serverConversionInstructions(entry: EventInventoryEntry, ctx: Se
 
   // Any other server outcome (start_trial, subscribe, a custom name): the generic call.
   return [
-    `Here: report \`${name}\` at ${where(entry)}, the moment it becomes real, with \`await reportInfiniteOutcome({ type: ${JSON.stringify(name)}, eventId: <a stable id: the subscription, order or account id>, path: <the page it belongs to>, properties: { ... }, adMatch })\`.`,
+    `Here: report \`${name}\` at ${whereAt(at)}, the moment it becomes real, with \`await reportInfiniteOutcome({ type: ${JSON.stringify(name)}, eventId: <a stable id: the subscription, order or account id>, path: <the page it belongs to>, properties: { ... }, adMatch })\`.`,
     helperLine(helper),
     "In a route the visitor's own browser called, `adMatch` is `await adMatchFromRequest(request, { trackingAllowed, person: { email, externalId: await infiniteLeadId(email) } })`. In a webhook, the browser's device data must have been saved earlier (`buyerContext` + `contextMetadata` at checkout, `contextFromMetadata` + `personMatch` in the webhook). A webhook answers 500 only when `reportInfiniteOutcome` resolved null, a 5xx, 401, 403 or 429, and only after `infiniteConfigured()` is true.",
     ...COMMON_RULES.map((rule) => `- ${rule}`)
@@ -199,27 +215,39 @@ export function outcomeHelperAmong(files: readonly string[] | null | undefined):
 
 /**
  * The server-conversions job's instructions for one checklist item (`server_conversions:<conversion>`): the
- * entry is the item's target and first evidence; the context is the brief's facts. The ONE entry point
+ * item's target and its inventory entry (the registry seeds it from the scan), the server route the scan found
+ * (a server trigger site of the entry, else the item's first evidence), and the scan's checkout and webhook facts
+ * (`facts.inventory`, the before step's inventory; the item's own evidence when it is absent). The ONE entry point
  * `jobs/briefs.ts` calls.
  */
 export function serverConversionInstructionsForItem(
-  item: Pick<ChecklistItem, "id" | "trigger">,
-  facts: { framework: string; router: "app" | "pages" | null; appRoot: string; managedFiles?: string[] | null },
+  item: Pick<ChecklistItem, "id" | "trigger" | "allow" | "inventory">,
+  facts: { framework: string; router: "app" | "pages" | null; appRoot: string; managedFiles?: string[] | null; inventory?: EventInventory | null },
   conversionName?: string
 ): string {
   const index = item.id.indexOf(":")
   const event = index < 0 ? item.id : item.id.slice(index + 1)
-  const first = item.trigger.evidence.find((evidence): evidence is { file: string; line: number } => "file" in evidence)
-  const webhook = item.trigger.evidence.find((evidence): evidence is { file: string; line: number } => "file" in evidence && /webhook/i.test(evidence.file))
+  const entry = item.inventory?.[0] ?? null
+  const evidence = item.trigger.evidence.filter((entry): entry is { file: string; line: number } => "file" in entry)
+  const serverSite = (entry?.sites ?? []).find((site) => site.via === "form-api" || site.via === "payment-webhook")
+  const first = serverSite ?? evidence[0] ?? null
+  const inventory = facts.inventory ?? null
+  // The scan's facts, else what the item itself carries (its entry's sites, its webhook evidence).
+  const checkoutCreates = inventory?.checkoutCreates.length ? inventory.checkoutCreates : (entry?.sites ?? []).filter((site) => site.via === "stripe.checkout.sessions.create")
+  const webhookEvidence = evidence.find((site) => /webhook/i.test(site.file))
+  const paymentWebhook = inventory ? inventory.paymentWebhook : (entry?.sites.find((site) => site.via === "payment-webhook") ?? (webhookEvidence ? { ...webhookEvidence, via: "payment-webhook" } : null))
+  const newWebhookFile = item.allow?.create.find((file) => /webhook/i.test(file)) ?? null
   return serverConversionInstructions(
-    { event, file: first?.file ?? null, line: first?.line ?? null },
+    { event, entry, file: first?.file ?? null, line: first?.line ?? null },
     {
       framework: facts.framework,
       router: facts.router,
       appRoot: facts.appRoot,
       outcomeHelper: outcomeHelperAmong(facts.managedFiles),
       ...(conversionName ? { conversionName } : {}),
-      stripeWebhookFile: webhook?.file ?? null
+      checkoutCreates,
+      paymentWebhook,
+      newWebhookFile
     }
   )
 }
