@@ -142,7 +142,7 @@ describe("P1-B: the page's tracking signal is true for every visitor who allowed
 
   it("names the site's own consent reader, read only, as the signal the page sends", () => {
     const text = serverConversionInstructions({ event: "lead", entry, file: "pages/api/join.ts", line: 9 }, { ...PAGES, trackingSignal: { kind: "site_getter", expression: 'getConsent() === "granted"', name: "getConsent", file: "src/analytics/tracking.ts", line: 53 }, pageRequests: JOIN_JSON })
-    expect(text).toContain('On the page that sends this request ("pages/join.tsx" line 31, a JSON fetch), add only the visitor\'s tracking signal: `adMatch: getConsent() === "granted"` in the JSON body it sends, which the route reads as `body.adMatch === true` (as the code above does).')
+    expect(text).toContain('On the page that sends this request ("pages/join.tsx" line 31, a JSON fetch), add only the visitor\'s tracking signal: `adMatch: getConsent() === "granted"` in the JSON body it sends, read while the body is built for that request, which the route reads as `body.adMatch === true` (as the code above does).')
     // `body` is said to be the parsed request body, so `body.adMatch` and `req.body.adMatch` are one read.
     expect(text).toContain("`body` the parsed request body (`req.body`)")
     expect(text).toContain('`getConsent` is the site\'s own consent reader, exported by "src/analytics/tracking.ts" line 53: import it relative to the page and call it, never edit that file.')
@@ -178,7 +178,9 @@ describe("Finding 1: the route reads the signal from where the page is told to s
     const text = checkout("form")
     expect(text).toContain('const trackingAllowed = req.body?.ad_match === "1"')
     expect(text).toContain('("pages/cart.tsx" line 68, a form that posts)')
-    expect(text).toContain('one hidden field inside the form: `<input type="hidden" name="ad_match" value={getConsent() === "granted" ? "1" : "0"} />`, which the route reads as `req.body?.ad_match === "1"` (as the code above does).')
+    // The signal is read when the form submits, never computed at render (a withdrawal on the page would be missed).
+    expect(text).not.toContain('value={getConsent() === "granted"')
+    expect(text).toContain('one hidden field inside the form, `<input type="hidden" name="ad_match" defaultValue="0" />`, whose value the form\'s submit handler sets at the moment of submit: `"1"` when `getConsent() === "granted"` is true then, else `"0"` (read it in `onSubmit` and write the field there, never when the page renders, because a visitor who withdraws consent while on the page must send no match data), which the route reads as `req.body?.ad_match === "1"` (as the code above does).')
     expect(text).toContain('await reportStripeCheckoutStarted(session, { path: "/cart" })')
     expect(text).not.toContain("req.query")
     expect(text).not.toMatch(/a query parameter or a hidden form field|in a JSON body, or/)
@@ -189,7 +191,7 @@ describe("Finding 1: the route reads the signal from where the page is told to s
     expect(checkout("json")).toContain('`adMatch: getConsent() === "granted"` in the JSON body it sends')
     const link = checkout("query")
     expect(link).toContain('const trackingAllowed = req.query.ad_match === "1"')
-    expect(link).toContain('`ad_match=1` in the request\'s URL only when `getConsent() === "granted"` is true')
+    expect(link).toContain('`ad_match=1` in the request\'s URL only when `getConsent() === "granted"` is true, read when the request is made')
     expect(checkout("form", "app")).toContain('const trackingAllowed = form.get("ad_match") === "1"')
   })
 
@@ -205,8 +207,8 @@ describe("Finding 1: the route reads the signal from where the page is told to s
   it("unknown: each way the page may send it, with the route read that matches it", () => {
     const text = checkout("unknown")
     expect(text).toContain("make the route's `trackingAllowed` read it from that same place (replace the read in the code above)")
-    expect(text).toContain('a form that posts: one hidden field inside the form: `<input type="hidden" name="ad_match" value={getConsent() === "granted" ? "1" : "0"} />`, read in the route as `req.body?.ad_match === "1"`')
-    expect(text).toContain('a JSON fetch: `adMatch: getConsent() === "granted"` in the JSON body it sends, read in the route as `req.body?.adMatch === true`')
+    expect(text).toContain('a form that posts: one hidden field inside the form, `<input type="hidden" name="ad_match" defaultValue="0" />`, whose value the form\'s submit handler sets at the moment of submit: `"1"` when `getConsent() === "granted"` is true then, else `"0"` (read it in `onSubmit` and write the field there, never when the page renders, because a visitor who withdraws consent while on the page must send no match data), read in the route as `req.body?.ad_match === "1"`')
+    expect(text).toContain('a JSON fetch: `adMatch: getConsent() === "granted"` in the JSON body it sends, read while the body is built for that request, read in the route as `req.body?.adMatch === true`')
     expect(text).toContain("read in the route as `req.query.ad_match === \"1\"`")
   })
 

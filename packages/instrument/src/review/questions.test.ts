@@ -24,6 +24,8 @@ describe("review questions", () => {
     expect(signal).toContain('`readConsent() === "yes"` (the site\'s own reader, exported by src/consent.ts:4; read it, never change it)')
     expect(signal).toContain("pages/join.tsx:14 (a JSON fetch) → pages/api/join.ts, carried as a key in the JSON body it sends")
     expect(signal).toContain("with the right polarity (allowed → true, anything else → false)")
+    expect(signal).toContain("a posted form sets its hidden field in its own submit handler, a JSON fetch reads it while building the body")
+    expect(signal).toContain("A value computed when the page renders is wrong: a visitor who withdraws consent while on the page would still send match data.")
     expect(questions.find((question) => question.id === "once")!.text).toContain('the site already sends it to GA4 as "generate_lead" (src/events.ts:9)')
     expect(questions.every((question) => question.itemId === "server_conversions:lead")).toBe(true)
   })

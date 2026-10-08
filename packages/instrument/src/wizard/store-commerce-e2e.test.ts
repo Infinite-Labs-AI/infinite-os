@@ -422,7 +422,7 @@ describe("store: the wizard's own scan, plan and briefs", () => {
     expect(checkout).not.toContain("infiniteAdMatchAllowed()")
     // Finding 1: the cart is a native form POST, so ONE wording: a hidden ad_match field, read from the parsed body.
     expect(checkout).toContain('const trackingAllowed = req.body?.ad_match === "1"')
-    expect(checkout).toContain('On the page that sends this request ("pages/cart.tsx" line 68, a form that posts), add only the visitor\'s tracking signal: one hidden field inside the form: `<input type="hidden" name="ad_match" value={getConsent() === "granted" ? "1" : "0"} />`, which the route reads as `req.body?.ad_match === "1"` (as the code above does).')
+    expect(checkout).toContain('On the page that sends this request ("pages/cart.tsx" line 68, a form that posts), add only the visitor\'s tracking signal: one hidden field inside the form, `<input type="hidden" name="ad_match" defaultValue="0" />`, whose value the form\'s submit handler sets at the moment of submit: `"1"` when `getConsent() === "granted"` is true then, else `"0"` (read it in `onSubmit` and write the field there, never when the page renders, because a visitor who withdraws consent while on the page must send no match data), which the route reads as `req.body?.ad_match === "1"` (as the code above does).')
     expect(checkout).not.toContain("req.query")
     const lead = block("server_conversions:lead")
     expect(lead).toContain('"pages/api/mailing-list.ts"')

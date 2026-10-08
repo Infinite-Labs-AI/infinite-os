@@ -152,16 +152,26 @@ function signalValue(signal: TrackingSignal | null | undefined): string {
   return "infiniteAdMatchAllowed()"
 }
 
-/** What the page adds to its request so the route can read the signal: ONE wording per way the page sends it. */
+/** Why the signal is read when the request leaves, never earlier: ONE wording for every way the page sends it. */
+const AT_SUBMIT_REASON = "never when the page renders, because a visitor who withdraws consent while on the page must send no match data"
+
+/**
+ * What the page adds to its request so the route can read the signal: ONE wording per way the page sends it. The
+ * signal is read at the moment the request leaves: a posted form sets its hidden field in its own submit handler (a
+ * value computed during render goes stale when the visitor changes their choice on the page), a JSON fetch reads it
+ * while building the body, and a URL is built when the request is made.
+ */
 export function signalCarryWords(source: SignalSource, signal: TrackingSignal | null | undefined, pageFile?: string | null): string {
   const value = signalValue(signal)
   const always = signal?.kind === "always"
   if (source === "form") {
-    if (pageFile && /\.html?$/i.test(pageFile)) return always ? "one hidden field `ad_match` with the value `1` inside the form" : `one hidden field \`ad_match\` inside the form, set to \`1\` just before it submits only when \`${value}\` is true`
-    return always ? 'one hidden field inside the form: `<input type="hidden" name="ad_match" value="1" />`' : `one hidden field inside the form: \`<input type="hidden" name="ad_match" value={${value} ? "1" : "0"} />\``
+    if (pageFile && /\.html?$/i.test(pageFile)) return always ? "one hidden field `ad_match` with the value `1` inside the form" : `one hidden field \`ad_match\` inside the form, set in the form's submit handler at the moment it submits: \`1\` when \`${value}\` is true then, else \`0\` (${AT_SUBMIT_REASON})`
+    return always
+      ? 'one hidden field inside the form: `<input type="hidden" name="ad_match" value="1" />`'
+      : `one hidden field inside the form, \`<input type="hidden" name="ad_match" defaultValue="0" />\`, whose value the form's submit handler sets at the moment of submit: \`"1"\` when \`${value}\` is true then, else \`"0"\` (read it in \`onSubmit\` and write the field there, ${AT_SUBMIT_REASON})`
   }
-  if (source === "json") return `\`adMatch: ${value}\` in the JSON body it sends`
-  return always ? "`ad_match=1` in the request's URL" : `\`ad_match=1\` in the request's URL only when \`${value}\` is true (for example \`\${${value} ? "&ad_match=1" : ""}\`)`
+  if (source === "json") return `\`adMatch: ${value}\` in the JSON body it sends, read while the body is built for that request`
+  return always ? "`ad_match=1` in the request's URL" : `\`ad_match=1\` in the request's URL only when \`${value}\` is true, read when the request is made (for example \`\${${value} ? "&ad_match=1" : ""}\` inside the handler that sends it, ${AT_SUBMIT_REASON})`
 }
 
 const SOURCE_WORDS: Readonly<Record<SignalSource, string>> = { form: "a form that posts", json: "a JSON fetch", query: "a link, a GET form or a fetch with no body" }

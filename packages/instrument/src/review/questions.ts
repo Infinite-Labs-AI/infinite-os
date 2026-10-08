@@ -123,7 +123,9 @@ function signalQuestion(facts: QuestionFacts, item: ChecklistItem, event: Invent
     id: "signal",
     text:
       `Does ${pages} send the visitor's tracking-allowed signal, built from ${reader}, in the request the route reads, under the same key and in the ` +
-      `same place, with the right polarity (allowed → true, anything else → false)? And does the route pass exactly that on as trackingAllowed?`
+      `same place, with the right polarity (allowed → true, anything else → false)? Is it read at the moment the request leaves: a posted form sets its hidden field ` +
+      `in its own submit handler, a JSON fetch reads it while building the body, a URL is built when the request is made? A value computed when the page renders ` +
+      `is wrong: a visitor who withdraws consent while on the page would still send match data. And does the route pass exactly that on as trackingAllowed?`
   }
 }
 
