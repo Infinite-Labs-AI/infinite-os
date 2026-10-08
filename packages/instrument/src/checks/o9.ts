@@ -13,8 +13,6 @@
 //   • the PostHog config BEFORE the job (`posthog_config`'s privacy drift) is read at the base commit
 //     (`git show HEAD:<file>`), or given as `before`; when it cannot be read the drift verdict is
 //     `undetermined`, never a pass;
-//   • the production hosts (`adopted_init_guarded`'s "guard silences production") come from the input
-//     or the run (`deps.run()`); unknown → a found guard is `undetermined`, never a pass;
 //   • with an `item`, a job-level check grades only the item's files (`allow.files`, `allow.create`,
 //     the trigger's evidence) and the item's own finding — never an unrelated finding elsewhere.
 import { execFileSync } from "node:child_process"
@@ -26,16 +24,11 @@ import { readManagedCapture } from "../install/managed-capture.js"
 import { detectFbcWriters } from "../jobs/detectors/fbc-writers.js"
 import { generatedApiTexts } from "../jobs/generated-api.js"
 import { checkMetaAutoConfigOptOut } from "../providers/meta-browser/autoconfig.js"
-import { checkHostGuard, readAdoptedInitGuards } from "../setup-checks/host-guard.js"
 import { readAppSources, setupChecksOver, validatedCaptureContext, type SetupChecksContext } from "../setup-checks/index.js"
 import { checkMetaEventId } from "../setup-checks/meta-event-id.js"
 import { checkPosthogConfig, posthogConfigDrift, readPosthogConfigs, type PosthogConfigRead } from "../setup-checks/posthog-config.js"
 import type { SetupFinding } from "../setup-checks/types.js"
-import { CONVERSION_TYPES, type TagHosting } from "../wizard/contracts/bridge.js"
-import { boundConversionNames } from "../jobs/plan-data.js"
-import { formRegions, literalAttributeValue } from "../setup-checks/markup.js"
-import { runtimeConversionLanes } from "../setup-checks/contract.js"
-import { jobStaticCheckFunctions } from "./job-static.js"
+import type { TagHosting } from "../wizard/contracts/bridge.js"
 import type { ChecklistItem, CheckContext, CheckFn, CheckResult, CheckRunner, EnvSourcedId, TurnDiff } from "../wizard/contracts/jobs.js"
 import type { TestExpect } from "../wizard/contracts/test-engine.js"
 
@@ -63,13 +56,10 @@ export const O9_CHECK_IDS = {
   turnGate: "turn_gate",
   setupChecks: "setup_checks",
   posthogConfig: "posthog_config",
-  adoptedInitGuarded: "adopted_init_guarded",
   metaEventIdFromHelper: "meta_event_id_from_helper",
-  noFbqStandardOnClick: "no_fbq_standard_on_click",
   clickIdCapture: "click_id_capture",
   /** LF4-P1-2: the autoConfig job's own check (automatic events off before the adopted pixel's init). */
-  metaAutoconfigOff: "meta_autoconfig_off",
-  setupRerunClean: "setup_rerun_clean"
+  metaAutoconfigOff: "meta_autoconfig_off"
 } as const
 export type O9CheckId = (typeof O9_CHECK_IDS)[keyof typeof O9_CHECK_IDS]
 
@@ -96,12 +86,9 @@ export interface O9CheckInputs {
   turn_gate: { diff: TurnDiff; connectionIds: readonly string[] }
   setup_checks: { appRoot: string; context?: SetupChecksContext }
   posthog_config: JobInput & { before?: readonly PosthogConfigRead[]; sensitivePagesApproved?: boolean; expectedApiHost?: string }
-  adopted_init_guarded: JobInput & { productionHosts?: readonly string[] }
   meta_event_id_from_helper: JobInput
-  no_fbq_standard_on_click: JobInput
   click_id_capture: JobInput
   meta_autoconfig_off: JobInput
-  setup_rerun_clean: JobInput & { context?: SetupChecksContext }
 }
 
 /** What O3 passes a job-level check: `{item, root, appRoot, runId}` (item and root optional elsewhere). */
@@ -204,17 +191,6 @@ function itemScope(input: Record<string, unknown>, appRoot: string, root: string
     const repoRelative = base ? normalize(relative(base, join(appRoot, finding.file))) : appRelative
     return files.has(appRelative) || files.has(repoRelative)
   }
-}
-
-/** The tool an item targets, from its id (`preview_guard:ga4` → GA4), or null. */
-function itemTool(input: Record<string, unknown>): "GA4" | "PostHog" | "Meta pixel" | null {
-  const id = (input.item as { id?: unknown } | undefined)?.id
-  if (typeof id !== "string") return null
-  const target = id.slice(id.indexOf(":") + 1).toLowerCase()
-  if (/\bga4\b|google/.test(target)) return "GA4"
-  if (/posthog/.test(target)) return "PostHog"
-  if (/meta|pixel|fbq/.test(target)) return "Meta pixel"
-  return null
 }
 
 function object(input: unknown): Record<string, unknown> {
@@ -327,32 +303,6 @@ export function o9CheckFunctions(deps: O9CheckDeps): Record<O9CheckId, CheckFn> 
       results.push(...[...drift, ...findings].map((finding) => setupFindingResult(finding, ctx, "posthog_config")))
       return results.length > 0 ? results : [checkResult("posthog_config", "pass", "S", ctx, { reason: "the site's PostHog config reads cleanly and its privacy settings are unchanged" })]
     }),
-    adopted_init_guarded: wrap("adopted_init_guarded", "S", (input, ctx) => {
-      const files = filesOf(input)
-      const run = deps.run?.()
-      const productionHosts = Array.isArray(input.productionHosts) ? (input.productionHosts as string[]) : run?.productionHosts
-      const expectedEmittedGuard = run?.expectedEmittedGuard
-      const tool = itemTool(input)
-      const toolAt = new Map(readAdoptedInitGuards(files).map((read) => [`${read.file}:${read.line}`, read.tool]))
-      const findings = scoped(
-        input,
-        checkHostGuard({ files, strict: true, ...(productionHosts ? { productionHosts } : {}), ...(expectedEmittedGuard ? { expectedEmittedGuard } : {}) }).findings.filter(
-          (finding) => tool === null || toolAt.get(`${finding.file}:${finding.line}`) === tool
-        )
-      )
-      if (findings.length === 0) {
-        return [checkResult("adopted_init_guarded", "info", "S", ctx, { reason: "no adopted GA4, PostHog or Meta init was found to guard" })]
-      }
-      return findings.map((finding) =>
-        // Without the production hosts a found guard cannot be shown NOT to silence production (decision 3).
-        finding.state === "ok" && !productionHosts
-          ? checkResult("adopted_init_guarded", "undetermined", "S", ctx, {
-              reason: `${finding.code}: a guard is there, but the production hosts are unknown, so whether it silences production could not be checked`,
-              ...(finding.file ? { evidence: [{ file: finding.file, line: finding.line ?? 1 }] } : {})
-            })
-          : setupFindingResult(finding, ctx, "adopted_init_guarded")
-      )
-    }),
     meta_event_id_from_helper: wrap("meta_event_id_from_helper", "S", (input, ctx) =>
       onlyCodes(
         input,
@@ -361,16 +311,6 @@ export function o9CheckFunctions(deps: O9CheckDeps): Record<O9CheckId, CheckFn> 
         "meta_event_id_from_helper",
         ["INF_SETUP_META_EVENT_ID_PAGE_BUILT", "INF_SETUP_META_EVENT_ID_UNDETERMINED"],
         "every Meta event id in page code comes from the server's metaEventId"
-      )
-    ),
-    no_fbq_standard_on_click: wrap("no_fbq_standard_on_click", "S", (input, ctx) =>
-      onlyCodes(
-        input,
-        checkMetaEventId({ files: filesOf(input) }).findings,
-        ctx,
-        "no_fbq_standard_on_click",
-        ["INF_SETUP_META_STANDARD_ON_CLICK"],
-        "no standard Meta conversion fires from a click handler"
       )
     ),
     click_id_capture: wrap("click_id_capture", "S", async (input, ctx) => {
@@ -431,47 +371,6 @@ export function o9CheckFunctions(deps: O9CheckDeps): Record<O9CheckId, CheckFn> 
       const unread = verdicts.find((verdict) => verdict.reason !== "opted_out_before_init")!
       return [checkResult("meta_autoconfig_off", "undetermined", "S", ctx, { reason: `automatic events on pixel ${unread.pixelId}: ${unread.reason}` })]
     }),
-    setup_rerun_clean: wrap("setup_rerun_clean", "S", async (input, ctx) => {
-      const sources = filesOf(input)
-      const report = setupChecksOver(sources, setupContext(input))
-      const item = input.item as JobInput["item"] | undefined
-      const target = item?.id.startsWith("setup_check_fixes:") ? item.id.slice("setup_check_fixes:".length) : null
-      const ownCheck = report.checks.some(check => check.check === target)
-      let findings = scoped(input, report.findings).filter(finding => !ownCheck || finding.check === target || (target === "silent_form" && finding.check === "conversion_placement"))
-      if (target === "silent_form" && item) {
-        const inScope = itemScope(input, appRootOf(input, deps), rootOf(input))
-        const forms = [...sources].filter(([file]) => !inScope || inScope({ file })).flatMap(([, source]) => formRegions(source))
-        const names = setupContext(input).conversionNames ?? []
-        const marker = forms.length === 1 ? literalAttributeValue(forms[0]!.site.openingTag, "data-conversion") : null
-        const runtimeMarker = runtimeConversionLanes().some(lane => lane.value === marker)
-        // A helper name is not a submit listener. A source-verifiable success call is required.
-        if (forms.length === 1 && names.length > 0 && !runtimeMarker) {
-          const types = CONVERSION_TYPES.filter(type => boundConversionNames(type, names).some(name => marker === null || name === marker))
-          const check = jobStaticCheckFunctions({ root: rootOf(input), run: () => ({ conversionNames: names }) }).track_after_success
-          const checks: CheckResult[] = []
-          for (const type of types) {
-            const read = await check({ ...input, item: { ...item, jobId: "conversions_to_tools", id: `conversions_to_tools:${type}` } }, ctx)
-            checks.push(...(Array.isArray(read) ? read : [read]))
-          }
-          if (checks.some(result => result.state === "pass")) findings = findings.filter(finding => finding.check !== "silent_form")
-          else if (marker !== null && names.includes(marker)) return [{ ...(checks[0] ?? checkResult("setup_rerun_clean", "undetermined", "S", ctx, { reason: "the approved marker has no success handler the wizard can verify" })), checkId: "setup_rerun_clean" }]
-        }
-      }
-      const problems = findings.filter((finding) => finding.state === "problem")
-      const undetermined = findings.filter((finding) => finding.state === "undetermined")
-      if (problems.length > 0) {
-        return [
-          checkResult("setup_rerun_clean", "problem", "S", ctx, {
-            reason: `${problems.length} setup problem${problems.length === 1 ? "" : "s"} remain: ${problems.map((finding) => finding.code).join(", ")}`,
-            evidence: problems.filter((finding) => finding.file).map((finding) => ({ file: finding.file as string, line: finding.line ?? 1 }))
-          })
-        ]
-      }
-      if (undetermined.length > 0) {
-        return [checkResult("setup_rerun_clean", "undetermined", "S", ctx, { reason: `no problem, ${undetermined.length} not determinable from source` })]
-      }
-      return [checkResult("setup_rerun_clean", "pass", "S", ctx, { reason: "the setup checks re-run clean" })]
-    })
   }
 }
 

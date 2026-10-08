@@ -5,6 +5,9 @@
 //   pending ──claim done──▶ claimed ──S+B+T0 pass (one that proves the change among them), diff in scope──▶ done_in_code
 //      ▲                       │ a local check fails: budget left → pending (with the failure), spent → failed
 //      └───────────────────────┘
+//   claimed ──no local check failed, and the review agent answered (`applyReview`)──▶ done_in_code
+//      (a "pass" on every question PROVES the change; "fail" / "cant_tell" / "not_run" keep the edits with the
+//      reviewer's words: a review answer never reverts an edit)
 //   done_in_code ──has T1/RH/PV──▶ waiting_deploy ──every live check passes with THIS run's id──▶ proven
 //   done_in_code ──has P (jobs 8, 9, 10)──▶ waiting_real_event ──the first real event (passive)──▶ proven
 //   claim not_needed ──the wizard's detector agrees──▶ not_needed, else ──▶ pending + the evidence
@@ -236,15 +239,13 @@ export function applyResults(item: ChecklistItem, results: readonly CheckResult[
       advanced.item.state = "failed"
       advanced.note = `Failed after the deploy: ${checkWords(failed)}`
     } else if (options.awaitingVisit && undecided.some(check => check.tier === "PV")) {
-      const local = checksIn(advanced.item, LOCAL_TIERS)
-      advanced.item.state = local.length > 0 && allPass(local, runId) ? "done_in_code" : "claimed"
+      advanced.item.state = inCode(advanced.item, runId) ? "done_in_code" : "claimed"
       const pendingChecks = undecided.filter(check => check.tier === "PV")
       const pending = checkWords(pendingChecks)
       const notMeasured = undecided.filter(check => check.tier !== "PV" && !pendingChecks.some(pv => pv.id === check.id))
       advanced.note = `Waiting for the Infinite app's results: ${pending}${notMeasured.length > 0 ? `. Not checked after the deploy: ${checkWords(notMeasured)}` : ""}`
     } else if (undecided.length > 0 || advanced.item.state === "waiting_deploy") {
-      const local = checksIn(advanced.item, LOCAL_TIERS)
-      advanced.item.state = advanced.item.state !== "claimed" && local.length > 0 && allPass(local, runId) ? "done_in_code" : "claimed"
+      advanced.item.state = advanced.item.state !== "claimed" && inCode(advanced.item, runId) ? "done_in_code" : "claimed"
       // The site's own banner kept the proof visit silent: said as not measured, with the reason, never as a failure.
       const behindBanner = undecided.length > 0 && undecided.every(check => check.runId === runId && heldByBanner(check))
       advanced.note = behindBanner ? NOT_MEASURED_BEHIND_BANNER : undecided.length > 0 ? `Not checked after the deploy: ${checkWords(undecided)}` : `Checked, but not tied to this deploy: ${checkWords(live)}`
@@ -259,6 +260,16 @@ export function applyResults(item: ChecklistItem, results: readonly CheckResult[
     withNote(advanced.item, CAPTURE_WAITING, scanner)
   }
   return { item: advanced.item, changed: merged || advanced.item.state !== item.state, by: "wizard", ...(advanced.note ? { note: storedNote(advanced.note, scanner) } : {}) }
+}
+
+/**
+ * The item's change is in the code as the wizard knows it this run: every local check passed, or (a job the review agent
+ * decides) the review answered and no local check found a problem. Whatever the review said, its edits are kept.
+ */
+function inCode(item: ChecklistItem, runId: string): boolean {
+  const local = checksIn(item, LOCAL_TIERS)
+  if (local.length > 0 && allPass(local, runId)) return true
+  return item.review !== undefined && item.review.runId === runId && failingIn(local, runId).length === 0
 }
 
 function sendBack(item: ChecklistItem, failing: readonly ChecklistItemCheck[], options: ApplyOptions): string {
@@ -293,8 +304,13 @@ function advance(item: ChecklistItem, runId: string, options: ApplyOptions): { i
       // the mirror's event ids, the build) may only fail it. With no proving check the wizard has nothing to verify in
       // code but the recorded, in-scope diff of a CLAIMED item; an item checked with no claim is never ticked by a diff.
       const proving = local.filter((check) => checkProvesChange(item.jobId, check.tier, check.id))
+      // The review agent's answers on this job, this run (`applyReview`). A pass on every question proves the change; any
+      // other answer still KEEPS the edits (said in the note), since a review answer never reverts anything.
+      const reviewed = item.review !== undefined && item.review.runId === runId
+      const reviewProves = reviewed && item.review!.state === "pass"
       const verified =
-        local.length > 0 && allPass(local, runId) && (proving.length > 0 || (!options.claimless && (item.edits?.length ?? 0) > 0))
+        (local.length > 0 && allPass(local, runId) && (proving.length > 0 || reviewProves || (!options.claimless && (item.edits?.length ?? 0) > 0))) ||
+        (reviewed && local.every((check) => check.state !== "problem" || check.runId !== runId))
       if (verified) item.state = "done_in_code"
       else {
         // LF4-P1-2: a claimed item the wizard cannot verify in code (e.g. no recorded edit) whose rehearsal check
@@ -341,6 +357,40 @@ function advance(item: ChecklistItem, runId: string, options: ApplyOptions): { i
     if (item.state === before) break
   }
   return note ? { item, note } : { item }
+}
+
+/** What a job's note says for each review answer (plain words, never a check id). */
+export const REVIEW_WORDS = {
+  pass: "Checked by the review agent.",
+  fail: "Needs your look",
+  cant_tell: "The review could not tell",
+  not_run: "Not checked by a review agent"
+} as const
+
+/** The note a review answer leaves on a job (the reviewer's finding or why, after the plain words). */
+export function reviewNote(review: Pick<ChecklistItem["review"] & {}, "state" | "reason">): string {
+  if (review.state === "pass") return REVIEW_WORDS.pass
+  return review.reason ? `${REVIEW_WORDS[review.state]}: ${review.reason}` : `${REVIEW_WORDS[review.state]}.`
+}
+
+/**
+ * The review agent's verdict on a job (`wizard/steps/jobs-review.ts`). The verdict is stored on the item, and an item
+ * whose local checks found no problem this run is DONE IN CODE, whatever the answer: "pass" proves it ("checked by the
+ * review agent"), "fail" keeps it as "needs your look", "cant_tell" and "not_run" keep it with why. A review answer never
+ * sends an edit back and never reverts it; only the one fix round (the caller's) hands a failing answer to the agent.
+ * An item in any other state (pending, failed, blocked, left for you) keeps its state and only records the answers.
+ */
+export function applyReview(item: ChecklistItem, review: NonNullable<ChecklistItem["review"]>, options: Omit<ApplyOptions, "budgetLeft"> = {}): Transition {
+  const scanner = options.scanner ?? DEFAULT_SCANNER
+  const next = clone(item)
+  next.review = { ...review, ...(review.reason !== undefined ? { reason: storedNote(review.reason, scanner) } : {}) }
+  if (!["claimed", "done_in_code", "waiting_deploy", "waiting_real_event", "proven"].includes(item.state)) {
+    return { item: next, changed: true, by: "wizard" }
+  }
+  const advanced = next.state === "claimed" ? advance(next, review.runId, { ...options, budgetLeft: false }) : { item: next }
+  const note = reviewNote(review)
+  withNote(advanced.item, note, scanner)
+  return { item: advanced.item, changed: true, by: "wizard", note: storedNote(note, scanner) }
 }
 
 /**

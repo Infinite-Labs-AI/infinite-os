@@ -5,12 +5,12 @@
 // vars cannot reach the claim channel, fails the required server and reports itself toolless.
 // Scenario keys: version, loginStatus, loginExit, turns[]: { rejectModel, rejectModelAfterMcp (the real
 // CLI starts MCP servers before the first model call), mcp: "skip" (the required server never comes up),
-// steps[], final (the -o JSON), exit, threadId, schemaProblem }.
+// steps[], final (the -o JSON), exit, threadId, schemaProblem }; jobsReview[] (the jobs' review, fake-agent-lib.mjs).
 // Like the real service, it refuses an `--output-schema` that OpenAI's strict structured outputs will not take
 // (the exact 400 lines the real CLI printed in a live run), before the model answers anything.
 import { readdirSync, readFileSync, writeFileSync } from "node:fs"
 
-import { emit, envSnapshot, loadScenario, McpClient, priorRuns, readStdin, record, runSteps, withReadCheck } from "./fake-agent-lib.mjs"
+import { emit, envSnapshot, isJobsReviewSchema, jobsReviewAnswer, jobsReviewTurn, loadScenario, McpClient, priorRuns, readStdin, record, runSteps, withReadCheck } from "./fake-agent-lib.mjs"
 
 const argv = process.argv.slice(2)
 const scenario = loadScenario("codex")
@@ -47,6 +47,25 @@ const index = priorRuns("codex")
 const turns = scenario.turns ?? [{}]
 const turn = turns[Math.min(index, turns.length - 1)] ?? {}
 const stdin = await readStdin()
+const outputSchema = flag("--output-schema")
+if (role === "reviewer" && outputSchema && isJobsReviewSchema(JSON.parse(readFileSync(outputSchema, "utf8")))) {
+  // The jobs' review: its own turns (`jobsReview`), never one of the step-9 review's.
+  const jobsTurn = jobsReviewTurn(scenario, "codex")
+  record({ kind: "jobs_review", agent: "codex", argv, cwd, stdin })
+  emit({ type: "thread.started", thread_id: "thread-jobs-review" })
+  emit({ type: "turn.started" })
+  const problem = jobsTurn.schemaProblem ?? strictSchemaProblem(JSON.parse(readFileSync(outputSchema, "utf8")), "schema")
+  if (problem) {
+    const body = JSON.stringify({ type: "error", error: { message: `Invalid schema for response_format 'codex_output_schema': ${problem}`, type: "invalid_request_error", param: "text.format.schema", code: "invalid_json_schema" }, status: 400 })
+    emit({ type: "error", message: body })
+    emit({ type: "turn.failed", error: { message: body } })
+    process.exit(1)
+  }
+  const out = flag("-o")
+  if (out) writeFileSync(out, JSON.stringify(jobsReviewAnswer(jobsTurn, cwd)))
+  if ((jobsTurn.exit ?? 0) === 0) emit({ type: "turn.completed", usage: { input_tokens: 1, output_tokens: 1 } })
+  process.exit(jobsTurn.exit ?? 0)
+}
 record({ kind: "run", agent: "codex", role, argv, cwd, env: envSnapshot(), stdin, cwdEntries: readdirSync(cwd) })
 
 const threadId = resumeThread ?? turn.threadId ?? "thread-fake-0001"

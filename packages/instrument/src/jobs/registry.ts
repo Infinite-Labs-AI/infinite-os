@@ -18,7 +18,6 @@ import { CONVERSION_TYPES, type ConversionType } from "../wizard/contracts/bridg
 import type { PlanLineKind } from "../wizard/contracts/asks.js"
 import {
   JOB_TABLE,
-  TARGET_ONLY_CHECKS,
   type BeforeFacts,
   type BlockedReason,
   type ChecklistItem,
@@ -186,7 +185,8 @@ const TARGET_CHECKS: Partial<Record<JobId, (target: string, framework: string) =
   // the wizard can read also carries `posthog_improve_applied` (the setting is in the adopted init).
   posthog_improve: (target, framework) =>
     target === COMMERCE_EVENTS_TARGET
-      ? ["S:commerce_promises_met", "S:no_double_count", "S:sends_kept", "PV:posthog_distinct_id_receipt"]
+      ? // What the commerce item adds is checked by the review agent's questions (`review/questions.ts`).
+        ["PV:posthog_distinct_id_receipt"]
       : target === "proxy"
       ? ["S:posthog_config", "S:posthog_improve_applied", ...(framework.startsWith("next") ? ["S:next_rewrites_exact"] : []), "RH:posthog_via_proxy_once", "PV:posthog_distinct_id_receipt"]
       : target === "history_change" || target === "defaults" || target === "sensitive_pages"
@@ -195,7 +195,7 @@ const TARGET_CHECKS: Partial<Record<JobId, (target: string, framework: string) =
   // R4-8: a page-change page_view is proven by the rehearsal's own page change (one GA4 page_view after it, never two).
   ga4_improve: (target) =>
     target === COMMERCE_EVENTS_TARGET
-      ? ["S:commerce_promises_met", "S:no_double_count", "S:sends_kept", "PV:ga4_seen_leaving"]
+      ? ["PV:ga4_seen_leaving"]
       : target === "id"
       ? ["S:ga4_id_applied", "T1:ga4_loader_id", "RH:ga4_one_page_view", "PV:ga4_seen_leaving"]
       : target === "spa_page_view"
@@ -205,8 +205,9 @@ const TARGET_CHECKS: Partial<Record<JobId, (target: string, framework: string) =
   // click, on the page as the agent left it (`item-t0.ts` builds that page from the job's files).
   meta_improve: (target) =>
     target === COMMERCE_EVENTS_TARGET
-      ? // Proved by the code holding every event the plan promised Meta (checks/commerce-static.ts).
-        ["S:commerce_promises_met", "S:no_double_count", "S:sends_before_leaving", "S:sends_kept", "S:meta_event_id_from_helper", "PV:meta_seen_leaving"]
+      ? // Proven by the review agent's answers (every promised event sent once, before the page leaves); the event id rule
+        // stays a hard check.
+        ["S:meta_event_id_from_helper", "PV:meta_seen_leaving"]
       : target === "retire_fbc_writer" || target === "capture"
       ? ["S:click_id_capture", "T0:fbc_capture", "PV:meta_seen_leaving"]
       : target === "spa_page_view"
@@ -225,22 +226,19 @@ const TARGET_CHECKS: Partial<Record<JobId, (target: string, framework: string) =
   // offline engine can load (static HTML / Vite's index.html). A Next component's init is not: there the
   // rehearsal's preview_self load decides (I1b; before, the item carried a T0 check that tested the
   // MANAGED page instead of the agent's edit, so a correct guard could never pass).
-  // §3x.3: an outcome conversion's success branch cannot run in a no-send load (every non-GET is cancelled), so its
-  // checks are the static `track_after_success` and the passive first real conversion; a click conversion keeps the
-  // click test.
+  // §3x.3: an outcome conversion's success branch cannot run in a no-send load (every non-GET is cancelled), so it has
+  // no click test: its call is in the code (`conversion_tracked`), and where it sits is a review question. A click
+  // conversion keeps the click test.
   conversions_to_tools: (target) =>
     OUTCOME_CONVERSION_TYPES.has(target as ConversionType)
-      ? ["S:no_fbq_standard_on_click", "S:track_after_success", "S:no_double_count", "S:meta_event_id_from_server", "P:first_real_conversion"]
-      : // LF4 close round 2 (P1-1): on a framework whose click test runs in the rehearsal, `no_fbq_standard_on_click`
-        // was the click conversion's only local check, and it passes with nothing of the job in the code.
-        ["T0:click_test", "RH:click_test", "S:no_fbq_standard_on_click", "S:conversion_tracked", "S:no_double_count", "S:meta_event_id_from_server", "P:first_real_conversion"],
-  // A form's completed outcome cannot run in the no-send click rehearsal (its POST is cancelled).
-  setup_check_fixes: target => target === "silent_form" ? ["S:setup_rerun_clean"] : null,
+      ? ["S:conversion_tracked", "S:meta_event_id_from_server", "P:first_real_conversion"]
+      : ["T0:click_test", "RH:click_test", "S:conversion_tracked", "S:meta_event_id_from_server", "P:first_real_conversion"],
+  // A form's completed outcome cannot run in the no-send click rehearsal (its POST is cancelled): the review agent's
+  // answer proves it.
+  setup_check_fixes: target => target === "silent_form" ? [] : null,
   preview_guard: (target, framework) => {
     const t0 = T0_CLICK_FRAMEWORKS.has(framework) ? ["T0:host_matrix"] : []
-    return target === "meta"
-      ? ["S:adopted_init_guarded", ...t0, "RH:preview_self_silent", "T1:meta_host_matrix"]
-      : ["S:adopted_init_guarded", ...t0, "RH:preview_self_silent"]
+    return target === "meta" ? [...t0, "RH:preview_self_silent", "T1:meta_host_matrix"] : [...t0, "RH:preview_self_silent"]
   }
 }
 
@@ -253,8 +251,7 @@ function checksFor(jobId: JobId, target: string, framework: string): ChecklistIt
   const clickTier: CheckTier = T0_CLICK_FRAMEWORKS.has(framework) ? "T0" : "RH"
   const table = JOB_TABLE[jobId].checks.filter((spec) => spec.checkId !== "click_test" || spec.tier === clickTier)
   const chosen = TARGET_CHECKS[jobId]?.(target, framework)
-  // A target-only check (`TARGET_ONLY_CHECKS`) is carried only by the target whose list names it.
-  const specs = chosen ? [...table, ...(TARGET_ONLY_CHECKS[jobId] ?? [])].filter((spec) => chosen.includes(`${spec.tier}:${spec.checkId}`)) : table
+  const specs = chosen ? table.filter((spec) => chosen.includes(`${spec.tier}:${spec.checkId}`)) : table
   return specs.map((spec) => ({ id: spec.checkId, tier: spec.tier, state: "not_run" as const }))
 }
 

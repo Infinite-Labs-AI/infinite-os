@@ -6,17 +6,19 @@
 //
 // It runs the wizard's REAL scan, event inventory, job seeding, plan and briefs on it, then plays the agent: the
 // scripted edits are the CORRECT ones (`fixtures/store/correct`, the reference store's hand-built fix ported onto
-// this store), and the static checks must pass on them and fail, with the right words, on three bad variants.
+// this store), and the bad variants of them.
 //
-// WHICH ASSERTIONS NEED WHICH BUILDER (the four builders' branches merge later; each test names its own):
-//   [A] the event inventory (`src/scan/event-inventory.ts` exporting `buildEventInventory(snapshot: RepoSnapshot)`), the job
-//       seeding of all five events and the plan's per-tool headline;
-//   [B] the server lane's outcome helper for Next (`lib/infinite-outcome` with reportInfiniteOutcome / adMatchFromRequest);
-//   [C] the briefs that tell the agent what to add (Meta AddToCart / ViewContent, server events with match data);
-//   [D] (this builder) the static checks and the prove plan: the tests marked [D] use this file's EXPECTED inventory
-//       (the plan's event × tool table for this store, written out by hand) and pass on their own.
+// Who catches what (founder ruling 2026-10-08: "take a lot of the silly regex out"):
+//   - the HARD rules stay static and blocking: a purchase without its value or currency, a page-made Meta event id, a
+//     phone or a raw personal detail in an outcome (and the fence, the build, the consent boundary);
+//   - every judgement of meaning (each event once per action, the tracking signal carried with the right polarity, the
+//     report after the success point, match data on the report, a send that survives the page leaving, the site's own
+//     sends kept) is a REVIEW question (`review/questions.ts`), answered right after the agent's turns
+//     (`wizard/steps/jobs-review.ts`). Here a scripted fake reviewer gives the answers a competent reviewer would, so
+//     the tests prove the plumbing: the question carries the facts, a "fail" goes back for one fix round, a fail that
+//     stays "needs your look" with the edits KEPT, and a pass proves the job.
 import { execFileSync } from "node:child_process"
-import { cpSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs"
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { dirname, join, relative, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
@@ -27,7 +29,11 @@ import { fixtureHosting, fixtureKeys } from "../../test/wizard/o8/fixtures.js"
 import { runCensus } from "../checks/census.js"
 import type { EventInventory, InventoryEvent, InventoryTool } from "../checks/commerce-inventory.js"
 import { readEventInventory } from "../checks/commerce-inventory.js"
-import { commerceFindings, type CommerceFinding } from "../checks/commerce-static.js"
+import { commerceFindings } from "../checks/commerce-static.js"
+import { createScanner } from "../review/scan.js"
+import type { JobReviewResult, ReviewRunInput } from "./contracts/agents.js"
+import type { WizardContext, WizardDeps } from "./contracts/deps.js"
+import { JOBS_REVIEW_INPUTS, jobsReviewKeepsDraft, reviewJobsBeforeSettling, type JobsReviewHost, type JobsReviewOutcome } from "./steps/jobs-review.js"
 import { createWizardInstaller } from "../install/installer.js"
 import { seedItemsAfterApprovals, type WizardPlanModel } from "../install/plan-model.js"
 import { createJobRegistry, toJobScan } from "../jobs/registry.js"
@@ -87,83 +93,61 @@ const EXPECTED: EventInventory = {
   ]
 }
 
-const problems = (findings: readonly CommerceFinding[]) => findings.filter((finding) => finding.state === "problem")
-
 // ---------------------------------------------------------------------------------------------
-// [D] the static checks on the store, with the plan's table written out by hand
+// The hard rules: static, mechanical, still blocking
 // ---------------------------------------------------------------------------------------------
 
-describe("[D] store: the static checks catch a run that leaves Meta without the conversions", () => {
-  it("(c) the correct edits pass every commerce check: nothing missing, nothing doubled, money and match data present, no personal data", () => {
+/** The correct webhook with its recipe replaced by a hand-rolled report carrying `props` (and `extra` keys). */
+function handRolledWebhook(props: string, extra = ""): string {
+  const webhook = CORRECT_EDITS.get("pages/api/stripe-webhook.ts")!
+  const recipe = '  return res.status(await reportStripeCheckoutPurchase(event, { path: "/success" })).json({ received: true })\n'
+  expect(webhook).toContain(recipe)
+  return webhook.replace("import { reportStripeCheckoutPurchase } from", "import { adMatchFromRequest, reportInfiniteOutcome } from").replace(recipe, [
+    "  const session = event.data.object as Stripe.Checkout.Session",
+    "  const status = await reportInfiniteOutcome({",
+    '    type: "purchase",',
+    "    eventId: session.id,",
+    '    path: "/success",',
+    `    properties: ${props},${extra}`,
+    "  })",
+    "  return res.status(status === null || status >= 500 ? 500 : 200).json({ received: true })",
+    ""
+  ].join("\n"))
+}
+
+const MONEY = '{ value: (session.amount_total ?? 0) / 100, currency: (session.currency ?? "usd").toUpperCase() }'
+
+describe("store: the hard rules still block their cases", () => {
+  it("the correct edits break no hard rule: money on the purchase, no page-made Meta event id, no personal data, no phone", () => {
     const now = edited(CORRECT_EDITS)
     expect(commerceFindings({ files: now, base: baseFor(now), inventory: EXPECTED, metaInUse: true })).toEqual([])
   })
 
-  it("(d) Meta PageView only (the agent changed nothing): every promised Meta event is named as missing", () => {
-    const findings = problems(commerceFindings({ files: SITE, base: baseFor(SITE), inventory: EXPECTED, metaInUse: true }))
-    const meta = findings.filter((finding) => finding.rule === "promise_missing" && finding.tool === "meta")
-    expect(meta.map((finding) => finding.event).sort()).toEqual([...EVENTS].sort())
-    const words = meta.map((finding) => finding.message).join("\n")
-    expect(words).toContain("The plan promised Meta ViewContent, but no code sends it")
-    expect(words).toContain("The plan promised Meta AddToCart, but no code sends it")
-    for (const event of ["begin_checkout", "purchase", "lead"]) {
-      expect(words).toContain(`The plan promised Meta the ${event} from the server (Meta ${META_NAMES[event]}), but no server code reports it`)
+  it("a purchase without its currency, a phone in the match data, and a page-made Meta event id each block", () => {
+    const rules = (edits: ReadonlyMap<string, string>) => {
+      const now = edited(new Map([...CORRECT_EDITS, ...edits]))
+      return commerceFindings({ files: now, base: baseFor(now), inventory: EXPECTED, metaInUse: true }).filter((finding) => finding.state === "problem").map((finding) => finding.rule)
     }
+    expect(rules(new Map([["pages/api/stripe-webhook.ts", handRolledWebhook("{ value: (session.amount_total ?? 0) / 100 }")]]))).toEqual(["purchase_without_value"])
+    expect(rules(new Map([["pages/api/stripe-webhook.ts", handRolledWebhook(MONEY, "\n    adMatch: await adMatchFromRequest(req, { trackingAllowed: true, phone: session.customer_details?.phone }),")]]))).toEqual(["pii_in_outcome"])
+    const events = CORRECT_EDITS.get("src/analytics/events.ts")!
+    const pageMade = events.replace('infiniteTrack("add_to_cart", productProps(product, qty), { destinations: ["meta", "infinite"] });', 'infiniteTrack("add_to_cart", productProps(product, qty), { destinations: ["infinite"] });\n  fbq("track", "AddToCart", productProps(product, qty), { eventID: `atc-${Date.now()}` });')
+    expect(pageMade).toContain("eventID")
+    expect(rules(new Map([["src/analytics/events.ts", pageMade]]))).toEqual(["page_built_meta_event_id"])
   })
 
-  it("(d) a GA4 double count (infiniteTrack(\"purchase\") on the success page beside the site's own purchase) is caught", () => {
+  it("NEGATIVE: the judgement variants are NOT hard-rule problems (the review owns them): a double count, a purchase without match data, a lead without its fallback id", () => {
     const success = SITE.get("pages/success.tsx")!
       .replace('import Link from "next/link";\n', 'import Link from "next/link";\nimport { infiniteTrack } from "../lib/infinite-analytics";\n')
       .replace("    purchase(sessionId, lines);\n", '    purchase(sessionId, lines);\n    infiniteTrack("purchase", { transaction_id: sessionId });\n')
-    const now = edited(new Map([...CORRECT_EDITS, ["pages/success.tsx", success]]))
-    const doubled = problems(commerceFindings({ files: now, base: baseFor(now), inventory: EXPECTED, metaInUse: true }))
-    expect(doubled.map((finding) => `${finding.rule}:${finding.tool}:${finding.event}`)).toEqual(["double_count:ga4:purchase", "double_count:posthog:purchase"])
-    expect(doubled[0]!.message).toMatch(/^pages\/success\.tsx:\d+ sends GA4 the purchase \(infiniteTrack\), but the site already sends GA4 the purchase \(src\/analytics\/events\.ts:\d+\), so every purchase would count twice in GA4\. Turn GA4 off for this call/)
-  })
-
-  it("(d) a purchase reported without match data is caught at the webhook", () => {
-    // The agent hand-rolls the report instead of the recipe's reportStripeCheckoutPurchase, and leaves the match data out.
-    const webhook = CORRECT_EDITS.get("pages/api/stripe-webhook.ts")!
-    const recipe = '  return res.status(await reportStripeCheckoutPurchase(event, { path: "/success" })).json({ received: true })\n'
-    expect(webhook).toContain(recipe)
-    const handRolled = webhook
-      .replace("import { reportStripeCheckoutPurchase } from", "import { reportInfiniteOutcome } from")
-      .replace(recipe, [
-        "  const session = event.data.object as Stripe.Checkout.Session",
-        "  const status = await reportInfiniteOutcome({",
-        '    type: "purchase",',
-        "    eventId: session.id,",
-        '    path: "/success",',
-        "    properties: { value: (session.amount_total ?? 0) / 100, currency: (session.currency ?? \"usd\").toUpperCase() },",
-        "  })",
-        "  return res.status(status === null || status >= 500 ? 500 : 200).json({ received: true })",
-        ""
-      ].join("\n"))
-    const now = edited(new Map([...CORRECT_EDITS, ["pages/api/stripe-webhook.ts", handRolled]]))
-    const found = problems(commerceFindings({ files: now, base: baseFor(now), inventory: EXPECTED, metaInUse: true }))
-    expect(found).toHaveLength(1)
-    expect(found[0]).toMatchObject({ rule: "outcome_without_ad_match", event: "purchase", file: "pages/api/stripe-webhook.ts" })
-    expect(found[0]!.message).toMatch(/reports the purchase to Infinite without match data \(no adMatch\), so Meta cannot tie it to an ad click/)
-  })
-
-  it("(d) P1-A: the send inside the helper AND another in the Buy handler that calls it is caught as a double count on one click", () => {
-    const index = CORRECT_EDITS.get("pages/index.tsx")!
-      .replace('import { useCart } from "../src/cart/CartContext";\n', 'import { useCart } from "../src/cart/CartContext";\nimport { infiniteTrack } from "../lib/infinite-analytics";\n')
-      .replace("    addToCart(product);\n", '    addToCart(product);\n    infiniteTrack("add_to_cart", { item_id: product.slug, price: product.priceCents / 100, quantity: 1, currency: "USD" }, { destinations: ["meta", "infinite"] });\n')
-    expect(index).toContain('infiniteTrack("add_to_cart"')
-    const now = edited(new Map([...CORRECT_EDITS, ["pages/index.tsx", index]]))
-    const found = problems(commerceFindings({ files: now, base: baseFor(now), inventory: EXPECTED, metaInUse: true }))
-    expect(found.map((finding) => `${finding.rule}:${finding.tool}:${finding.event}:${finding.file}`)).toEqual(["sent_twice_on_one_click:meta:add_to_cart:pages/index.tsx"])
-    expect(found[0]!.message).toMatch(/^One click at pages\/index\.tsx:\d+ sends Meta AddToCart twice: (through addToCart\(\) \(its send at src\/analytics\/events\.ts:\d+\)|itself at pages\/index\.tsx:\d+) and (through addToCart\(\)|itself)/)
-  })
-
-  it("(d) P2-7: a lead reported without a fallbackId (nothing is sent until LEAD_ID_SECRET is set) is caught", () => {
-    const lead = CORRECT_EDITS.get("pages/api/mailing-list.ts")!.replace(/^    fallbackId: .*\n/m, "")
-    expect(lead).not.toContain("fallbackId")
-    const now = edited(new Map([...CORRECT_EDITS, ["pages/api/mailing-list.ts", lead]]))
-    const found = problems(commerceFindings({ files: now, base: baseFor(now), inventory: EXPECTED, metaInUse: true }))
-    expect(found.map((finding) => finding.rule)).toEqual(["lead_may_send_nothing"])
-    expect(found[0]!.message).toMatch(/reports the lead with no fallbackId, so until LEAD_ID_SECRET is set it has no stable id and sends nothing/)
+    for (const edits of [
+      new Map([["pages/success.tsx", success]]),
+      new Map([["pages/api/stripe-webhook.ts", handRolledWebhook(MONEY)]]),
+      new Map([["pages/api/mailing-list.ts", CORRECT_EDITS.get("pages/api/mailing-list.ts")!.replace(/^    fallbackId: .*\n/m, "")]])
+    ]) {
+      const now = edited(new Map([...CORRECT_EDITS, ...edits]))
+      expect(commerceFindings({ files: now, base: baseFor(now), inventory: EXPECTED, metaInUse: true }).filter((finding) => finding.state === "problem")).toEqual([])
+    }
   })
 
   it("the correct edits never touch the trackers file that holds the cookie banner's consent code, nor the privacy page", () => {
@@ -238,8 +222,137 @@ async function pipeline(at: string = root) {
     managedFiles: ["lib/infinite-analytics.ts", "lib/infinite-server-lane.ts", "lib/infinite-outcome.ts"],
     inventory: toJobScan(scan).detections.eventInventory
   }
-  return { scan, plan, items, brief: registry.brief(items.filter((item) => item.owner === "agent")) }
+  return { scan, plan, items, registry, brief: registry.brief(items.filter((item) => item.owner === "agent")) }
 }
+
+// ---------------------------------------------------------------------------------------------
+// The review agent, scripted: the jobs' review right after the agent's turns (`wizard/steps/jobs-review.ts`)
+// ---------------------------------------------------------------------------------------------
+
+const COMMERCE_JOBS = ["meta_improve:commerce_events", "server_conversions:begin_checkout", "server_conversions:lead", "server_conversions:purchase"] as const
+const NAMES = ["purchase", "begin_checkout", "lead", "add_to_cart", "view_item"]
+
+/** One scripted answer: the job, a phrase of the question it answers, and what a competent reviewer says there. */
+interface Answer {
+  job: string
+  about: string
+  answer: "fail" | "cant_tell"
+  note: string
+  evidence?: Array<{ path: string; line: number | null }>
+}
+
+/** What the scripted reviewer read: the questions (with their facts) and the change, per run. */
+interface Seen {
+  questions: Array<{ job: string; question: string; earlier: unknown }>
+  diff: string
+}
+
+/**
+ * A fake review agent that reads the inputs the wizard wrote into its worktree (like the real one) and answers every
+ * question: the first scripted answer whose job and phrase match, else "pass". It quotes the read-check.
+ */
+function scriptedReviewer(script: readonly Answer[], seen: Seen[]) {
+  return async (input: ReviewRunInput): Promise<JobReviewResult> => {
+    expect(input.schema).toBe("jobs")
+    const file = JSON.parse(readFileSync(join(input.worktreeDir, JOBS_REVIEW_INPUTS.questions), "utf8")) as { jobs: Array<{ job: string; questions: Array<{ question_id: string; question: string; earlierAnswer?: unknown }> }> }
+    const nonce = readFileSync(join(input.worktreeDir, JOBS_REVIEW_INPUTS.readCheck), "utf8").trim()
+    seen.push({ questions: file.jobs.flatMap((job) => job.questions.map((question) => ({ job: job.job, question: question.question, earlier: question.earlierAnswer ?? null }))), diff: readFileSync(join(input.worktreeDir, JOBS_REVIEW_INPUTS.diff), "utf8") })
+    const answers = file.jobs.flatMap((job) =>
+      job.questions.map((question) => {
+        const scripted = script.find((entry) => entry.job === job.job && question.question.includes(entry.about))
+        return { question_id: question.question_id, answer: scripted?.answer ?? ("pass" as const), evidence: scripted?.evidence ?? [], note: scripted?.note ?? "Read the code: it does what the question asks." }
+      })
+    )
+    return { summary: `read-check: ${nonce} Answered every question.`, answers }
+  }
+}
+
+/** The jobs step's view, lent to the review: the four commerce jobs as the agent claimed them, on `at` with `edits`. */
+async function storeReview(at: string, edits: ReadonlyMap<string, string>, script: readonly Answer[], options: { fixRound?: boolean; reviewer?: "codex" | null } = {}) {
+  const { items, scan, registry } = await pipeline(at)
+  const inventory = await scanInventory(scan)
+  for (const [file, text] of edits) {
+    mkdirSync(dirname(join(at, file)), { recursive: true })
+    writeFileSync(join(at, file), text)
+  }
+  const claimed = (item: ChecklistItem): ChecklistItem => ({ ...item, state: "claimed", claim: { status: "done", note: "Done as the brief says.", at: "2026-10-08T10:00:00.000Z" } })
+  let state = {
+    runId: RUN_ID,
+    agent: options.reviewer === null ? null : { worker: "claude_code", reviewer: options.reviewer ?? "codex", workerSession: null, whoPays: { worker: null, reviewer: null } },
+    jobs: items.filter((item) => item.owner === "agent").map((item) => (COMMERCE_JOBS.includes(item.id as never) ? claimed(item) : item))
+  }
+  const seen: Seen[] = []
+  const lines: string[] = []
+  const gitIn = (dir: string, ...args: string[]) => execFileSync("git", args, { cwd: dir, encoding: "utf8", env: { PATH: "/usr/bin:/bin", HOME: dir, GIT_CONFIG_NOSYSTEM: "1" } })
+  const ctx = {
+    root: at,
+    appRoot: ".",
+    state: { get: () => state, update: (mutate: (draft: typeof state) => void) => { const next = structuredClone(state); mutate(next); state = next }, save: async () => undefined },
+    emit: { emit: () => undefined }
+  } as unknown as WizardContext
+  const deps = {
+    git: {
+      head: async () => gitIn(at, "rev-parse", "HEAD").trim(),
+      async worktreeAddDetached(sha: string) {
+        const dir = join(mkdtempSync(join(tmpdir(), "tag-store-review-")), "tree")
+        gitIn(at, "worktree", "add", "--detach", dir, sha)
+        return { dir }
+      },
+      async worktreeRemove(dir: string) {
+        gitIn(at, "worktree", "remove", "--force", dir)
+      }
+    },
+    fs: {
+      mkdirp: async (path: string) => void mkdirSync(path, { recursive: true }),
+      writeTextAtomic: async (path: string, text: string) => writeFileSync(path, text)
+    },
+    registry,
+    clock: { now: () => new Date("2026-10-08T10:05:00.000Z") },
+    agents: { reviewJobs: scriptedReviewer(script, seen), detect: async () => ({ worker: null, reviewer: null, nested: null }) }
+  } as unknown as WizardDeps
+  const host: JobsReviewHost = {
+    ctx,
+    deps,
+    noteScanner: createScanner({ literals: [], allowedIds: [] }),
+    items: () => state.jobs,
+    item: (id) => state.jobs.find((item) => item.id === id),
+    put: (transition) => { state = { ...state, jobs: state.jobs.map((item) => (item.id === transition.item.id ? transition.item : item)) } },
+    runId: () => RUN_ID,
+    sub: (text) => void lines.push(text),
+    editedFiles: () => [...edits.keys()],
+    questionFacts: () => ({ inventory, metaInUse: true, conversionNames: NAMES, productionHosts: ["www.halden-audio.example"] })
+  }
+  const reset = () => {
+    gitIn(at, "checkout", "--", ".")
+    gitIn(at, "clean", "-fdq")
+  }
+  try {
+    const outcome: JobsReviewOutcome = await reviewJobsBeforeSettling(host, { fixRound: options.fixRound ?? false })
+    return {
+      outcome,
+      seen,
+      lines,
+      host,
+      job: (id: string) => state.jobs.find((item) => item.id === id)!,
+      jobs: () => state.jobs,
+      /** The re-review after the agent's fix round: `fixed` replaces the files, the sent-back jobs are claimed again. */
+      async reReview(fixed: ReadonlyMap<string, string>, again: readonly Answer[] = []) {
+        for (const [file, text] of fixed) writeFileSync(join(at, file), text)
+        if (outcome.kind !== "fix") throw new Error("no fix round to re-review")
+        for (const id of outcome.itemIds) state = { ...state, jobs: state.jobs.map((item) => (item.id === id ? { ...item, state: "claimed" as const } : item)) }
+        deps.agents.reviewJobs = scriptedReviewer(again, seen)
+        return reviewJobsBeforeSettling(host, { fixRound: false, reReview: outcome.itemIds })
+      },
+      reset
+    }
+  } catch (error) {
+    reset()
+    throw error
+  }
+}
+
+/** The questions the reviewer was asked about one job, in its last review. */
+const asked = (seen: readonly Seen[], job: string) => seen[seen.length - 1]!.questions.filter((entry) => entry.job === job).map((entry) => entry.question)
 
 describe("store: the wizard's own scan, plan and briefs", () => {
   it("the scan sees a Next pages-router store", async () => {
@@ -260,15 +373,6 @@ describe("store: the wizard's own scan, plan and briefs", () => {
         if (tool === "meta") expect(got!.tools.meta?.lane ?? (["view_item", "add_to_cart"].includes(row.event) ? "browser" : "server"), `${row.event} × meta lane`).toBe(cell.lane)
       }
     }
-  })
-
-  it("(c)+(d) [A] with the scan's OWN inventory: the correct edits pass and PageView-only fails", async () => {
-    const { scan } = await pipeline()
-    const inventory = await scanInventory(scan)
-    const now = edited(CORRECT_EDITS)
-    expect(problems(commerceFindings({ files: now, base: baseFor(now), inventory, metaInUse: true }))).toEqual([])
-    const untouched = problems(commerceFindings({ files: SITE, base: baseFor(SITE), inventory, metaInUse: true }))
-    expect(untouched.filter((finding) => finding.tool === "meta").map((finding) => finding.event).sort()).toEqual([...EVENTS].sort())
   })
 
   it("(a) [A] the plan names all five events and, per tool, what it gets and what it is missing", async () => {
@@ -351,16 +455,18 @@ describe("store: the wizard's own scan, plan and briefs", () => {
     expect(brief).not.toMatch(/infiniteTrack\("purchase"\)/)
   })
 
-  it("(c) [A] every seeded job's own static checks pass on the correct edits", async () => {
+  it("(c) every seeded commerce job's own HARD checks pass on the correct edits, and none of them is a judgement", async () => {
     const { items } = await pipeline()
     const { jobStaticCheckFunctions } = await import("../checks/job-static.js")
-    // The plan's inventory is the scan BEFORE the agent's edits (the before step's), never the edited tree's.
     const inventory = await scanInventory((await pipeline()).scan)
-    for (const [file, text] of CORRECT_EDITS) writeFileSync(join(root, file), text, { flag: "w" })
+    for (const [file, text] of CORRECT_EDITS) {
+      mkdirSync(dirname(join(root, file)), { recursive: true })
+      writeFileSync(join(root, file), text, { flag: "w" })
+    }
     try {
-      const functions = jobStaticCheckFunctions({ root, run: () => ({ eventInventory: inventory, metaInUse: true, conversionNames: ["purchase", "begin_checkout", "lead", "add_to_cart", "view_item"] }), readBaseFile: (_root, file) => SITE.get(file) ?? null })
+      const functions = jobStaticCheckFunctions({ root, run: () => ({ eventInventory: inventory, metaInUse: true, conversionNames: NAMES }), readBaseFile: (_root, file) => SITE.get(file) ?? null })
       const commerceJobs = items.filter((item) => item.jobId === "server_conversions" || item.jobId === "conversions_to_tools" || item.id.endsWith(":commerce_events"))
-      expect(commerceJobs.map((item) => item.id).sort()).toEqual(["meta_improve:commerce_events", "server_conversions:begin_checkout", "server_conversions:lead", "server_conversions:purchase"])
+      expect(commerceJobs.map((item) => item.id).sort()).toEqual([...COMMERCE_JOBS])
       const graded: string[] = []
       for (const item of commerceJobs) {
         for (const check of item.checks.filter((entry) => entry.tier === "S")) {
@@ -371,84 +477,172 @@ describe("store: the wizard's own scan, plan and briefs", () => {
           graded.push(`${item.id}:${check.id}`)
         }
       }
-      // Every job's own proving check ran (and passed above).
-      expect(graded).toEqual(expect.arrayContaining([
-        "meta_improve:commerce_events:commerce_promises_met",
-        "meta_improve:commerce_events:no_double_count",
-        "meta_improve:commerce_events:sends_before_leaving",
-        "server_conversions:purchase:outcome_declared",
+      expect(graded.sort()).toEqual([
+        "server_conversions:begin_checkout:no_pii_in_outcome",
         "server_conversions:begin_checkout:outcome_declared",
+        "server_conversions:begin_checkout:outcome_value_currency",
+        "server_conversions:lead:no_pii_in_outcome",
         "server_conversions:lead:outcome_declared",
-        "server_conversions:lead:event_id_stable"
-      ]))
+        "server_conversions:lead:outcome_value_currency",
+        "server_conversions:purchase:no_pii_in_outcome",
+        "server_conversions:purchase:outcome_declared",
+        "server_conversions:purchase:outcome_value_currency"
+      ])
+      // The Meta commerce job keeps only the page-made event id rule; its promises, once-per-click and timing are review questions.
+      expect(items.find((item) => item.id === "meta_improve:commerce_events")!.checks.map((check) => `${check.tier}:${check.id}`)).toEqual(["S:meta_event_id_from_helper", "PV:meta_seen_leaving"])
     } finally {
       execFileSync("git", ["checkout", "--", "."], { cwd: root, stdio: "ignore" })
       execFileSync("git", ["clean", "-fdq"], { cwd: root, stdio: "ignore" })
     }
   })
+})
 
-  it("(d) Finding 1: the cart that sends no signal, or a route that reads it from the URL, fails the checkout job's own check", async () => {
-    const { items } = await pipeline()
-    const { jobStaticCheckFunctions } = await import("../checks/job-static.js")
-    const inventory = await scanInventory((await pipeline()).scan)
-    expect(inventory.pageRequests).toEqual([
-      { route: "pages/api/checkout.ts", file: "pages/cart.tsx", line: 68, how: "form", via: "a form that posts" },
-      { route: "pages/api/mailing-list.ts", file: "pages/mailing-list.tsx", line: 27, how: "json", via: "a JSON fetch" }
+describe("store: the review agent owns the judgements", { timeout: 60_000 }, () => {
+  it("the correct edits: every question passes, each commerce job is proven by the review, and the questions carry the facts", async () => {
+    const run = await storeReview(root, CORRECT_EDITS, [])
+    try {
+      expect(run.outcome).toEqual({ kind: "done" })
+      for (const id of COMMERCE_JOBS) {
+        const job = run.job(id)
+        expect(job.review, id).toMatchObject({ state: "pass", reviewer: "codex", runId: RUN_ID })
+        expect(job.note, id).toBe("Checked by the review agent.")
+        expect(["done_in_code", "waiting_deploy", "waiting_real_event"], id).toContain(job.state)
+      }
+      expect(jobsReviewKeepsDraft(run.jobs(), RUN_ID)).toEqual({ keepDraft: false, reason: null })
+      // The reviewer read the agent's change, not the whole repo.
+      expect(run.seen[0]!.diff).toContain("pages/api/stripe-webhook.ts")
+      expect(run.seen[0]!.diff).not.toContain("src/analytics/tracking.ts")
+      // Finding 1's question names the site's own reader, the cart's form, its route and how the signal rides.
+      const signal = asked(run.seen, "server_conversions:begin_checkout").find((text) => text.includes("tracking-allowed signal"))!
+      expect(signal).toContain('`getConsent() === "granted"`')
+      expect(signal).toContain("src/analytics/tracking.ts:53")
+      expect(signal).toContain("pages/cart.tsx:68 (a form that posts) → pages/api/checkout.ts, carried as a hidden field in the form it posts")
+      expect(signal).toContain("with the right polarity")
+      // The purchase: the signed webhook, once per session; what GA4 and PostHog already get from the site.
+      const purchase = asked(run.seen, "server_conversions:purchase")
+      expect(purchase.find((text) => text.includes("only from the Stripe webhook route"))).toMatch(/after the webhook's signature check passes, and once per checkout session/)
+      expect(purchase.find((text) => text.includes("exactly once per user action"))).toMatch(/the site already sends it to GA4 \(src\/analytics\/events\.ts:\d+\); PostHog \(src\/analytics\/events\.ts:\d+\)/)
+      // The lead: a stable id and the visitor's match data.
+      expect(asked(run.seen, "server_conversions:lead").join("\n")).toMatch(/fallbackId/)
+      // Meta: what it is promised, from where, with what, and its timing.
+      const meta = asked(run.seen, "meta_improve:commerce_events")
+      expect(meta[0]).toMatch(/^Does the code now send Meta (ViewContent and AddToCart|AddToCart and ViewContent) from where the site's own events happen \(.*pages\/products\/\[slug\]\.tsx.*\), each with the product id, value and currency\?$/)
+      expect(meta.some((text) => text.includes("sent after the site's own pixel can take it"))).toBe(true)
+    } finally {
+      run.reset()
+    }
+  })
+
+  it("(d) Meta left with PageView only: the review answers no, the job goes back for ONE fix round with the reviewer's words; still no after it, it NEEDS YOUR LOOK and nothing is reverted", async () => {
+    const script: Answer[] = [{ job: "meta_improve:commerce_events", about: "Does the code now send Meta", answer: "fail", note: "No code sends Meta ViewContent or AddToCart; the Buy buttons still call addToCart() only.", evidence: [{ path: "src/analytics/events.ts", line: 27 }] }]
+    // The agent did every server job but left the browser Meta events out.
+    const edits = new Map([...CORRECT_EDITS].filter(([file]) => file !== "src/analytics/events.ts"))
+    const run = await storeReview(root, edits, script, { fixRound: true })
+    try {
+      expect(run.outcome.kind).toBe("fix")
+      const fix = run.outcome as Extract<JobsReviewOutcome, { kind: "fix" }>
+      expect(fix.itemIds).toEqual(["meta_improve:commerce_events"])
+      expect(fix.feedback.join("\n")).toContain("the review agent answered no to \"Does the code now send Meta")
+      expect(fix.feedback.join("\n")).toContain("No code sends Meta ViewContent or AddToCart; the Buy buttons still call addToCart() only. (src/analytics/events.ts:27)")
+      expect(run.job("meta_improve:commerce_events")).toMatchObject({ state: "pending", review: { state: "fail", fixRound: true } })
+      // The server jobs passed: proven by the review.
+      for (const id of COMMERCE_JOBS.filter((entry) => entry !== "meta_improve:commerce_events")) expect(run.job(id).review?.state, id).toBe("pass")
+      // The agent's fix round changed nothing: the re-review asks ONLY the failed question, and it still fails.
+      const again = await run.reReview(new Map(), script)
+      expect(again).toEqual({ kind: "done" })
+      expect(run.seen[1]!.questions.map((entry) => entry.job)).toEqual(["meta_improve:commerce_events"])
+      expect(run.seen[1]!.questions[0]!.question).toMatch(/^Does the code now send Meta/)
+      expect(run.seen[1]!.questions[0]!.earlier).toMatchObject({ answer: "fail" })
+      const job = run.job("meta_improve:commerce_events")
+      expect(job.review).toMatchObject({ state: "fail", fixRound: true })
+      expect(job.note).toBe("Needs your look: No code sends Meta ViewContent or AddToCart; the Buy buttons still call addToCart() only. (src/analytics/events.ts:27)")
+      // Never reverted: the job is done in code with its finding, and the server edits are still in the tree.
+      expect(["done_in_code", "waiting_deploy", "waiting_real_event"]).toContain(job.state)
+      expect(readFileSync(join(root, "pages/api/stripe-webhook.ts"), "utf8")).toBe(CORRECT_EDITS.get("pages/api/stripe-webhook.ts"))
+    } finally {
+      run.reset()
+    }
+  })
+
+  it("(d) a GA4 double count beside the site's own purchase: the review answers no; the agent's fix makes the re-review pass, and the job is proven by the review", async () => {
+    const success = SITE.get("pages/success.tsx")!
+      .replace('import Link from "next/link";\n', 'import Link from "next/link";\nimport { infiniteTrack } from "../lib/infinite-analytics";\n')
+      .replace("    purchase(sessionId, lines);\n", '    purchase(sessionId, lines);\n    infiniteTrack("purchase", { transaction_id: sessionId });\n')
+    const script: Answer[] = [{ job: "server_conversions:purchase", about: "exactly once per user action", answer: "fail", note: "pages/success.tsx sends GA4 and PostHog a second purchase beside the site's own purchase(); every sale counts twice.", evidence: [{ path: "pages/success.tsx", line: 28 }] }]
+    const run = await storeReview(root, new Map([...CORRECT_EDITS, ["pages/success.tsx", success]]), script, { fixRound: true })
+    try {
+      expect(run.outcome.kind).toBe("fix")
+      expect(run.job("server_conversions:purchase")).toMatchObject({ state: "pending", note: expect.stringMatching(/^The review agent found: pages\/success\.tsx sends GA4 and PostHog a second purchase/) })
+      // The agent's fix round takes the second send out; the re-review passes.
+      const again = await run.reReview(new Map([["pages/success.tsx", SITE.get("pages/success.tsx")!]]))
+      expect(again).toEqual({ kind: "done" })
+      expect(run.job("server_conversions:purchase")).toMatchObject({ review: { state: "pass", fixRound: true }, note: "Checked by the review agent." })
+    } finally {
+      run.reset()
+    }
+  })
+
+  it("(d) a purchase reported without match data (no hard rule sees it): the review's match-data question catches it", async () => {
+    const run = await storeReview(root, new Map([...CORRECT_EDITS, ["pages/api/stripe-webhook.ts", handRolledWebhook(MONEY)]]), [
+      { job: "server_conversions:purchase", about: "carry the customer's match data", answer: "fail", note: "The purchase is reported with no adMatch, so Meta cannot tie it to an ad click.", evidence: [{ path: "pages/api/stripe-webhook.ts", line: 32 }] }
     ])
-    const functions = jobStaticCheckFunctions({ root, run: () => ({ eventInventory: inventory, metaInUse: true, conversionNames: ["purchase", "begin_checkout", "lead"] }), readBaseFile: (_root, file) => SITE.get(file) ?? null })
-    const item = items.find((entry) => entry.id === "server_conversions:begin_checkout")!
-    expect(item.checks.map((check) => check.id)).toContain("tracking_signal_carried")
-    const grade = async (edits: ReadonlyMap<string, string>) => {
-      for (const [file, text] of edits) writeFileSync(join(root, file), text, { flag: "w" })
+    try {
+      expect(run.job("server_conversions:purchase")).toMatchObject({ review: { state: "fail" }, note: expect.stringMatching(/^Needs your look: The purchase is reported with no adMatch/) })
+      expect(run.job("server_conversions:purchase").review!.questions.find((question) => question.id === "match_data")).toMatchObject({ answer: "fail", evidence: [{ file: "pages/api/stripe-webhook.ts", line: 32 }] })
+    } finally {
+      run.reset()
+    }
+  })
+
+  it("(d) Finding 1: the cart that sends no signal, a route that reads the URL, or a constant: the review's signal question catches each", async () => {
+    const variants = new Map<string, Map<string, string>>([
+      ["silent cart", new Map([...CORRECT_EDITS, ["pages/cart.tsx", SITE.get("pages/cart.tsx")!]])],
+      ["URL read", new Map([...CORRECT_EDITS, ["pages/api/checkout.ts", CORRECT_EDITS.get("pages/api/checkout.ts")!.replace('req.body?.ad_match === "1"', 'req.query.ad_match === "1"')]])],
+      ["constant", new Map([...CORRECT_EDITS, ["pages/cart.tsx", CORRECT_EDITS.get("pages/cart.tsx")!.replace('value={getConsent() === "granted" ? "1" : "0"}', 'value="1"')]])]
+    ])
+    for (const [name, edits] of variants) {
+      const run = await storeReview(root, edits, [{ job: "server_conversions:begin_checkout", about: "tracking-allowed signal", answer: "fail", note: `${name}: the checkout start reaches Meta without the visitor's signal as the route reads it.` }])
       try {
-        const raw = await functions.tracking_signal_carried({ item, root, appRoot: "." }, { runId: RUN_ID, now: () => new Date("2026-10-08T10:00:00.000Z") })
-        return (Array.isArray(raw) ? raw : [raw])[0]!
+        expect(run.job("server_conversions:begin_checkout").review, name).toMatchObject({ state: "fail" })
+        expect(run.job("server_conversions:begin_checkout").note, name).toBe(`Needs your look: ${name}: the checkout start reaches Meta without the visitor's signal as the route reads it.`)
       } finally {
-        execFileSync("git", ["checkout", "--", "."], { cwd: root, stdio: "ignore" })
-        execFileSync("git", ["clean", "-fdq"], { cwd: root, stdio: "ignore" })
+        run.reset()
       }
     }
-    expect((await grade(CORRECT_EDITS)).state).toBe("pass")
-    // The review's variant: the route reads the signal, the cart sends none.
-    const silent = await grade(new Map([...CORRECT_EDITS, ["pages/cart.tsx", SITE.get("pages/cart.tsx")!]]))
-    expect(silent.state).toBe("problem")
-    expect(silent.reason).toMatch(/^pages\/cart\.tsx:\d+ sends its request to pages\/api\/checkout\.ts with no tracking signal, so the begin_checkout reaches Meta with no match data\. Add a hidden field inside its form/)
-    // The old template: the cart posts the field, the route reads the URL.
-    const query = await grade(new Map([...CORRECT_EDITS, ["pages/api/checkout.ts", CORRECT_EDITS.get("pages/api/checkout.ts")!.replace('req.body?.ad_match === "1"', 'req.query.ad_match === "1"')]]))
-    expect(query.state).toBe("problem")
-    expect(query.reason).toMatch(/sends the tracking signal as ad_match in the request body, but pages\/api\/checkout\.ts:\d+ reads ad_match from the URL, so trackingAllowed is always false/)
-    // A field not built from the site's own consent reader.
-    const constant = await grade(new Map([...CORRECT_EDITS, ["pages/cart.tsx", CORRECT_EDITS.get("pages/cart.tsx")!.replace('value={getConsent() === "granted" ? "1" : "0"}', 'value="1"')]]))
-    expect(constant.state).toBe("problem")
-    expect(constant.reason).toMatch(/sends ad_match, but not from the site's tracking signal \(getConsent\(\) === "granted"\)/)
   })
 
-  it("(d) [A, D] the jobs' own checks fail with the right words: Meta left with PageView only, a purchase without match data", async () => {
-    const { items } = await pipeline()
-    const { jobStaticCheckFunctions } = await import("../checks/job-static.js")
-    const inventory = await scanInventory((await pipeline()).scan)
-    const functions = jobStaticCheckFunctions({ root, run: () => ({ eventInventory: inventory, metaInUse: true, conversionNames: ["purchase", "begin_checkout", "lead"] }), readBaseFile: (_root, file) => SITE.get(file) ?? null })
-    const ctx = { runId: RUN_ID, now: () => new Date("2026-10-08T10:00:00.000Z") }
-    const run = async (id: string, check: "commerce_promises_met" | "outcome_ad_match") => {
-      const raw = await functions[check]({ item: items.find((item) => item.id === id)!, root, appRoot: "." }, ctx)
-      return (Array.isArray(raw) ? raw : [raw])[0]!
-    }
+  it("(d) a lead with no fallbackId, and the send inside the helper AND in the Buy handler: each caught by its own question", async () => {
+    const lead = CORRECT_EDITS.get("pages/api/mailing-list.ts")!.replace(/^    fallbackId: .*\n/m, "")
+    const index = CORRECT_EDITS.get("pages/index.tsx")!
+      .replace('import { useCart } from "../src/cart/CartContext";\n', 'import { useCart } from "../src/cart/CartContext";\nimport { infiniteTrack } from "../lib/infinite-analytics";\n')
+      .replace("    addToCart(product);\n", '    addToCart(product);\n    infiniteTrack("add_to_cart", { item_id: product.slug, price: product.priceCents / 100, quantity: 1, currency: "USD" }, { destinations: ["meta", "infinite"] });\n')
+    expect(index).toContain('infiniteTrack("add_to_cart"')
+    const run = await storeReview(root, new Map([...CORRECT_EDITS, ["pages/api/mailing-list.ts", lead], ["pages/index.tsx", index]]), [
+      { job: "server_conversions:lead", about: "stays the same when the same lead is reported again", answer: "fail", note: "reportInfiniteLead has no fallbackId: until LEAD_ID_SECRET is set the lead has no stable id and sends nothing." },
+      { job: "meta_improve:commerce_events", about: "exactly once per user action", answer: "fail", note: "One Buy click sends Meta AddToCart twice: inside addToCart() and again in the handler." }
+    ])
     try {
-      // The agent changed nothing: Meta still gets PageView only.
-      const untouched = await run("meta_improve:commerce_events", "commerce_promises_met")
-      expect(untouched.state).toBe("problem")
-      expect(untouched.reason).toMatch(/The plan promised Meta (ViewContent|AddToCart), but no code sends it/)
-      // The webhook reports the purchase without the payer's match data.
-      const webhook = CORRECT_EDITS.get("pages/api/stripe-webhook.ts")!
-        .replace("import { reportStripeCheckoutPurchase } from", "import { reportInfiniteOutcome } from")
-        .replace('  return res.status(await reportStripeCheckoutPurchase(event, { path: "/success" })).json({ received: true })\n', '  const status = await reportInfiniteOutcome({ type: "purchase", eventId: event.id, path: "/success", properties: { value: 1, currency: "USD" } })\n  return res.status(status === null ? 500 : 200).json({ received: true })\n')
-      for (const [file, text] of [...CORRECT_EDITS, ["pages/api/stripe-webhook.ts", webhook] as const]) writeFileSync(join(root, file), text, { flag: "w" })
-      const bare = await run("server_conversions:purchase", "outcome_ad_match")
-      expect(bare.state).toBe("problem")
-      expect(bare.reason).toMatch(/reports the purchase to Infinite without match data \(no adMatch\), so Meta cannot tie it to an ad click/)
+      expect(run.job("server_conversions:lead").note).toMatch(/^Needs your look: reportInfiniteLead has no fallbackId/)
+      expect(run.job("meta_improve:commerce_events").note).toBe("Needs your look: One Buy click sends Meta AddToCart twice: inside addToCart() and again in the handler.")
+      // The other two jobs passed every question.
+      expect(run.job("server_conversions:purchase").review?.state).toBe("pass")
+      expect(run.job("server_conversions:begin_checkout").review?.state).toBe("pass")
     } finally {
-      execFileSync("git", ["checkout", "--", "."], { cwd: root, stdio: "ignore" })
-      execFileSync("git", ["clean", "-fdq"], { cwd: root, stdio: "ignore" })
+      run.reset()
+    }
+  })
+
+  it("no review agent for the run: every edit is KEPT, each job says no review checked it, and the pull request must stay a draft", async () => {
+    const run = await storeReview(root, CORRECT_EDITS, [], { reviewer: null })
+    try {
+      for (const id of COMMERCE_JOBS) {
+        expect(run.job(id).review, id).toMatchObject({ state: "not_run", reviewer: null })
+        expect(run.job(id).note, id).toBe("Not checked by a review agent: no review agent was chosen for this run")
+        expect(run.job(id).state, id).not.toMatch(/pending|failed|left_for_you/)
+      }
+      expect(jobsReviewKeepsDraft(run.jobs(), RUN_ID)).toEqual({ keepDraft: true, reason: "No review agent checked the jobs' work: no review agent was chosen for this run" })
+    } finally {
+      run.reset()
     }
   })
 })
@@ -478,26 +672,8 @@ describe("P1-A store variant: Buy leaves with a full page load", () => {
     if (fullRoot) rmSync(fullRoot, { recursive: true, force: true })
   })
 
-  const metaChecks = async (edits: ReadonlyMap<string, string>) => {
-    const { items, scan } = await pipeline(fullRoot)
-    const inventory = await scanInventory(scan)
-    const { jobStaticCheckFunctions } = await import("../checks/job-static.js")
-    const functions = jobStaticCheckFunctions({ root: fullRoot, run: () => ({ eventInventory: inventory, metaInUse: true, conversionNames: ["purchase", "begin_checkout", "lead"] }), readBaseFile: (_root, file) => site.get(file) ?? null })
-    const item = items.find((entry) => entry.id === "meta_improve:commerce_events")!
-    for (const [file, text] of edits) writeFileSync(join(fullRoot, file), text, { flag: "w" })
-    try {
-      const out: Record<string, { state: string; reason: string }> = {}
-      for (const check of ["commerce_promises_met", "no_double_count", "sends_before_leaving"] as const) {
-        const raw = await functions[check]({ item, root: fullRoot, appRoot: "." }, { runId: RUN_ID, now: () => new Date("2026-10-08T10:00:00.000Z") })
-        const result = (Array.isArray(raw) ? raw : [raw])[0]!
-        out[check] = { state: result.state, reason: result.reason ?? "" }
-      }
-      return out
-    } finally {
-      execFileSync("git", ["checkout", "--", "."], { cwd: fullRoot, stdio: "ignore" })
-      execFileSync("git", ["clean", "-fdq"], { cwd: fullRoot, stdio: "ignore" })
-    }
-  }
+  /** The Meta commerce job's review on the full-load store (`storeReview`), scripted with `script`. */
+  const metaReview = (edits: ReadonlyMap<string, string>, script: readonly Answer[]) => storeReview(fullRoot, edits, script)
 
   it("the scan sees both Buy handlers leave with a full page load, and the brief asks for the returned wait and the wrapped handler", async () => {
     const { items, brief, scan } = await pipeline(fullRoot)
@@ -506,7 +682,8 @@ describe("P1-A store variant: Buy leaves with a full page load", () => {
       ["pages/index.tsx", "full_load", "location.assign"],
       ["pages/products/[slug].tsx", "full_load", "location.assign"]
     ])
-    expect(items.find((item) => item.id === "meta_improve:commerce_events")!.checks.map((check) => check.id)).toEqual(expect.arrayContaining(["commerce_promises_met", "no_double_count", "sends_before_leaving"]))
+    // Waiting before the page leaves is a review question that names both full-load callers; no static check judges it.
+    expect(items.find((item) => item.id === "meta_improve:commerce_events")!.checks.map((check) => check.id)).toEqual(["meta_event_id_from_helper", "meta_seen_leaving"])
     const meta = brief.slice(brief.indexOf('### Job "meta_improve:commerce_events"'), brief.indexOf("### Job", brief.indexOf('### Job "meta_improve:commerce_events"') + 1))
     expect(meta).toContain('In the helper, as its FIRST new line: `const wait = infiniteTrackBeforeLeaving("add_to_cart", <product>, { destinations: ["meta", "infinite"] })`')
     expect(meta).toContain("then every send the helper already has, exactly as it is; then as its LAST line: `return wait`")
@@ -517,52 +694,54 @@ describe("P1-A store variant: Buy leaves with a full page load", () => {
     expect(meta).toContain("| Through your helper; the click then does a full page load |")
   })
 
-  it("the correct full-load edits pass the Meta job's own checks", async () => {
-    const results = await metaChecks(correct)
-    for (const [check, result] of Object.entries(results)) expect(result.state, `${check}: ${result.reason}`).toBe("pass")
-    expect(problems(commerceFindings({ files: new Map([...site, ...correct]), base: new Map<string, string | null>([...site, ...[...correct.keys()].filter((file) => !site.has(file)).map((file) => [file, null] as const)]), inventory: await scanInventory((await pipeline(fullRoot)).scan), metaInUse: true }))).toEqual([])
+  it("the correct full-load edits: the hard rules pass, and the timing question names both full-load callers", async () => {
+    expect(commerceFindings({ files: new Map([...site, ...correct]), base: new Map<string, string | null>([...site, ...[...correct.keys()].filter((file) => !site.has(file)).map((file) => [file, null] as const)]), inventory: await scanInventory((await pipeline(fullRoot)).scan), metaInUse: true })).toEqual([])
+    const run = await metaReview(correct, [])
+    try {
+      expect(run.job("meta_improve:commerce_events")).toMatchObject({ review: { state: "pass" }, note: "Checked by the review agent." })
+      const timing = asked(run.seen, "meta_improve:commerce_events").find((text) => text.includes("really reach Meta"))!
+      expect(timing).toMatch(/where the click leaves with a full page load \(pages\/index\.tsx:\d+, pages\/products\/\[slug\]\.tsx:\d+\), awaited before the page leaves/)
+    } finally {
+      run.reset()
+    }
   })
 
-  it("Finding 3: the wait returned as the helper's FIRST line drops the site's own GA4 and PostHog sends, and fails", async () => {
+  it("Finding 3: the wait returned as the helper's FIRST line drops the site's own GA4 and PostHog sends: the review's kept-sends question catches it", async () => {
     const events = FULL_CORRECT.get("src/analytics/events.ts")!
       .replace('  const wait = infiniteTrackBeforeLeaving("add_to_cart",', '  return infiniteTrackBeforeLeaving("add_to_cart",')
       .replace("  return wait;\n", "")
     expect(events).toMatch(/Promise<void> \{\n  return infiniteTrackBeforeLeaving[^\n]*\n  sendGa\("add_to_cart"/)
-    const { items, scan } = await pipeline(fullRoot)
-    const { jobStaticCheckFunctions } = await import("../checks/job-static.js")
-    const functions = jobStaticCheckFunctions({ root: fullRoot, run: () => ({ eventInventory: readEventInventory(toJobScan(scan).detections.eventInventory), metaInUse: true }), readBaseFile: (_root, file) => site.get(file) ?? null })
-    const item = items.find((entry) => entry.id === "meta_improve:commerce_events")!
-    expect(item.checks.map((check) => check.id)).toContain("sends_kept")
-    const grade = async (edits: ReadonlyMap<string, string>) => {
-      for (const [file, text] of edits) writeFileSync(join(fullRoot, file), text, { flag: "w" })
-      try {
-        const raw = await functions.sends_kept({ item, root: fullRoot, appRoot: "." }, { runId: RUN_ID, now: () => new Date("2026-10-08T10:00:00.000Z") })
-        return (Array.isArray(raw) ? raw : [raw])[0]!
-      } finally {
-        execFileSync("git", ["checkout", "--", "."], { cwd: fullRoot, stdio: "ignore" })
-        execFileSync("git", ["clean", "-fdq"], { cwd: fullRoot, stdio: "ignore" })
-      }
+    const run = await metaReview(new Map([...correct, ["src/analytics/events.ts", events]]), [
+      { job: "meta_improve:commerce_events", about: "still run all of its own lines", answer: "fail", note: "addToCart() returns before sendGa and capturePosthog, so the site's own sends never run." }
+    ])
+    try {
+      expect(run.job("meta_improve:commerce_events").note).toBe("Needs your look: addToCart() returns before sendGa and capturePosthog, so the site's own sends never run.")
+    } finally {
+      run.reset()
     }
-    expect((await grade(correct)).state).toBe("pass")
-    const dead = await grade(new Map([...correct, ["src/analytics/events.ts", events]]))
-    expect(dead.state).toBe("problem")
-    expect(dead.reason).toMatch(/^src\/analytics\/events\.ts:\d+ never runs: addToCart\(\) returns before it, so the site's own sends there are lost/)
   })
 
-  it("the client-routing shape here (no wait) fails: Meta's AddToCart can be cut off by the page load", async () => {
-    // The store's own correct edits: a plain infiniteTrack in the helper, and Buy handlers that leave at once.
-    const results = await metaChecks(new Map([...CORRECT_EDITS, ...[...FULL_SITE].map(([file, text]) => [file, text.replace(/<button type="button" className="btn btn-primary btn-(block|large)"/, '<button type="button" className="btn btn-primary btn-$1" data-infinite-conversion="add_to_cart"')] as const)]))
-    expect(results.sends_before_leaving!.state).toBe("problem")
-    expect(results.sends_before_leaving!.reason).toMatch(/sends Meta AddToCart through addToCart\(\) and then leaves with a full page load without waiting/)
+  it("the client-routing shape here (no wait): the review's timing question catches that Meta's AddToCart can be cut off by the page load", async () => {
+    const edits = new Map([...CORRECT_EDITS, ...[...FULL_SITE].map(([file, text]) => [file, text.replace(/<button type="button" className="btn btn-primary btn-(block|large)"/, '<button type="button" className="btn btn-primary btn-$1" data-infinite-conversion="add_to_cart"')] as const)])
+    const run = await metaReview(edits, [{ job: "meta_improve:commerce_events", about: "really reach Meta", answer: "fail", note: "Buy sends AddToCart through addToCart() and then leaves with location.assign without waiting." }])
+    try {
+      expect(run.job("meta_improve:commerce_events").review).toMatchObject({ state: "fail" })
+      expect(run.job("meta_improve:commerce_events").note).toContain("leaves with location.assign without waiting")
+    } finally {
+      run.reset()
+    }
   })
 
-  it("the helper's send AND infiniteTrackThenNavigate in the Buy handler (the old brief's two halves) fail as a double count", async () => {
+  it("the helper's send AND infiniteTrackThenNavigate in the Buy handler: the review's once-per-click question catches the double count", async () => {
     const index = FULL_CORRECT.get("pages/index.tsx")!
       .replace('import { infiniteLeaveAfter } from "../lib/infinite-analytics";', 'import { infiniteTrackThenNavigate } from "../lib/infinite-analytics";')
       .replace(/  const buy = \(product: Product\) =>\n    infiniteLeaveAfter\([\s\S]*?\n    \);\n/, '  const buy = (product: Product) => {\n    cart.add(product.slug);\n    void addToCart(product);\n    infiniteTrackThenNavigate(null, "/cart", "add_to_cart", { item_id: product.slug, price: product.priceCents / 100, quantity: 1, currency: "USD" }, { destinations: ["meta", "infinite"] });\n  };\n')
     expect(index).toContain("infiniteTrackThenNavigate(null")
-    const results = await metaChecks(new Map([...correct, ["pages/index.tsx", index]]))
-    expect(results.no_double_count!.state).toBe("problem")
-    expect(results.no_double_count!.reason).toMatch(/One click at pages\/index\.tsx:\d+ sends Meta AddToCart twice/)
+    const run = await metaReview(new Map([...correct, ["pages/index.tsx", index]]), [{ job: "meta_improve:commerce_events", about: "exactly once per user action", answer: "fail", note: "One Buy click sends Meta AddToCart twice: in addToCart() and in infiniteTrackThenNavigate." }])
+    try {
+      expect(run.job("meta_improve:commerce_events").note).toMatch(/^Needs your look: One Buy click sends Meta AddToCart twice/)
+    } finally {
+      run.reset()
+    }
   })
 })

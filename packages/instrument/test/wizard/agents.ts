@@ -51,7 +51,7 @@ export function setScenario(setup: FakeSetup, scenario: unknown): void {
 }
 
 export interface FakeRecord {
-  kind: "run" | "probe" | "mcp" | "mcp-config" | "toolless" | "grandchild" | "hanging"
+  kind: "run" | "probe" | "mcp" | "mcp-config" | "toolless" | "grandchild" | "hanging" | "jobs_review"
   agent: "claude" | "codex"
   role?: "worker" | "reviewer"
   argv?: string[]

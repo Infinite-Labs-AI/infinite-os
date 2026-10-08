@@ -5,10 +5,11 @@
 // Two kinds of check:
 //   - the hard checks (tiers S, B, T0) run on the code after the agent's turn: a problem goes back to the agent with its
 //     reason, and a problem still there when the rounds run out puts this job's edits back;
-//   - the review agent's questions (Builder A's post-jobs review pass) are judgement calls: a "no" goes back to the agent
+//   - the review agent's questions (the post-jobs review pass, `wizard/steps/jobs-review.ts`) are judgement calls: a "no" goes back to the agent
 //     as a fix round, it never puts work back on its own.
 import type { ChecklistItem, CheckTier } from "../wizard/contracts/jobs.js"
 import { CHECK_LABELS } from "./check-words.js"
+import { reviewQuestionTexts, type QuestionFacts } from "../review/questions.js"
 
 /** Tiers whose problem can put the job's edits back (the wizard's own checks before the deploy). */
 const PUT_BACK_TIERS: readonly CheckTier[] = ["S", "B", "T0"]
@@ -16,12 +17,12 @@ const PUT_BACK_TIERS: readonly CheckTier[] = ["S", "B", "T0"]
 const AFTER_DEPLOY_TIERS: readonly CheckTier[] = ["T1", "RH", "PV", "P"]
 
 /**
- * HOOK (Builder A, `src/review/questions.ts`): the review agent's questions for one job, in plain words. Until that module
- * lands this returns none, and the brief says only that the review agent reads the whole change. The coordinator swaps
- * this stub for `import { reviewQuestionsFor } from "../review/questions.js"` at merge.
+ * The review agent's questions for one job, in plain words (`review/questions.ts`; the same questions the jobs' review
+ * asks right after the agent's turns). `facts` (the run's inventory, approved names, hosts) makes them name the site's
+ * own signal reader and the pages; without them the questions stay general.
  */
-export function reviewQuestionsFor(_item: ChecklistItem): readonly string[] {
-  return []
+export function reviewQuestionsFor(item: ChecklistItem, facts: QuestionFacts = {}): readonly string[] {
+  return reviewQuestionTexts(item, facts)
 }
 
 function labels(item: ChecklistItem, tiers: readonly CheckTier[]): string[] {

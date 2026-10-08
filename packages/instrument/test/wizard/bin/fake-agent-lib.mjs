@@ -213,3 +213,51 @@ export function withReadCheck(review, cwd, turn) {
   }
   return { ...review, summary: `read-check: ${nonce} ${review.summary}` }
 }
+
+/**
+ * The jobs' review (`wizard/steps/jobs-review.ts`): a reviewer run whose output schema answers the jobs' questions
+ * (`properties.answers`). It is recorded as `jobs_review`, never as a `run`, so it never shifts the step-9 review's
+ * scripted turns. Scenario key `jobsReview: [{ answers?: [{ job?, match?, answer, note?, evidence? }], final?, summary?,
+ * blind?, exit?, schemaProblem? }]`, one per jobs review: each question gets the first rule whose `job` equals its job
+ * and whose `match` is in its text; a question no rule names is a "pass". `final` replaces the whole answer.
+ */
+export function isJobsReviewSchema(schema) {
+  return !!schema && typeof schema === "object" && !!schema.properties && typeof schema.properties === "object" && "answers" in schema.properties
+}
+
+export function priorJobsReviews(agent) {
+  const path = process.env.FAKE_AGENT_RECORD
+  if (!path || !existsSync(path)) return 0
+  return readFileSync(path, "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line)).filter((entry) => entry.kind === "jobs_review" && entry.agent === agent).length
+}
+
+export function jobsReviewTurn(scenario, agent) {
+  const turns = scenario.jobsReview ?? [{}]
+  return turns[Math.min(priorJobsReviews(agent), turns.length - 1)] ?? {}
+}
+
+export function jobsReviewAnswer(turn, cwd) {
+  if (turn.final !== undefined) return turn.final
+  let jobs = []
+  try {
+    jobs = JSON.parse(readFileSync(join(cwd, ".infinite", "review", "jobs-questions.json"), "utf8")).jobs ?? []
+  } catch {
+    jobs = []
+  }
+  const rules = turn.answers ?? []
+  const answers = jobs.flatMap((job) =>
+    (job.questions ?? []).map((question) => {
+      const rule = rules.find((entry) => (entry.job === undefined || entry.job === job.job) && (entry.match === undefined || String(question.question).includes(entry.match)))
+      return { question_id: question.question_id, answer: rule?.answer ?? "pass", evidence: rule?.evidence ?? [], note: rule?.note ?? "Read the code: it does what the question asks." }
+    })
+  )
+  let summary = turn.summary ?? "Answered every question."
+  if (!turn.blind) {
+    try {
+      summary = `read-check: ${readFileSync(join(cwd, ".infinite", "review", "read-check.txt"), "utf8").trim()} ${summary}`
+    } catch {
+      // no read-check file: the answer says nothing about it
+    }
+  }
+  return { summary, answers }
+}

@@ -3,7 +3,7 @@ import { isReviewResult } from "../review/brief.js"
 // §3f.8) before anything reads it: the subset those two schemas use (type incl. arrays of types, enum,
 // required, properties, additionalProperties:false, items, maxLength, maxItems, pattern). Zero
 // dependencies. An agent's output that fails is "unparseable", never half-used.
-import { CLAIMS_SCHEMA, type ReviewResult } from "../wizard/contracts/agents.js"
+import { CLAIMS_SCHEMA, JOB_REVIEW_SCHEMA, type JobReviewResult, type ReviewResult } from "../wizard/contracts/agents.js"
 
 type Schema = Record<string, unknown>
 
@@ -72,6 +72,13 @@ export function parseReview(value: unknown): ReviewResult | null {
   const parsed = typeof value === "string" ? answerJson(value) : value
   if (!isReviewResult(parsed, false)) return null
   return parsed as ReviewResult
+}
+
+/** The jobs' review answers, or null when they do not match `JOB_REVIEW_SCHEMA` exactly. */
+export function parseJobReview(value: unknown): JobReviewResult | null {
+  const parsed = typeof value === "string" ? answerJson(value) : value
+  if (parsed === undefined || schemaErrors(parsed, JOB_REVIEW_SCHEMA as unknown as Schema).length > 0) return null
+  return parsed as JobReviewResult
 }
 
 /**

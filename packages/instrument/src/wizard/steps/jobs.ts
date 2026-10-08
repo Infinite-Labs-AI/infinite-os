@@ -49,6 +49,7 @@ import { TURN_GATE_CHECK_ID, TURN_GATE_RULES } from "../../checks/turn-gate.js"
 import { matchesAnyGlob, normalizeRelPath } from "../../agents/glob.js"
 import { finalSealPath, snapshotDir, wizardCacheRoot } from "../../agents/paths.js"
 import { runExtras } from "../../agents/runner.js"
+import { reviewJobsBeforeSettling, type JobsReviewOutcome, type JobsReviewOptions } from "./jobs-review.js"
 import { settleAgentEdits, heldForReview, jobVerified, keptWithLine, notDoneItem, notDoneJobs, unsettle, type AttributedEdit } from "../../jobs/settle-edits.js"
 import { LOCAL_TIERS, applyClaim, applyResults, blockItem, failItem, unblockItem, withNote, type Transition } from "../../jobs/state-machine.js"
 import { checkProvesChange } from "../contracts/jobs.js"
@@ -265,13 +266,18 @@ async function runWorker(io: JobsIo, agentItems: ChecklistItem[]): Promise<StepO
   const started = deps.clock.now().getTime()
   let turnsLeft: number = AGENT_LIMITS.jobs.maxTurns
   let roundsLeft = 1 + AGENT_LIMITS.jobs.maxResumeRounds
+  // The review agent's one fix round (`jobs-review.ts`) extends the wall budget by its own allowance.
+  let wallBudgetMs: number = AGENT_LIMITS.jobs.wallMs
   let session: SessionRef | undefined = ctx.state.get().agent?.workerSession ?? undefined
   let feedback: string[] = []
   ctx.emit.emit("step.status", { step: "jobs", text: `Reading your code · 0 files read · 0 edited · 0 of ${agentItems.length} claimed · 0 of ${Math.round(AGENT_LIMITS.jobs.wallMs / 60_000)} min` })
 
+  // The rounds, then the review agent's questions on the jobs (`jobs-review.ts`); a failing answer comes back here for
+  // ONE more round with the reviewer's words, then one re-review of what failed. A review answer never reverts an edit.
+  for (;;) {
   while (roundsLeft > 0) {
     const open = io.items().filter((item) => item.owner === "agent" && item.state === "pending")
-    const wallLeft = AGENT_LIMITS.jobs.wallMs - (deps.clock.now().getTime() - started)
+    const wallLeft = wallBudgetMs - (deps.clock.now().getTime() - started)
     if (open.length === 0 || wallLeft <= 0 || turnsLeft <= 0) break
     roundsLeft -= 1
     // §3x.3 (§2.2): evidence found on the base commit, mapped through the install's (and earlier rounds') edits.
@@ -384,6 +390,8 @@ async function runWorker(io: JobsIo, agentItems: ChecklistItem[]): Promise<StepO
     await io.patchClickTested()
     await io.save()
   }
+  // A job the review sent back that the agent left untouched in its fix round keeps its edits and its finding.
+  io.restoreReviewFix()
 
   // Budget spent. LF4-P1-2 (round 1): every job still open is decided by its OWN local checks on the tree the pull
   // request commits (a pass is done in code with no claim made up), never by whether the agent claimed its lines.
@@ -406,6 +414,15 @@ async function runWorker(io: JobsIo, agentItems: ChecklistItem[]): Promise<StepO
             ? blockItem(item, "agent_blocked", `${budgetWords}. ${notInCodeWords(failure)}`, io.noteScanner)
             : blockItem(item, "agent_blocked", undecided !== undefined ? `${budgetWords}. ${undecided}.` : `${budgetWords}.`, io.noteScanner)
     )
+  }
+  await io.save()
+  // The review agent answers the jobs' questions before the edits settle; one fix round when it found a problem.
+  const reviewed = await io.reviewJobs({ fixRound: !io.reviewFixUsed() && session !== undefined && sessionId(session) !== "" })
+  if (reviewed.kind !== "fix") break
+  feedback = reviewed.feedback
+  roundsLeft = 1
+  turnsLeft = Math.max(turnsLeft, AGENT_LIMITS.reviewFix.maxTurnsPerRound)
+  wallBudgetMs = deps.clock.now().getTime() - started + AGENT_LIMITS.reviewFix.wallMsPerRound
   }
   await io.save()
   // R4-1: the edits settle BEFORE the closing lines, so "Not done" says where each change is now.
@@ -1202,6 +1219,47 @@ class JobsIo {
     }
   }
 
+  /** The review's fix round in flight: the items it sent back, and each one as it was before. */
+  private reviewFix: { itemIds: string[]; restore: Map<string, ChecklistItem> } | null = null
+  private reviewFixDone = false
+
+  /** The files the coding agent changed in this step (its kept edits, not yet settled): the review's diff. */
+  editedFiles(): string[] {
+    return [...new Set(this.pendingEdits.map((entry) => normalizeRelPath(entry.edit.file)))]
+  }
+
+  /** The one fix round the review may send back has been used. */
+  reviewFixUsed(): boolean {
+    return this.reviewFixDone
+  }
+
+  /**
+   * The review agent's answers on the jobs (`jobs-review.ts`), right after the agent's turns and before the edits settle.
+   * After a fix round only the failed questions are asked again; the fix round itself is the caller's (one more round).
+   */
+  async reviewJobs(options: Pick<JobsReviewOptions, "fixRound">): Promise<JobsReviewOutcome> {
+    this.restoreReviewFix()
+    const reReview = this.reviewFix?.itemIds
+    this.reviewFix = null
+    const outcome = await reviewJobsBeforeSettling(this, { fixRound: options.fixRound && !this.reviewFixDone, ...(reReview ? { reReview } : {}) })
+    if (outcome.kind === "fix") {
+      this.reviewFix = { itemIds: outcome.itemIds, restore: outcome.restore }
+      this.reviewFixDone = true
+    }
+    await this.save()
+    return outcome
+  }
+
+  /** A job the review sent back that is still pending (the agent did not claim it again) returns to where it was. */
+  restoreReviewFix(): void {
+    for (const [id, before] of this.reviewFix?.restore ?? []) {
+      const current = this.item(id)
+      if (current?.state !== "pending") continue
+      const back: ChecklistItem = { ...structuredClone(before), ...(current.review ? { review: current.review } : {}) }
+      this.put({ item: back, changed: true, by: "wizard" })
+    }
+  }
+
   /**
    * Settles the step's kept edits: a block stays when ANY owner was verified on a tree that held it, or the job is held
    * for the review agent (`heldForReview`); every other block is put back. The verified jobs are then checked again on
@@ -1210,6 +1268,8 @@ class JobsIo {
    * listed for the review agent ("not verified on its own"), never blamed on the verified job.
    */
   async settleEdits(): Promise<void> {
+    // The review agent answers the jobs' questions BEFORE anything settles (a no-op for jobs it already decided).
+    await this.reviewJobs({ fixRound: false })
     const entries = this.pendingEdits
     this.pendingEdits = []
     const keep = new Set(this.items().filter((item) => jobVerified(item) || heldForReview(item)).map((item) => item.id))

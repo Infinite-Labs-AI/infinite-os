@@ -1,6 +1,12 @@
-// The job table's static (S) checks that verify an AGENT's edit (review I1 P1-5): jobs 1, 2, 3, 8, 9, 12 and 14.
+// The job table's static (S) checks that verify an AGENT's edit (review I1 P1-5): jobs 1, 2, 3, 8, 10 and 12.
 // Before these existed a claim on those jobs could never be checked, so the item stayed `claimed` forever and
 // its unverified code still shipped in the PR.
+//
+// Only MECHANICAL rules live here (a call is there, a setting has its value, a rewrite is exact, no phone or raw
+// personal detail reaches an outcome, a purchase carries value and currency, no page-made Meta event id). Judgements of
+// meaning (is the report after the success point, is the tracking signal carried with the right polarity, is anything
+// counted twice, does a send survive the page leaving) are the review agent's questions (`review/questions.ts`): the
+// regex and AST versions got them wrong in both directions.
 //
 // Every check here reads the item's OWN files (its allowlist, repo-root relative) after the turn, never the
 // agent's claim, and gives exactly ONE result per check id (the state machine reads one result per check):
@@ -15,10 +21,7 @@ import { join, normalize, isAbsolute } from "node:path"
 import { maskCommentsAndStrings } from "../frameworks/shared.js"
 import { buildManagedRewritePairs, hasExactNextConfigRewrites, parseVercelConfig } from "../frameworks/vercel-config.js"
 import { lineNumberAt } from "../harness/scan.js"
-import { detectAuth } from "../jobs/detectors/auth.js"
 import { detectCspOwners } from "../jobs/detectors/csp-owner.js"
-import { detectConversionSuccessPaths, detectOutcomes, failureGuardSuccess, isServerFile } from "../jobs/detectors/outcomes.js"
-import { matchingBracket } from "../setup-checks/code-view.js"
 import { boundConversionNames } from "../jobs/plan-data.js"
 import { capturesPageviewManually, META_STANDARD_EVENTS, POSTHOG_HISTORY_DEFAULTS_FROM, posthogApiHostUnset } from "../jobs/detectors/adopted-tags.js"
 import { POSTHOG_DEFAULTS_CURRENT } from "../install/improve.js"
@@ -31,15 +34,9 @@ import type { TestExpect, TestTool } from "../wizard/contracts/test-engine.js"
 import { runCensus } from "./census.js"
 import { analyzeCsp, cspNeeds, parseCspPolicies } from "./live/csp.js"
 import { checkResult, isolated } from "./result.js"
-import { callsOf, literalString, splitTopLevelArgs, topLevelProps, type Call } from "./source-calls.js"
-import { adMatchFindings, signalFindings, canonicalEvent, clickPathFindings, deadCodeFindings, doubleCountFindings, leadFindings, leaveFindings, metaEventIdFindings, outcomeHas, outcomesIn, piiFindings, promiseFindings, valueFindings, type CommerceCheckInput, type CommerceFinding, type OutcomeCall } from "./commerce-static.js"
-import type { EventInventory, InventoryTool as CommerceTool } from "./commerce-inventory.js"
-import { COMMERCE_EVENTS_TARGET } from "../scan/event-inventory.js"
-
-/** The tool a browser commerce item (`<job>:commerce_events`) adds its events to. */
-const COMMERCE_ITEM_TOOL: Readonly<Partial<Record<string, CommerceTool>>> = { meta_improve: "meta", ga4_improve: "ga4", posthog_improve: "posthog" }
-const TOOL_NAME: Readonly<Record<CommerceTool, string>> = { meta: "Meta", ga4: "GA4", posthog: "PostHog", infinite: "Infinite" }
-import { loadRepoSnapshot } from "../jobs/repo-files.js"
+import { callsOf, literalString, splitTopLevelArgs, type Call } from "./source-calls.js"
+import { canonicalEvent, metaEventIdFindings, outcomeHas, outcomesIn, piiFindings, valueFindings, type CommerceCheckInput, type CommerceFinding, type OutcomeCall } from "./commerce-static.js"
+import type { EventInventory } from "./commerce-inventory.js"
 
 export { callsOf, topLevelProps } from "./source-calls.js"
 import { GA4_PAGE_CHANGE_SCRIPT, META_PAGE_CHANGE_SCRIPT, pastedInPlace } from "../jobs/briefs.js"
@@ -50,13 +47,8 @@ export const JOB_STATIC_CHECK_IDS = [
   "server_lane_mount_order",
   "rescan_app_found",
   "next_rewrites_exact",
-  "outcome_after_success",
-  "track_after_success",
   "outcome_declared",
-  "event_id_stable",
   "no_pii_in_outcome",
-  "identify_on_auth_success",
-  "reset_on_every_signout",
   "csp_hosts",
   "pr_checks_pass",
   // LF4 close round 2 (P1-1): each job target's own proof that its change is in the code.
@@ -65,18 +57,9 @@ export const JOB_STATIC_CHECK_IDS = [
   "posthog_improve_applied",
   "spa_page_view_applied",
   "ga4_id_applied",
-  // Review r3 "static checks / prove": the plan's event × tool promises, the money and match data on outcomes, and
-  // no second send of an event a tool already gets (`commerce-static.ts`).
-  "commerce_promises_met",
-  "outcome_ad_match",
-  "tracking_signal_carried",
+  // Review r3: a purchase carries its money, and a browser Meta event carries no page-made event id (`commerce-static.ts`).
   "outcome_value_currency",
-  "no_double_count",
-  "meta_event_id_from_server",
-  // P1-A: a browser Meta send a full page load right after it can cut off is waited for.
-  "sends_before_leaving",
-  // Finding 3: no code after a return in a function the turn changed (the site's own sends keep running).
-  "sends_kept"
+  "meta_event_id_from_server"
 ] as const
 export type JobStaticCheckId = (typeof JOB_STATIC_CHECK_IDS)[number]
 
@@ -157,36 +140,11 @@ function itemTarget(item: Pick<ChecklistItem, "id">): string {
   return index < 0 ? "" : item.id.slice(index + 1)
 }
 
-/** True when `index` is inside a `catch (…) { … }` block of the masked text. */
-function insideCatch(masked: string, index: number): boolean {
-  for (const match of masked.slice(0, index).matchAll(/\bcatch\s*(?:\([^)]*\))?\s*\{/g)) {
-    let depth = 0
-    const open = (match.index ?? 0) + match[0].length - 1
-    let closed = false
-    for (let cursor = open; cursor < index; cursor += 1) {
-      if (masked[cursor] === "{") depth += 1
-      else if (masked[cursor] === "}") {
-        depth -= 1
-        if (depth === 0) {
-          closed = true
-          break
-        }
-      }
-    }
-    if (!closed) return true
-  }
-  return false
-}
-
 const files = (list: readonly string[]): string => list.slice(0, 4).join(", ") + (list.length > 4 ? ", …" : "")
 
 // ---------------------------------------------------------------------------------------------
 // The checks
 // ---------------------------------------------------------------------------------------------
-
-const HASHED = /\b(?:createHash|sha256|sha-256|hash\w*|digest)\b/i
-/** An id that changes on every call: a retry would count twice (or every outcome would dedupe into one). */
-const UNSTABLE_ID = /(?:\bDate\s*\.\s*now|\bMath\s*\.\s*random|\brandomUUID|\buuid(?:v4)?|\bv4|\bnanoid|\bcuid2?|\bperformance\s*\.\s*now|\bnew\s+Date)\s*\(/
 
 /** Every outcome report in the job's files: the generic reporters and the Stripe / lead recipe reporters alike. */
 function outcomeCalls(scope: ReadonlyMap<string, string>): OutcomeCall[] {
@@ -198,10 +156,6 @@ function noOutcomeCall(checkId: JobStaticCheckId, scope: ReadonlyMap<string, str
 }
 
 const TRACK_CALLS = ["infiniteTrack", "infiniteTrackThenNavigate"] as const
-/** A line that is a link, a button or a click handler (the conversion's intent, never its success). */
-const CTA_LINE = /<\s*(?:a|Link|button)\b|\bonClick\s*=|(?<![.\w$])href\s*=/
-const NAVIGATION_CALL = /\b(?:router\s*\.\s*(?:push|replace)|(?:window\s*\.\s*)?location\s*\.\s*(?:assign|replace)|redirect)\s*\(|\b(?:window\s*\.\s*)?location\s*\.\s*href\s*=/
-
 /** The conversion name a track call sends: `infiniteTrack("x")`'s first argument, else any plain string argument. */
 function trackedName(call: Pick<Call, "name" | "args">): string | null {
   const parts = splitTopLevelArgs(call.args)
@@ -211,37 +165,6 @@ function trackedName(call: Pick<Call, "name" | "args">): string | null {
     if (value !== null && /^[a-z][a-z0-9_]*$/.test(value)) return value
   }
   return null
-}
-
-/**
- * The success branch that starts on `line`: an `if (…)`'s consequent (a `{…}` block, or one statement up to its
- * `;` / line end / `else`); for a navigation-only success point, the code from the first `await` to the end of that
- * line. Offsets into the file's text; null when the line holds neither.
- */
-function successRegion(text: string, line: number): { start: number; end: number } | null {
-  const masked = maskCommentsAndStrings(text, true)
-  const lineStart = text.split("\n").slice(0, line - 1).reduce((sum, entry) => sum + entry.length + 1, 0)
-  const lineEnd = text.indexOf("\n", lineStart) === -1 ? text.length : text.indexOf("\n", lineStart)
-  const condition = /\bif\s*\(/.exec(masked.slice(lineStart, lineEnd))
-  if (condition) {
-    // `if (!res.ok) { …; return }`: the success is what follows the guard, never the guard's own (failure) branch.
-    const guarded = failureGuardSuccess(masked, lineStart + condition.index)
-    if (guarded) return guarded
-    const open = lineStart + condition.index + condition[0].length - 1
-    const close = matchingBracket(masked, open)
-    if (close < 0) return null
-    let cursor = close + 1
-    while (cursor < masked.length && /\s/.test(masked[cursor]!)) cursor += 1
-    if (masked[cursor] === "{") {
-      const end = matchingBracket(masked, cursor)
-      return end < 0 ? null : { start: cursor, end }
-    }
-    const rest = masked.slice(cursor)
-    const stop = rest.search(/;|\n|\belse\b/)
-    return { start: cursor, end: stop < 0 ? masked.length : cursor + stop }
-  }
-  const awaited = masked.slice(0, lineEnd).search(/\bawait\b/)
-  return awaited < 0 ? null : { start: awaited, end: lineEnd }
 }
 
 /** ONE result for a commerce rule: its first problem (with how many more), else its first unknown, else a pass. */
@@ -367,76 +290,6 @@ export function jobStaticCheckFunctions(deps: JobStaticDeps): Record<JobStaticCh
       return missing("next_rewrites_exact", ctx, `missing rewrite(s): ${pairs.map((pair) => `${pair.source} to ${pair.destination}`).join("; ")}`)
     }),
 
-    // Job 8: the outcome is reported AFTER the success point, never before it or from an error branch.
-    outcome_after_success: run("outcome_after_success", (input, ctx) => {
-      const scope = itemFiles(input)
-      const calls = outcomeCalls(scope)
-      if (calls.length === 0) return noOutcomeCall("outcome_after_success", scope, ctx)
-      const target = itemTarget(input.item)
-      // A checkout start becomes real when the payment session exists: its success point is the session creation.
-      const triggers: Array<{ file: string; line: number; detail: string }> =
-        target === "begin_checkout"
-          ? [...scope].flatMap(([file, text]) =>
-              [...maskCommentsAndStrings(text, true).matchAll(/\.\s*checkout\s*\.\s*sessions\s*\.\s*create\s*\(/g)].map((match) => ({ file, line: lineNumberAt(text, match.index ?? 0), detail: "checkout session creation" }))
-            )
-          : detectOutcomes(snapshotOf(scope, input.appRoot)).filter((finding) => finding.conversionType === target || target === "")
-      for (const { file, call } of calls) {
-        const masked = maskCommentsAndStrings(scope.get(file)!, true)
-        if (insideCatch(masked, call.index)) return result("outcome_after_success", ctx, "problem", `${file}:${call.line} reports the outcome from an error branch`, file, call.line)
-      }
-      if (triggers.length === 0) return result("outcome_after_success", ctx, "undetermined", "the success point the job was seeded from is no longer recognisable, so the order could not be checked")
-      for (const trigger of triggers) {
-        const after = calls.some(({ file, call }) => file === trigger.file && call.line > trigger.line)
-        const elsewhere = calls.some(({ file }) => file !== trigger.file)
-        if (!after && !elsewhere) {
-          return result("outcome_after_success", ctx, "problem", `${trigger.file}: the outcome is reported before the success point (line ${trigger.line}), so a failed ${trigger.detail} would still count`, trigger.file, trigger.line)
-        }
-      }
-      return result("outcome_after_success", ctx, "pass", "the outcome is reported after the success point")
-    }),
-
-    // §3x.3 (B3) Job 10, outcome conversions: `infiniteTrack(<approved name>)` (or `infiniteTrackThenNavigate(…,
-    // <approved name>)`) sits INSIDE the success branch the job was seeded from, before its navigation; never on the
-    // link or button that leads to the form (that click is intent, recorded by the runtime as such).
-    track_after_success: run("track_after_success", (input, ctx) => {
-      const target = itemTarget(input.item)
-      const approved = context().conversionNames
-      if (!approved) return result("track_after_success", ctx, "undetermined", "the approved conversion names are not known, so the call could not be compared")
-      const names = boundConversionNames(target, [...approved])
-      if (names.length === 0) return result("track_after_success", ctx, "undetermined", `no approved conversion name is bound to ${target}`)
-      const scope = itemFiles(input)
-      const calls = [...scope].flatMap(([file, text]) =>
-        callsOf(text, TRACK_CALLS)
-          .filter((call) => trackedName(call) !== null && names.includes(trackedName(call)!))
-          .map((call) => ({ ...call, file }))
-      )
-      if (calls.length === 0) return missing("track_after_success", ctx, `no infiniteTrack(${JSON.stringify(names[0])}) in ${files([...scope.keys()]) || "the job's files"}`)
-      for (const call of calls) {
-        const lineText = scope.get(call.file)!.split("\n")[call.line - 1] ?? ""
-        if (CTA_LINE.test(lineText)) {
-          return result("track_after_success", ctx, "problem", `${call.file}:${call.line} sends the ${target} from the link or button that leads to the form, not from its success`, call.file, call.line)
-        }
-      }
-      const successes = detectConversionSuccessPaths(snapshotOf(scope, input.appRoot)).filter((finding) => finding.conversionType === target)
-      if (successes.length === 0) return result("track_after_success", ctx, "undetermined", "the success point the job was seeded from is no longer recognisable, so the call's place could not be checked")
-      for (const success of successes) {
-        const text = scope.get(success.file)!
-        const region = successRegion(text, success.line)
-        if (!region) continue
-        const masked = maskCommentsAndStrings(text, true)
-        const navigation = new RegExp(NAVIGATION_CALL.source, "g")
-        navigation.lastIndex = region.start
-        const nav = navigation.exec(masked)
-        const navAt = nav && nav.index < region.end ? nav.index : null
-        const inside = calls.find(
-          (call) => call.file === success.file && call.index >= region.start && call.index < region.end && (navAt === null || call.name === "infiniteTrackThenNavigate" || call.index < navAt)
-        )
-        if (inside) return result("track_after_success", ctx, "pass", `${inside.file}:${inside.line} sends the ${target} after it succeeds`, inside.file, inside.line)
-      }
-      const first = successes[0]!
-      return result("track_after_success", ctx, "problem", `the ${target} is not sent inside its success branch (${first.file}:${first.line}), before the navigation`, first.file, first.line)
-    }),
-
     // Job 8: the outcome's `type` is one of the conversion names the user approved for this job.
     outcome_declared: run("outcome_declared", (input, ctx) => {
       const scope = itemFiles(input)
@@ -473,28 +326,6 @@ export function jobStaticCheckFunctions(deps: JobStaticDeps): Record<JobStaticCh
       return result("outcome_declared", ctx, "pass", "every outcome uses an approved conversion name and carries a path")
     }),
 
-    // Job 8: every outcome carries a stable eventId (an order / row / account id), never a random or a constant.
-    event_id_stable: run("event_id_stable", (input, ctx) => {
-      const scope = itemFiles(input)
-      const calls = outcomeCalls(scope)
-      if (calls.length === 0) return noOutcomeCall("event_id_stable", scope, ctx)
-      // P2-7: a lead with no fallbackId has no id at all until LEAD_ID_SECRET is set, so it reports nothing.
-      const lead = leadFindings({ files: scope })
-      if (lead.some((finding) => finding.state === "problem")) return commerceResult("event_id_stable", ctx, lead, "")
-      for (const outcome of calls) {
-        const { file, call } = outcome
-        // A recipe reporter keys the outcome itself (the Stripe session id, one id per person for a lead).
-        if (outcome.reporter.builtIn.has("eventId")) continue
-        const props = outcome.props
-        if (props === null) return result("event_id_stable", ctx, "undetermined", `${file}:${call.line} passes a value the wizard cannot read as an object`, file, call.line)
-        const id = props.get("eventId")
-        if (id === undefined) return result("event_id_stable", ctx, "problem", `${file}:${call.line} has no eventId, so a retry counts twice`, file, call.line)
-        if (UNSTABLE_ID.test(maskCommentsAndStrings(id, false))) return result("event_id_stable", ctx, "problem", `${file}:${call.line} builds the eventId from a random value or the time, so a retry counts twice`, file, call.line)
-        if (literalString(id) !== null) return result("event_id_stable", ctx, "problem", `${file}:${call.line} uses a constant eventId, so every outcome after the first is dropped as a duplicate`, file, call.line)
-      }
-      return result("event_id_stable", ctx, "pass", "every outcome carries a stable eventId")
-    }),
-
     // Job 8: no raw email, phone, name or address reaches an outcome's request body or the Stripe metadata (match data
     // only as digests; never a phone in any form). Review r3: what a nested call RECEIVES (`withPerson({ email })`) is
     // not what the request carries, so only what reaches the body is read (`commerce-static.ts` `piiFindings`).
@@ -505,108 +336,15 @@ export function jobStaticCheckFunctions(deps: JobStaticDeps): Record<JobStaticCh
       return commerceResult("no_pii_in_outcome", ctx, piiFindings({ files: scope }), "no personal data in any outcome or Stripe metadata")
     }),
 
-    // Review r3: every event × tool cell the plan promised has its code somewhere in the app (Meta ViewContent /
-    // AddToCart from the page, the server events through reportInfiniteOutcome, GA4 / PostHog / Infinite sends). An
-    // item whose target is one event checks that event; any other item checks them all.
-    commerce_promises_met: run("commerce_promises_met", (input, ctx) => {
-      const run = context()
-      if (!run.eventInventory) return result("commerce_promises_met", ctx, "undetermined", "the plan's event list is not known, so what it promised each tool could not be compared with the code")
-      const files = loadRepoSnapshot(input.root, input.appRoot).files
-      const target = itemTarget(input.item)
-      // A browser commerce item (`<tool>_improve:commerce_events`) answers for ITS tool and the events it carries; an
-      // item named for one event, for that event; anything else, for every promise.
-      const tool = target === COMMERCE_EVENTS_TARGET ? COMMERCE_ITEM_TOOL[input.item.jobId] : undefined
-      const events = tool ? new Set((input.item.inventory ?? []).map((entry) => canonicalEvent(entry.event)).filter((event) => event !== null)) : null
-      const findings = (promiseFindings({ files, inventory: run.eventInventory }, canonicalEvent(target)) ?? []).filter(
-        (finding) => !tool || (finding.tool === tool && (events === null || events.size === 0 || (finding.event !== undefined && events.has(finding.event))))
-      )
-      return commerceResult("commerce_promises_met", ctx, findings, tool ? `every event the plan promised ${TOOL_NAME[tool]} is sent` : "every event the plan promised is sent to its tools")
-    }),
-
-    // Review r3: an outcome Meta gets from the server carries the match data (adMatch).
-    outcome_ad_match: run("outcome_ad_match", (input, ctx) => {
-      const run = context()
-      return commerceResult("outcome_ad_match", ctx, adMatchFindings({ files: itemFiles(input), ...(run.metaInUse !== undefined ? { metaInUse: run.metaInUse } : {}) }), "every server conversion for Meta carries match data")
-    }),
-
-    // Finding 1: the page sends the tracking signal, built from the site's signal, where and as the route reads it.
-    tracking_signal_carried: run("tracking_signal_carried", (input, ctx) => {
-      const run = context()
-      return commerceResult("tracking_signal_carried", ctx, signalFindings({ files: itemFiles(input), inventory: run.eventInventory ?? null, ...(run.metaInUse !== undefined ? { metaInUse: run.metaInUse } : {}) }), "the page sends the tracking signal where the route reads it")
-    }),
-
     // Review r3: a purchase outcome carries its value and its currency.
     outcome_value_currency: run("outcome_value_currency", (input, ctx) =>
       commerceResult("outcome_value_currency", ctx, valueFindings({ files: itemFiles(input) }), "every purchase carries its value and currency")
     ),
 
-    // Review r3 (P0-5): a send the turn added to a tool that already gets that event from the site (a second GA4
-    // purchase beside the site's own) counts it twice. The site's sends come from the inventory and the code before.
-    no_double_count: run("no_double_count", (input, ctx) => {
-      const commerce = withBase(input, { files: itemFiles(input), inventory: context().eventInventory ?? null })
-      const findings = doubleCountFindings(commerce)
-      // P1-A: one click that reaches two sends of one event (inside the site's helper AND in the handler calling it).
-      const onClick = clickPathFindings(commerce)
-      if (findings === null) {
-        if (onClick.length > 0) return commerceResult("no_double_count", ctx, onClick, "")
-        return result("no_double_count", ctx, "undetermined", "the code before this run could not be read, so new sends could not be told apart from the site's own")
-      }
-      return commerceResult("no_double_count", ctx, [...onClick, ...findings], "no event is sent twice to one tool")
-    }),
-
-    // P1-A: where the scan saw a click leave with a full page load, the browser Meta send it reaches is waited for.
-    sends_before_leaving: run("sends_before_leaving", (input, ctx) => {
-      const inventory = context().eventInventory
-      if (!inventory) return result("sends_before_leaving", ctx, "undetermined", "the plan's event list is not known, so which clicks leave with a full page load is unknown")
-      // Finding 6: with the code before the run, each caller's line is followed through the edit to its own handler.
-      return commerceResult("sends_before_leaving", ctx, leaveFindings(withBase(input, { files: itemFiles(input), inventory })), "every Meta event a full page load follows is out before the page leaves")
-    }),
-
-    // Finding 3: a helper the turn changed never returns before its own sends (`return wait` is its LAST line).
-    sends_kept: run("sends_kept", (input, ctx) => {
-      const commerce = withBase(input, { files: itemFiles(input) })
-      if (!commerce.base) return result("sends_kept", ctx, "undetermined", "the code before this run could not be read, so the functions it changed are not known")
-      return commerceResult("sends_kept", ctx, deadCodeFindings(commerce), "every function this run changed still runs all of its own lines")
-    }),
-
     // Review r3: a browser Meta event carries only the event id the server got back, or none.
     meta_event_id_from_server: run("meta_event_id_from_server", (input, ctx) =>
       commerceResult("meta_event_id_from_server", ctx, metaEventIdFindings(withBase(input, { files: itemFiles(input) })), "no browser Meta event carries an event id made in the page")
     ),
-
-    // Job 9: an account id (never an email or a constant) is identified once the login is verified.
-    identify_on_auth_success: run("identify_on_auth_success", (input, ctx) => {
-      const scope = itemFiles(input)
-      const auth = detectAuth(snapshotOf(scope, input.appRoot))
-      const calls = [...scope].flatMap(([file, text]) => callsOf(text, ["infiniteIdentify"]).map((call) => ({ ...call, file })))
-      if (calls.length === 0) return missing("identify_on_auth_success", ctx, `no infiniteIdentify call in ${files([...scope.keys()])}`)
-      for (const call of calls) {
-        const arg = call.args.trim()
-        if (arg === "" || literalString(arg) !== null) return result("identify_on_auth_success", ctx, "problem", `${call.file}:${call.line} identifies with a constant, so every visitor becomes one person`, call.file, call.line)
-        if (/email|@/i.test(arg) && !HASHED.test(arg)) return result("identify_on_auth_success", ctx, "problem", `${call.file}:${call.line} identifies with an email; use the account id`, call.file, call.line)
-        const login = auth.login.find((finding) => finding.file === call.file)
-        if (login && call.line < login.line) return result("identify_on_auth_success", ctx, "problem", `${call.file}:${call.line} identifies before the login is verified (line ${login.line})`, call.file, call.line)
-        if (insideCatch(maskCommentsAndStrings(scope.get(call.file)!, true), call.index)) {
-          return result("identify_on_auth_success", ctx, "problem", `${call.file}:${call.line} identifies in an error branch`, call.file, call.line)
-        }
-      }
-      return result("identify_on_auth_success", ctx, "pass", "the account id is identified after a verified login")
-    }),
-
-    // Job 9: every sign-out resets the visitor (a client-side sign-out in its own file; a server-only one in a client file of the job).
-    reset_on_every_signout: run("reset_on_every_signout", (input, ctx) => {
-      const scope = itemFiles(input)
-      const auth = detectAuth(snapshotOf(scope, input.appRoot))
-      const resets = new Set([...scope].filter(([, text]) => callsOf(text, ["infiniteReset"]).length > 0).map(([file]) => file))
-      if (auth.logout.length === 0) return result("reset_on_every_signout", ctx, "pass", "no sign-out in the job's files to reset in")
-      const clientReset = [...resets].some((file) => !isServerFile(file, scope.get(file) ?? ""))
-      const missing = auth.logout.filter((finding) => {
-        if (resets.has(finding.file)) return false
-        return !(isServerFile(finding.file, scope.get(finding.file) ?? "") && clientReset)
-      })
-      if (missing.length > 0) return result("reset_on_every_signout", ctx, "problem", `no infiniteReset in the sign-out at ${files(missing.map((finding) => `${finding.file}:${finding.line}`))}`, missing[0]!.file, missing[0]!.line)
-      return result("reset_on_every_signout", ctx, "pass", "every sign-out resets the visitor")
-    }),
 
     // Job 12: the policy in the owner file allows exactly what the tools need, with no `*` and no new 'unsafe-inline'.
     csp_hosts: run("csp_hosts", (input, ctx) => {

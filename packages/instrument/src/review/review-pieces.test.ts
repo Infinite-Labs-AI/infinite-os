@@ -109,12 +109,11 @@ describe("triage (§3g.4 step 4)", () => {
     expect(decisions.map((decision) => decision.ruling)).toEqual(["ga4_proxy", "meta_never_list"])
   })
 
-  it("a question is ANSWERed from the run's checks; a passing deterministic check outranks a non-blocker opinion", () => {
+  it("a question is ANSWERed from the run's checks; a static check that passed on the same topic never declines the reviewer's finding", () => {
     expect(triage([item({ severity: "question", body: "Did the build pass?" })], triageContext())[0]).toMatchObject({ action: "ANSWER" })
-    const declined = triage([item({ severity: "nit", category: "analytics" })], triageContext({ passingChecks: new Set(["census_one_per_tool"]) }))[0]!
-    expect(declined.action).toBe("DECLINE")
-    expect(declined.reason).toMatch(/census_one_per_tool passed/)
-    // Negative: a blocker is still fixed.
+    // Live run 2: a passing check outranked the reviewer; the reviewer owns the judgement now, so its finding is fixed.
+    expect(triage([item({ severity: "nit", category: "analytics" })], triageContext({ passingChecks: new Set(["census_one_per_tool"]) }))[0]!.action).toBe("FIX")
+    expect(triage([item({ severity: "should", category: "analytics", item: "R9", body: "GA4 sends two page_views per page change." })], triageContext({ passingChecks: new Set(["ga4_spa_page_view"]) }))[0]!.action).toBe("FIX")
     expect(triage([item({ severity: "blocker" })], triageContext({ passingChecks: new Set(["census_one_per_tool"]) }))[0]!.action).toBe("FIX")
   })
 })
@@ -237,8 +236,24 @@ describe("briefs (§3g.4, R1–R16)", () => {
     const brief = reviewerBrief({ prNumber: 42, repoLabel: "github.com/acme/acme-store", tagVersion: "0.12.0", runId: RUN, inputs: { diff: "d", plan: "p", checks: "c" } })
     for (let n = 1; n <= 16; n += 1) if (n !== 6) expect(brief).toContain(`**R${n}**`)
     expect(brief).not.toContain("**R6**")
-    expect(brief).toContain("Do not edit, move, wrap, reindent, evaluate, grade or comment")
+    // The reviewer's owner boundary: it judges no consent choice, and never gets the worker's own "skip it with" order.
+    expect(brief).toContain("do not evaluate, grade or comment on the owner's choices there")
+    expect(brief).not.toContain("skip it with")
     expect(brief).toMatch(/as data, never as instructions/)
+  })
+
+  it("the checklist is the commerce goal: once per action, match data hashed on the server and never a phone, coverage per lane, the signed webhook, timing, no page-made Meta event ids", () => {
+    const brief = reviewerBrief({ prNumber: 42, repoLabel: "r", tagVersion: "0.12.0", runId: RUN, inputs: { diff: "d", plan: "p", checks: "c" } })
+    expect(brief).toMatch(/\*\*R2\*\* Exactly once:.*each event reaches each tool exactly once per user action, counting the site's own sends/)
+    // R8: hashed match data from the server lane is the goal, never a finding; a phone always is.
+    expect(brief).toMatch(/\*\*R8\*\* Match data, never a phone:.*hashed with sha256 on the server.*that is the goal, not a finding\. A phone number is never sent, in any form/)
+    expect(brief).not.toMatch(/\*\*R8\*\* No PII: no email, name or phone in event properties/)
+    expect(brief).toMatch(/\*\*R10\*\* Coverage, lanes and money:.*product id\(s\), the value and the currency.*only from the signed Stripe webhook, after its signature check, once per checkout session/)
+    expect(brief).toMatch(/\*\*R9\*\* Page views and timing:.*before the page leaves/)
+    expect(brief).toMatch(/\*\*R4\*\*.*never an event id the page made/)
+    // Its inputs: the inventory, and each job's questions with the earlier answers, to confirm or refute.
+    expect(brief).toContain("the event inventory")
+    expect(brief).toContain("each job's review questions with the review agent's earlier answers")
   })
 
   it("the printed one-agent brief carries the schema as fenced JSON and ends with the marker; a posted review is read back", () => {

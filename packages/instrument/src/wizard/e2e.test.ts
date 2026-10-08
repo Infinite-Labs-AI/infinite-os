@@ -161,7 +161,7 @@ function jobStates(run: WizardRun, itemId: string): string[] {
   return states.filter((state, index) => index === 0 || states[index - 1] !== state)
 }
 
-function finalJobs(w: E2eWorld): Array<{ id: string; owner: string; state: string; blockedReason?: string; note?: string; ownerBoundary?: { file?: string; wiring?: string }; checks: Array<{ id: string; tier: string; state: string }>; edits?: Array<{ file: string }> }> {
+function finalJobs(w: E2eWorld): Array<{ id: string; owner: string; state: string; blockedReason?: string; note?: string; ownerBoundary?: { file?: string; wiring?: string }; checks: Array<{ id: string; tier: string; state: string }>; edits?: Array<{ file: string }>; review?: { state: string; reviewer: string | null; runId: string } }> {
   return JSON.parse(readFileSync(join(w.site.repo, ".infinite/wizard/state.json"), "utf8")).jobs
 }
 
@@ -501,13 +501,16 @@ describe("the offline end-to-end run (§4.3)", () => {
     expect(headFile("app/providers.tsx")).toContain('api_host: "/ingest"')
 
     // ---- 6. real guard code passes the wizard's checks; failed claims stay in the negative world ----
-    expect(jobStates(run, ITEMS.guardPosthog).slice(0, 2)).toEqual(["claimed/agent_claim", "done_in_code/wizard"])
-    expect(job(ITEMS.guardPosthog).checks).toEqual(expect.arrayContaining([expect.objectContaining({ id: "adopted_init_guarded", state: "pass" })]))
+    // A preview guard is a judgement (does it silence previews and keep production): the review agent's answer proves
+    // it, right after the agent's turns (the wizard has no check of its own to run on a Next layout's guard).
+    expect(jobStates(run, ITEMS.guardPosthog).slice(0, 3)).toEqual(["claimed/agent_claim", "claimed/wizard", "done_in_code/wizard"])
+    expect(job(ITEMS.guardPosthog).review).toMatchObject({ state: "pass", reviewer: "codex", runId: RUN_ID })
+    expect(job(ITEMS.guardPosthog).checks.map((check) => check.id)).not.toContain("adopted_init_guarded")
     for (const id of [ITEMS.guardMeta, ITEMS.metaSpa]) {
       expect(job(id).state, JSON.stringify(job(id))).not.toMatch(/left_for_you|failed|blocked|claimed|pending/)
       expect(job(id).edits?.length, `${id} retained its checked edits`).toBeGreaterThan(0)
     }
-    expect(job(ITEMS.guardMeta).checks).toEqual(expect.arrayContaining([expect.objectContaining({ id: "adopted_init_guarded", tier: "S", state: "pass" })]))
+    expect(job(ITEMS.guardMeta).review).toMatchObject({ state: "pass", reviewer: "codex" })
     expect(job(ITEMS.metaSpa).checks).toEqual(expect.arrayContaining([expect.objectContaining({ id: "spa_page_view_applied", tier: "S", state: "pass" })]))
     // Review I1 P1-5: identify/reset and the server conversion pass the wizard's own S checks (no longer stuck
     // `claimed`) and wait for a real event; each claim is announced ONCE (P3-3).

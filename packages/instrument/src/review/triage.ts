@@ -115,7 +115,7 @@ const CONVERSION_NAMES = /conversion[\s_-]*name|rename[^.\n]{0,30}(conversion|ev
 export const DETERMINISTIC_CHECKS_BY_ITEM: Partial<Record<ReviewChecklistItemId, readonly string[]>> = {
   R2: ["census_one_per_tool", "census_posthog_init_once", "census_ga4_config_once", "census_meta_init_once", "one_beacon_per_tool"],
   R4: ["ga4_loader_id", "meta_pixel_once", "ids_match_connections"],
-  R5: ["host_matrix", "preview_self_silent", "adopted_init_guarded", "meta_host_matrix"],
+  R5: ["host_matrix", "preview_self_silent", "meta_host_matrix"],
   // R4-5: per tool, the rehearsal's own page-change counts (`spaChecksNamed` keeps the ones the finding is about).
   R9: ["ga4_spa_page_view", "meta_spa_page_view"],
   R11: ["posthog_via_proxy_once", "next_rewrites_exact"],
@@ -275,6 +275,7 @@ export interface TriageContext {
   /** Keys declined in an earlier round (from the review ledger). */
   declinedKeys: ReadonlySet<string>
   /** Check ids that PASSED on the current head (rehearsal, census, static, build). */
+  /** The wizard's own checks that passed on this commit (for ANSWER items; a passing check never declines a finding). */
   passingChecks: ReadonlySet<string>
   /** Answers for ANSWER items, from receipts and check states; null when nothing measured answers it. */
   answerFor(item: TriageItem): string | null
@@ -393,18 +394,8 @@ export function triage(items: readonly TriageItem[], ctx: TriageContext): Triage
         reason: `Fixing this means editing ${item.path}, which is outside the files this run may change: you decide.`
       }
     }
-    // R4-5: an R9 finding is decided only by the page-change checks of the tools it names, and only when EVERY one passed.
-    const named = item.item === "R9" ? spaChecksNamed(text) : null
-    const deterministic = named ?? (item.item ? DETERMINISTIC_CHECKS_BY_ITEM[item.item] ?? [] : [])
-    const passed = deterministic.filter((checkId) => ctx.passingChecks.has(checkId))
-    const decides = named === null ? passed.length > 0 : named.length > 0 && passed.length === named.length
-    if (decides && !protectedFinding(item) && item.category === "analytics") {
-      return {
-        item,
-        action: "DECLINE",
-        reason: `Not changed: the wizard's own check${passed.length > 1 ? "s" : ""} ${passed.join(", ")} passed on this commit, and its checks outrank a reviewer's opinion.`
-      }
-    }
+    // A static check that passed on the same topic never declines a reviewer's finding (live run 2: the reviewer is the
+    // one that owns the judgement calls, and a check that passes on the wrong code would silence it). Its evidence wins.
     return { item, action: "FIX", reason: "In scope and inside the allowlist." }
   })
 }

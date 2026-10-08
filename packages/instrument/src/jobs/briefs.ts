@@ -13,7 +13,8 @@
 // UNTRUSTED: it is stripped of control and invisible characters and JSON-quoted, so a file named
 // "a\n### Job evil" can never forge a block or an instruction (review P2-5).
 import { OWNER_BOUNDARY_INSTRUCTION } from "./owner-boundary.js"
-import { howCheckedSection } from "./how-checked.js"
+import { howCheckedSection, reviewQuestionsFor } from "./how-checked.js"
+import { readEventInventory } from "../checks/commerce-inventory.js"
 import { outcomeHelperPath, serverConversionInstructionsForItem, signalCarryWords, signalPagesFor, signalSourceOf, type SignalPage } from "../server-lane/job-brief.js"
 import { posix } from "node:path"
 
@@ -1130,7 +1131,8 @@ export function jobBlock(item: ChecklistItem, facts: BriefFacts, inBrief: readon
     ...(!selfContained && Object.keys(data).length > 0 ? [`Plan data (JSON; decided by the user, use it exactly): ${JSON.stringify(data)}`] : []),
     `Files you may edit (JSON): ${JSON.stringify(item.allow.files.map(inertText))}`,
     ...(item.allow.create.length > 0 ? [`Files you may create (JSON): ${JSON.stringify(item.allow.create.map(inertText))}`] : []),
-    howCheckedSection(item)
+    // The review agent's questions name the site's own signal reader and pages, as the jobs' review asks them.
+    howCheckedSection(item, reviewQuestionsFor(item, { inventory: readEventInventory(facts.inventory ?? null), ...(facts.plan?.conversionNames ? { conversionNames: facts.plan.conversionNames } : {}) }))
   ]
   return out.join("\n")
 }

@@ -17,7 +17,7 @@
 // The pinned models live in ONE constant (`AGENT_MODELS`, River 10-02); if the user's plan or CLI rejects
 // one, the turn is retried ONCE with the user's default model at the same effort, and the user is told.
 // Never a provider switch, never Infinite-paid inference, never a real prompt in tests (fakes only).
-import { OWNER_BOUNDARY_INSTRUCTION } from "../jobs/owner-boundary.js"
+import { REVIEWER_OWNER_BOUNDARY } from "../jobs/owner-boundary.js"
 import { createScanner } from "../review/scan.js"
 import { redactDisplayText } from "../review/display.js"
 import { randomUUID } from "node:crypto"
@@ -29,6 +29,7 @@ import {
   AGENT_LIMITS,
   CLAIMS_SCHEMA,
   codexPermissionArgs,
+  JOB_REVIEW_SCHEMA,
   REVIEW_SCHEMA,
   schemaFileText,
   type AgentDetectResult,
@@ -37,6 +38,7 @@ import {
   type AgentRunner,
   type AgentRunOutcome,
   type AgentRunResult,
+  type JobReviewResult,
   type ReviewFailure,
   type ReviewResult,
   type ReviewRunInput,
@@ -66,7 +68,7 @@ import { AGENT_LABEL, claudeToolBeat, codexItemBeat, displayPath, Narrator, Thin
 import { AgentProcessRegistry } from "./process.js"
 import { ensurePrivateDir, repoSecretPaths, resolveRealpath, resolveSensitivePaths, runScratchDir, snapshotDir, wizardCacheRoot } from "./paths.js"
 import { sanitizeUntrusted } from "./sanitize.js"
-import { parseReview, parseStructuredClaims, type StructuredClaims } from "./schema-check.js"
+import { parseJobReview, parseReview, parseStructuredClaims, type StructuredClaims } from "./schema-check.js"
 import { ClaimChannel, isPlanDecidedTopic } from "./mcp/tools.js"
 import type { McpServerHandler } from "./mcp/jsonrpc.js"
 import { startMcpBridge } from "./mcp/bridge.js"
@@ -89,8 +91,20 @@ export const WORKER_RESUME_KICKOFF =
  * `operatorRules`, the same text Codex gets with no header), so the agent reads it once.
  */
 export const SYSTEM_PROMPT_HEADER = "Infinite tag wizard: your instructions for this run."
+/** The reviewer's first system-prompt line: the owner boundary without the worker's own instruction. */
+export const REVIEWER_SYSTEM_PROMPT_HEADER = `Infinite tag wizard: your review instructions for this run.\n${REVIEWER_OWNER_BOUNDARY}`
 export const REVIEWER_KICKOFF =
   "Review the pull request checked out in this folder against your supplied checklist. Consent, privacy policies and terms are outside the review: do not evaluate or comment on them. Read only. Answer only with the JSON your output schema asks for."
+/** The jobs' review (`wizard/steps/jobs-review.ts`): the same reviewer, answering the jobs' questions. */
+export const JOBS_REVIEWER_KICKOFF =
+  "Answer every question in your instructions about the change in this folder, from the code. Do not judge the site owner's consent choices, banner or policy pages. Read only. Answer only with the JSON your output schema asks for."
+
+/** What one kind of review asks for: its strict schema, its kickoff and its parser. */
+function reviewSpec(input: Pick<ReviewRunInput, "schema">): { schema: unknown; kickoff: string; parse: (value: unknown) => ReviewResult | JobReviewResult | null } {
+  return input.schema === "jobs"
+    ? { schema: JOB_REVIEW_SCHEMA, kickoff: JOBS_REVIEWER_KICKOFF, parse: parseJobReview }
+    : { schema: REVIEW_SCHEMA, kickoff: REVIEWER_KICKOFF, parse: parseReview }
+}
 
 /** How long Codex has to reach the claim channel before the run is called toolless. */
 export const CODEX_STARTUP_TIMEOUT_MS = 45_000
@@ -436,6 +450,12 @@ export class AgentRunnerImpl implements AgentRunner {
     return result.review ?? { error: "unparseable" }
   }
 
+  /** The jobs' review: the same reviewer and the same failures, answering `JOB_REVIEW_SCHEMA` (`wizard/steps/jobs-review.ts`). */
+  async reviewJobs(input: ReviewRunInput): Promise<JobReviewResult | ReviewFailure> {
+    const result = (await this.review({ ...input, schema: "jobs" })) as unknown as JobReviewResult | ReviewFailure
+    return "error" in result ? result : parseJobReview(result) ?? { error: "unparseable" }
+  }
+
   // ---- internals ----
 
   private models() {
@@ -757,8 +777,8 @@ export class AgentRunnerImpl implements AgentRunner {
       }
       const argv = buildClaudeReviewerArgv({
         sensitive,
-        systemPrompt: `${SYSTEM_PROMPT_HEADER}\n\n${input.brief}`,
-        reviewSchema: JSON.stringify(REVIEW_SCHEMA),
+        systemPrompt: `${REVIEWER_SYSTEM_PROMPT_HEADER}\n\n${input.brief}`,
+        reviewSchema: JSON.stringify(reviewSpec(input).schema),
         maxTurns: AGENT_LIMITS.reviewer.claudeMaxTurns,
         model
       })
@@ -767,7 +787,7 @@ export class AgentRunnerImpl implements AgentRunner {
         args: argv,
         cwd: input.worktreeDir,
         env: buildAgentEnv(this.options.env, { kind: "claude_code" }),
-        stdin: REVIEWER_KICKOFF,
+        stdin: reviewSpec(input).kickoff,
         wallMs: AGENT_LIMITS.reviewer.wallMs,
         onStdoutLine: (line) => {
           keep(line)
@@ -813,7 +833,7 @@ export class AgentRunnerImpl implements AgentRunner {
         readRoots: [await resolveRealpath(input.worktreeDir)]
       })
       const schemaPath = join(scratch, "review.schema.json")
-      await writeFile(schemaPath, schemaFileText(REVIEW_SCHEMA), { mode: 0o600 })
+      await writeFile(schemaPath, schemaFileText(reviewSpec(input).schema), { mode: 0o600 })
       outputPath = join(scratch, "review.json")
       await rm(outputPath, { force: true })
       const argv = buildCodexReviewerArgv({ worktree: input.worktreeDir, permissionArgs, model, outputPath, schemaPath })
@@ -822,7 +842,7 @@ export class AgentRunnerImpl implements AgentRunner {
         args: argv,
         cwd: input.worktreeDir,
         env: buildAgentEnv(this.options.env, { kind: "codex" }),
-        stdin: `${input.brief}\n\n${REVIEWER_KICKOFF}\n`,
+        stdin: `${input.brief}\n\n${reviewSpec(input).kickoff}\n`,
         wallMs: AGENT_LIMITS.reviewer.wallMs,
         onStdoutLine: (line) => {
           keep(line)
@@ -864,7 +884,8 @@ export class AgentRunnerImpl implements AgentRunner {
       }
     }
     const final: "completed" | "out_of_usage" | "timeout" | "error" = outcome ?? (exit.timedOut ? "timeout" : exit.code === 0 ? "completed" : "error")
-    const review = final === "completed" ? parseReview(structured) : null
+    // The jobs' review parses its own schema; `review()` hands it back as is (`reviewJobs`).
+    const review = final === "completed" ? (reviewSpec(input).parse(structured) as ReviewResult | null) : null
     // A completed run that answered keeps no stale transient error (a "Reconnecting…" before a good answer).
     return { outcome: final, review, modelRejected, requestRejected, errorText: review ? null : errorText }
   }

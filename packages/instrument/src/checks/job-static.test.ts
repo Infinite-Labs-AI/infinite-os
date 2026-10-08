@@ -1,6 +1,6 @@
 // Review I1 P1-5: the job table's S checks on an agent's edit. Each check gets a passing edit and the
 // failing edit it exists to catch (and an undetermined case where the wizard cannot tell), on a real tree.
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 
@@ -9,9 +9,7 @@ import { afterEach, describe, expect, it } from "vitest"
 import type { CheckContext, CheckResult, ChecklistItem, JobId } from "../wizard/contracts/jobs.js"
 import { jobStaticCheckFunctions, type JobStaticCheckId, type JobStaticRunContext } from "./job-static.js"
 import { JOB_TABLE } from "../wizard/contracts/jobs.js"
-import { RUN3_DIR } from "../../test/wizard/run3-fixture.js"
-
-const RUN3_SITE = join(RUN3_DIR, "site-6d16d8f")
+import { reviewQuestionsFor } from "../review/questions.js"
 
 const RUN = "7f3c2a91-b0de-4c55-9a11-23456789abcd"
 const ctx: CheckContext = { runId: RUN, now: () => new Date("2026-10-02T10:00:00.000Z") }
@@ -61,29 +59,12 @@ const job8 = item("server_conversions", "signup", [SIGNUP])
 const approved = { conversionNames: ["sign_up"] }
 
 describe("job 8: server conversions", () => {
-  it("outcome_after_success: after the success branch passes; before it, or in a catch, is a problem; none at all is a problem", async () => {
-    expect((await check("outcome_after_success", { [SIGNUP]: signupRoute(GOOD) }, job8)).state).toBe("pass")
-    const before = `import { reportInfiniteOutcome } from "x"\nexport async function POST(req) {\n  await reportInfiniteOutcome({ type: "sign_up", eventId: "a" })\n  const { data } = await supabase.auth.signUp({ email: "a", password: "b" })\n}\n`
-    expect((await check("outcome_after_success", { [SIGNUP]: before }, job8)).state).toBe("problem")
-    const inCatch = signupRoute(`  try { await x() } catch (e) {\n    await reportInfiniteOutcome({ type: "sign_up", eventId: data.user.id })\n  }`)
-    expect((await check("outcome_after_success", { [SIGNUP]: inCatch }, job8)).reason).toMatch(/error branch/)
-    expect((await check("outcome_after_success", { [SIGNUP]: signupRoute("") }, job8)).state).toBe("problem")
-  })
-
   it("outcome_declared: an approved name passes; another name is a problem; a computed one is undetermined; no plan read is undetermined", async () => {
     expect((await check("outcome_declared", { [SIGNUP]: signupRoute(GOOD) }, job8, approved)).state).toBe("pass")
     expect((await check("outcome_declared", { [SIGNUP]: signupRoute(GOOD.replace('path: "/signup", ', 'properties: { path: "/signup" }, ')) }, job8, approved)).state).toBe("problem")
     expect((await check("outcome_declared", { [SIGNUP]: signupRoute(GOOD.replace('"sign_up"', '"signup_completed"')) }, job8, approved)).state).toBe("problem")
     expect((await check("outcome_declared", { [SIGNUP]: signupRoute(GOOD.replace('"sign_up"', "name")) }, job8, approved)).state).toBe("undetermined")
     expect((await check("outcome_declared", { [SIGNUP]: signupRoute(GOOD) }, job8, {})).state).toBe("undetermined")
-  })
-
-  it("event_id_stable: a row id passes; random, time-based, constant or missing ids are problems", async () => {
-    expect((await check("event_id_stable", { [SIGNUP]: signupRoute(GOOD) }, job8)).state).toBe("pass")
-    for (const id of ["crypto.randomUUID()", "`s:${Date.now()}`", '"signup"']) {
-      expect((await check("event_id_stable", { [SIGNUP]: signupRoute(`  await reportInfiniteOutcome({ type: "sign_up", eventId: ${id} })`) }, job8)).state, id).toBe("problem")
-    }
-    expect((await check("event_id_stable", { [SIGNUP]: signupRoute(`  await reportInfiniteOutcome({ type: "sign_up" })`) }, job8)).reason).toMatch(/no eventId/)
   })
 
   it("no_pii_in_outcome: a hashed em passes; a raw email anywhere, an unhashed em, or ph is a problem", async () => {
@@ -96,24 +77,6 @@ describe("job 8: server conversions", () => {
     ]) {
       expect((await check("no_pii_in_outcome", { [SIGNUP]: signupRoute(body) }, job8)).state, body).toBe("problem")
     }
-  })
-})
-
-// ---- job 9 ----
-const LOGIN = "app/login/page.tsx"
-const LOGOUT = "app/api/auth/logout/route.ts"
-const NAV = "components/nav.tsx"
-const login = (identify: string) => `"use client"\nexport function Login() {\n  async function submit() {\n    const { data, error } = await supabase.auth.signInWithPassword({ email, password })\n    if (error) return\n${identify}\n  }\n}\n`
-const job9 = item("identify_reset", "auth", [LOGIN, LOGOUT, NAV])
-
-describe("job 9: identify and reset", () => {
-  it("identify_on_auth_success: the account id after the login passes; an email, a constant, before the login, or none is a problem", async () => {
-    expect((await check("identify_on_auth_success", { [LOGIN]: login("    window.infiniteIdentify(data.user.id)") }, job9)).state).toBe("pass")
-    expect((await check("identify_on_auth_success", { [LOGIN]: login("    window.infiniteIdentify(data.user.email)") }, job9)).state).toBe("problem")
-    expect((await check("identify_on_auth_success", { [LOGIN]: login('    window.infiniteIdentify("user")') }, job9)).state).toBe("problem")
-    const early = `"use client"\nexport function Login() {\n  async function submit() {\n    window.infiniteIdentify(id)\n    await supabase.auth.signInWithPassword({ email, password })\n  }\n}\n`
-    expect((await check("identify_on_auth_success", { [LOGIN]: early }, job9)).state).toBe("problem")
-    expect((await check("identify_on_auth_success", { [LOGIN]: login("") }, job9)).state).toBe("problem")
   })
 })
 
@@ -167,58 +130,6 @@ it("does not register any privacy-policy check", () => {
   expect(JOB_TABLE.privacy_paragraph.checks).toEqual([])
 })
 
-describe("§3x.3 (B3, W4) track_after_success: job 10 sends an outcome where it succeeds, never from its link", () => {
-  const SIGNUP_PAGE = "app/signup/page.tsx"
-  const run3Page = readFileSync(join(RUN3_SITE, SIGNUP_PAGE), "utf8")
-  const job10 = (files: string[] = [SIGNUP_PAGE]) => item("conversions_to_tools", "signup", files)
-  const names: JobStaticRunContext = { conversionNames: ["signup"] }
-
-  it("negative: missing, outside the success branch, or after the navigation → problem", async () => {
-    expect((await check("track_after_success", { [SIGNUP_PAGE]: run3Page }, job10(), names)).reason).toMatch(/no infiniteTrack\("signup"\)/)
-    const onSubmit = run3Page.replace("event.preventDefault()", 'event.preventDefault()\n    infiniteTrack("signup")')
-    expect((await check("track_after_success", { [SIGNUP_PAGE]: onSubmit }, job10(), names)).reason).toMatch(/not sent inside its success branch/)
-    const after = run3Page.replace('if (response.ok) window.location.assign("/account")', 'if (response.ok) { window.location.assign("/account"); infiniteTrack("signup") }')
-    expect((await check("track_after_success", { [SIGNUP_PAGE]: after }, job10(), names)).state).toBe("problem")
-    // A name the user did not approve is not the conversion.
-    const other = run3Page.replace('if (response.ok) window.location.assign("/account")', 'if (response.ok) { infiniteTrack("lead"); window.location.assign("/account") }')
-    expect((await check("track_after_success", { [SIGNUP_PAGE]: other }, job10(), names)).state).toBe("problem")
-  })
-
-  // A mailing-list page whose handler leaves on failure: the success is the code after `if (!res.ok) { …; return }`.
-  it("after a failure guard that leaves: the send after the guard passes; one inside the guard's (failure) branch does not", async () => {
-    const file = "pages/mailing-list.tsx"
-    const lead = item("conversions_to_tools", "lead", [file])
-    const page = (guardBody: string, after: string) =>
-      [
-        'import { infiniteTrack } from "../lib/infinite-analytics";',
-        "export default function MailingListPage() {",
-        "  const onSubmit = async (e) => {",
-        "    e.preventDefault();",
-        "    try {",
-        '      const res = await fetch("/api/mailing-list", { method: "POST", body: JSON.stringify({ email }) });',
-        "      if (!res.ok) {",
-        `        ${guardBody}`,
-        "        return;",
-        "      }",
-        "      generateLead();",
-        `      ${after}`,
-        '      setStatus("done");',
-        "    } catch {",
-        '      setStatus("error");',
-        "    }",
-        "  };",
-        '  return <form data-conversion="lead" onSubmit={onSubmit}><button>Join</button></form>;',
-        "}",
-        ""
-      ].join("\n")
-    const ok = await check("track_after_success", { [file]: page('setError("Something went wrong.");', 'infiniteTrack("lead");') }, lead, { conversionNames: ["lead"] })
-    expect(ok).toMatchObject({ state: "pass" })
-    const inFailure = await check("track_after_success", { [file]: page('infiniteTrack("lead");', "") }, lead, { conversionNames: ["lead"] })
-    expect(inFailure).toMatchObject({ state: "problem" })
-    expect(inFailure.reason).toMatch(/not sent inside its success branch/)
-  })
-})
-
 // LF4 close round 2 (P1-1): every job target carries a check that PROVES its change is in the code. At 709c10b a
 // download conversion on Next and the mirror job had only checks that pass with nothing of the job in the code, so an
 // untouched job was reported "done in code" when the agent's turns ended.
@@ -251,17 +162,16 @@ describe("close round 2: the proving checks (pass only with the job's change in 
     expect(direct.reason).toContain("still fires Lead straight from the browser")
   })
 
-  it("NEGATIVE: the checks that pass on code with nothing of the job in it never prove a change; every job that has local checks has a proving one", () => {
+  it("NEGATIVE: the checks that pass on code with nothing of the job in it never prove a change; every job with local checks has a proving one, or review questions that prove it", () => {
     for (const [jobId, spec] of Object.entries(JOB_TABLE)) {
       const local = spec.checks.filter((entry) => ["S", "B", "T0"].includes(entry.tier))
       if (local.length === 0 || jobId === "review_comments") continue
-      expect(local.some((entry) => entry.provesChange), jobId).toBe(true)
+      const questions = reviewQuestionsFor({ ...item(jobId as JobId, jobId === "preview_guard" ? "ga4" : "auth", ["src/app.tsx"]) })
+      expect(local.some((entry) => entry.provesChange) || questions.length > 0, jobId).toBe(true)
     }
     const flagged = (jobId: JobId, checkId: string) => JOB_TABLE[jobId].checks.find((entry) => entry.checkId === checkId)?.provesChange === true
-    expect(flagged("conversions_to_tools", "no_fbq_standard_on_click")).toBe(false)
     expect(flagged("meta_improve", "meta_event_id_from_helper")).toBe(false)
     expect(flagged("posthog_improve", "posthog_config")).toBe(false)
-    expect(flagged("identify_reset", "reset_on_every_signout")).toBe(false)
     expect(flagged("identify_reset", "build")).toBe(false)
   })
 })

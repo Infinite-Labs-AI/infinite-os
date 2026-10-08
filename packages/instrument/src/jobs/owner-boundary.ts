@@ -14,6 +14,12 @@ const FOUND_OWNER_EDIT = "This run checked its own commits and found an edit to 
 const OLD_OWNER_BOUNDARY = "Consent and your privacy policy are yours; this run changed neither."
 export const CONSENT_LEFT_FOR_YOU = "Left for you: this file’s consent code is in the way."
 export const OWNER_BOUNDARY_INSTRUCTION = "Consent, cookie banners, CMP code, privacy policies and terms pages belong to the site owner. Do not edit, move, wrap, reindent, evaluate, grade or comment on them. If a task cannot be completed without touching them, skip it with: left for you: this file’s consent code is in the way. No exceptions for preview guards or formatting."
+/**
+ * The reviewer's form of the owner boundary: it never edits anything, so the worker's "skip it with: left for you…" is
+ * not its instruction. It may READ the site's consent reader (a question asks whether this change uses it correctly),
+ * but never judges the owner's consent choices, banner or policy pages.
+ */
+export const REVIEWER_OWNER_BOUNDARY = "Consent, cookie banners, CMP code, privacy policies and terms pages belong to the site owner: do not evaluate, grade or comment on the owner's choices there. You may read the site's own consent reader to check that this change reads it correctly."
 
 /** Only the reviewer’s structured category labels owner choices; prose and paths never establish scope. */
 export function isOwnerOnlyFinding(input: { category?: string; item?: string | null; path?: string | null; body?: string; suggestedFix?: string | null; suggested_fix?: string | null }): boolean {

@@ -182,10 +182,13 @@ describe("step jobs: claims are only claims; the wizard checks", () => {
     expect(outcome).toMatchObject({ kind: "ok" })
   })
 
-  it("an undetermined check leaves the job for the owner and removes its unverified edits", async () => {
+  it("an undetermined check on a job the review agent decides, with no review agent to ask: the edits are KEPT and the job says no review checked it", async () => {
     const t = setup({ scenario: { turns: [{ steps: [claim("conversions_to_tools:trial")] }] }, checks: { results: { click_test: ["undetermined"] } }, items: [ITEMS[1]!] })
     await step.run(t.ctx, t.deps)
-    expect(stateOf(t.current().jobs, "conversions_to_tools:trial")).toBe("left_for_you")
+    const job = t.current().jobs.find((item) => item.id === "conversions_to_tools:trial")!
+    expect(job.state).not.toBe("left_for_you")
+    expect(job.review).toMatchObject({ state: "not_run", reviewer: null })
+    expect(job.note).toMatch(/^Not checked by a review agent: /)
     expect(t.bridgeCalls.patchRun).toEqual([])
   })
 
@@ -326,6 +329,7 @@ describe("step jobs: nested mode (§3d.7)", () => {
     expect(t.recordedEdits.flat().map((edit) => edit.file)).toEqual(["app/page.tsx"])
   })
 })
+
 
 describe("step jobs: live run 2 replay (the lead and the silent form on one page)", () => {
   it("the lead's edits survive an undetermined co-worker on its page; the silent form gets one more round with the reason; no note blames the lead", async () => {

@@ -157,7 +157,8 @@ export const JOB_TABLE: { readonly [J in JobId]: JobSpec & { jobId: J } } = {
     n: 7,
     title: "Keep previews silent (existing tags)",
     requiresApprovedLine: ["preview_guard_adopted"],
-    checks: [p("S", "adopted_init_guarded"), c("T0", "host_matrix"), c("RH", "preview_self_silent"), c("T1", "meta_host_matrix")],
+    // Whether the guard really keeps the tool silent off production is a review question (`review/questions.ts`).
+    checks: [c("T0", "host_matrix"), c("RH", "preview_self_silent"), c("T1", "meta_host_matrix")],
     donePath: ["done_in_code", "proven"]
   },
   server_conversions: {
@@ -165,17 +166,14 @@ export const JOB_TABLE: { readonly [J in JobId]: JobSpec & { jobId: J } } = {
     n: 8,
     title: "Report conversions from the server",
     requiresApprovedLine: ["conversion_names"],
+    // Only mechanical rules block here. Whether the report comes after the success point, carries a stable id and the
+    // visitor's match data, and whether the page sends the tracking signal the route reads, are review questions
+    // (`review/questions.ts`): regex got them wrong in both directions.
     checks: [
       // Each fails when there is no reportInfiniteOutcome call in the job's files.
-      p("S", "outcome_after_success"),
       p("S", "outcome_declared"),
-      p("S", "event_id_stable"),
       p("S", "no_pii_in_outcome"),
-      // Review r3: Meta can match the conversion (adMatch), and a purchase carries its value and currency. Each passes
-      // when nothing applies, so they may only fail the job.
-      c("S", "outcome_ad_match"),
-      // Finding 1: the page's tracking signal reaches the route's read (same key, same place).
-      c("S", "tracking_signal_carried"),
+      // A purchase carries its value and currency. Passes when nothing applies, so it may only fail the job.
       c("S", "outcome_value_currency"),
       c("B", "build"),
       c("P", "first_real_outcome")
@@ -187,7 +185,8 @@ export const JOB_TABLE: { readonly [J in JobId]: JobSpec & { jobId: J } } = {
     n: 9,
     title: "Join visits to accounts",
     requiresApprovedLine: [],
-    checks: [p("S", "identify_on_auth_success"), c("S", "reset_on_every_signout"), c("B", "build"), c("P", "first_identify")],
+    // Identify after a verified login and reset on every sign-out are review questions (`review/questions.ts`).
+    checks: [c("B", "build"), c("P", "first_identify")],
     donePath: ["done_in_code", "waiting_real_event", "proven"]
   },
   conversions_to_tools: {
@@ -200,18 +199,15 @@ export const JOB_TABLE: { readonly [J in JobId]: JobSpec & { jobId: J } } = {
     requiresApprovedLine: ["conversion_names"],
     // T0 click_test for static HTML / Vite, RH click_test for every other framework.
     // §3z.12 §3e.1 (B15): `first_real_conversion` (P) reads baseline(runId, since = the deploy time) on a re-run.
-    // §3x.3: an outcome conversion (signup, lead, booking, purchase, trial) carries `track_after_success` instead of
-    // the click test (its success branch cannot run in a no-send load); a click conversion keeps the click test.
-    // LF4 close round 2 (P1-1): `no_fbq_standard_on_click` passes with nothing of the job in the code, so a click
-    // conversion also carries `conversion_tracked` (its infiniteTrack call is in the job's files).
+    // §3x.3: an outcome conversion (signup, lead, booking, purchase, trial) has no click test (its success branch cannot
+    // run in a no-send load); a click conversion keeps it. `conversion_tracked`: its infiniteTrack call is in the job's
+    // files. Where the call sits (inside the success branch, before the navigation) and that no tool gets the event
+    // twice are review questions (`review/questions.ts`).
     checks: [
       p("T0", "click_test"),
       c("RH", "click_test"),
-      c("S", "no_fbq_standard_on_click"),
       p("S", "conversion_tracked"),
-      p("S", "track_after_success"),
-      // Review r3: no second send of an event a tool already gets from the site, and no page-made Meta event id.
-      c("S", "no_double_count"),
+      // No page-made Meta event id (a hard rule).
       c("S", "meta_event_id_from_server"),
       c("P", "first_real_conversion")
     ],
@@ -222,7 +218,8 @@ export const JOB_TABLE: { readonly [J in JobId]: JobSpec & { jobId: J } } = {
     n: 11,
     title: "Fix the setup-check findings",
     requiresApprovedLine: [],
-    checks: [p("S", "setup_rerun_clean"), p("T0", "click_test"), c("RH", "click_test")],
+    // Whether the setup finding is fixed is a review question (`review/questions.ts`).
+    checks: [p("T0", "click_test"), c("RH", "click_test")],
     donePath: ["done_in_code", "proven"]
   },
   csp: {
@@ -268,29 +265,13 @@ export const JOB_TABLE: { readonly [J in JobId]: JobSpec & { jobId: J } } = {
 }
 
 /**
- * Review r3: checks ONE item target carries, never the job's other items. The browser commerce-event item
- * (`<tool>_improve:commerce_events`, `jobs/registry.ts` TARGET_CHECKS) is proven by `commerce_promises_met` (every event
- * the plan promised that tool is sent in the code); a proxy, history or SPA item of the same job never waits on it, and
- * an item built from a job's whole table (`JOB_TABLE[job].checks`) never carries it. Its own target's checks list names
- * it, and only there is it added.
- */
-export const TARGET_ONLY_CHECKS: { readonly [J in JobId]?: readonly JobCheckSpec[] } = {
-  // P1-A: and never twice on one click; Meta's also waits before a full page load.
-  // Finding 3: and the helper the job edits keeps running its own sends (no code after a return).
-  posthog_improve: [p("S", "commerce_promises_met"), c("S", "no_double_count"), c("S", "sends_kept")],
-  ga4_improve: [p("S", "commerce_promises_met"), c("S", "no_double_count"), c("S", "sends_kept")],
-  meta_improve: [p("S", "commerce_promises_met"), c("S", "no_double_count"), c("S", "sends_before_leaving"), c("S", "sends_kept")]
-}
-
-/**
  * LF4 close round 2 (P1-1): this job's `tier:checkId` PROVES its change is in the code when it passes
- * (`JobCheckSpec.provesChange`), in the job's table or among its target-only checks. Every other check may only fail
- * the job.
+ * (`JobCheckSpec.provesChange`). Every other check may only fail the job. A job whose change no mechanical check can
+ * see is proven by the review agent's answers instead (`ChecklistItem.review`, `jobs/state-machine.ts`).
  */
 export function checkProvesChange(jobId: string, tier: CheckTier, checkId: CheckId): boolean {
   const spec = (JOB_TABLE as Record<string, JobSpec | undefined>)[jobId]
-  const targetOnly = (TARGET_ONLY_CHECKS as Record<string, readonly JobCheckSpec[] | undefined>)[jobId] ?? []
-  return [...(spec?.checks ?? []), ...targetOnly].some((check) => check.tier === tier && check.checkId === checkId && check.provesChange === true)
+  return (spec?.checks ?? []).some((check) => check.tier === tier && check.checkId === checkId && check.provesChange === true)
 }
 
 /** The plan-decided topics `ask_user` refuses (`{parked:false, reason:"decided by the plan"}`). */
@@ -384,6 +365,44 @@ export interface EditRef {
   file: string
 }
 
+/**
+ * One question the review agent answers about a job (`review/questions.ts`): a judgement of meaning a static check got
+ * wrong in both directions (is the tracking signal carried with the right polarity, is each event sent once, is the
+ * report after the success point). Its answer never reverts an edit.
+ */
+export interface ItemReviewQuestion {
+  /** Stable within the item (`signal`, `once`, `after_success`, …). */
+  id: string
+  /** The question as the reviewer reads it, with the facts it needs (files, lines, the site's signal reader). */
+  text: string
+  answer: "pass" | "fail" | "cant_tell" | "not_asked"
+  /** The reviewer's words (sanitized, short). */
+  note?: string
+  evidence?: Evidence[]
+}
+
+/**
+ * The review agent's verdict on a job, from the review the jobs step runs right after the agent's turns and before the
+ * edits settle (`wizard/steps/jobs-review.ts`). Every state KEEPS the job's edits:
+ *   pass      — every question passed: the job is proven by the review ("checked by the review agent");
+ *   fail      — a question still failed after one fix round: the job "needs your look", with the reviewer's finding;
+ *   cant_tell — the reviewer could not tell (with why);
+ *   not_run   — no review could run (no reviewer, refused, timed out): the pull request stays a draft.
+ */
+export interface ItemReview {
+  state: "pass" | "fail" | "cant_tell" | "not_run"
+  /** The run whose review produced it (a review from another run never proves). */
+  runId: string
+  at: string
+  /** Who answered; null when no review ran. */
+  reviewer: "claude_code" | "codex" | null
+  /** Plain words: why no review ran, or what the reviewer found / could not tell. */
+  reason?: string
+  questions: ItemReviewQuestion[]
+  /** The failing answers already went back to the agent once (the one fix round). */
+  fixRound?: boolean
+}
+
 export interface ChecklistItemCheck {
   id: CheckId
   tier: CheckTier
@@ -423,6 +442,8 @@ export interface ChecklistItem {
    * `JobScan.detections.eventInventory`), never from an agent. Briefs name the files, lines and missing tools from it.
    */
   inventory?: EventInventoryEntry[]
+  /** The review agent's answers on this job (set by the jobs step's review, never from the coding agent). */
+  review?: ItemReview
   /**
    * An unverified job whose lines stay in the tree because a verified job owns the same block (`shared_lines`) or builds
    * on them (`needed_by`): the verified jobs' ids and the files. Set only by the jobs step's settlement; the review agent
@@ -802,7 +823,7 @@ const EVENT_SITE_SHAPE = shapeOf<EventSite>()("EventSite", ["file", "line", "via
 export const CHECKLIST_ITEM_SHAPE = shapeOf<ChecklistItem>()(
   "ChecklistItem",
   ["id", "jobId", "n", "title", "owner", "trigger", "allow", "checks", "state"],
-  ["claim", "blockedReason", "edits", "note", "ownerBoundary", "consentActivation", "inventory", "keptForReview"],
+  ["claim", "blockedReason", "edits", "note", "ownerBoundary", "consentActivation", "inventory", "review", "keptForReview"],
   {
     trigger: shapeOf<ChecklistItem["trigger"]>()("ChecklistItem.trigger", ["finding", "evidence"], [], { evidence: arrayOf(EVIDENCE_SHAPE) }),
     allow: shapeOf<ChecklistItem["allow"]>()("ChecklistItem.allow", ["files", "create"], []),
@@ -814,7 +835,10 @@ export const CHECKLIST_ITEM_SHAPE = shapeOf<ChecklistItem>()(
         sites: arrayOf(EVENT_SITE_SHAPE),
         tools: recordOf(arrayOf(EVENT_SITE_SHAPE))
       })
-    )
+    ),
+    review: shapeOf<ItemReview>()("ItemReview", ["state", "runId", "at", "reviewer", "questions"], ["reason", "fixRound"], {
+      questions: arrayOf(shapeOf<ItemReviewQuestion>()("ItemReviewQuestion", ["id", "text", "answer"], ["note", "evidence"], { evidence: arrayOf(EVIDENCE_SHAPE) }))
+    })
   }
 )
 

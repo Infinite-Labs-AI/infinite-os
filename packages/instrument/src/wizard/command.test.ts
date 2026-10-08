@@ -265,13 +265,16 @@ describe("nested-agent mode (§3d.7)", { timeout: 30_000 }, () => {
     expect(seenByChecks.length).toBeGreaterThan(0)
     expect(seenByChecks.every((text) => !text.includes("execSync"))).toBe(true)
     expect(readFileSync(join(root, "app/layout.tsx"), "utf8")).not.toContain("execSync")
-    expect(git(root, "diff", "--name-only").trim()).toBe("")
+    // The signup job has no check of its own and no review agent ran: its edit is KEPT (a review that could not run
+    // never reverts anything; the pull request stays a draft). Only the refused layout edit is gone.
+    expect(git(root, "diff", "--name-only").trim()).toBe("app/api/signup/route.ts")
     const jobStates = Object.fromEntries(second.events().filter((event) => event.t === "job.state").map((event) => [event.itemId, event.state]))
     // A refused hunk fails the job's turn gate; with no further nested round, the job is left for its owner.
     expect(second.events().filter(event => event.t === "job.state" && event.itemId === LAYOUT_ITEM.id).map(event => event.state)).toContain("failed")
     expect(jobStates[LAYOUT_ITEM.id]).toBe("left_for_you")
     const final = JSON.parse(readFileSync(join(root, ".infinite/wizard/state.json"), "utf8"))
-    expect(final.jobs.map((item: ChecklistItem) => item.state)).toEqual(["left_for_you", "left_for_you"])
+    expect(final.jobs.map((item: ChecklistItem) => item.state)).toEqual(["waiting_real_event", "left_for_you"])
+    expect(final.jobs[0].review).toMatchObject({ state: "not_run", reviewer: null })
   })
 
   it("an answers file carrying consentMode / conversion names is ignored in nested mode and, with no /dev/tty, the run parks NEEDS_ANSWERS", async () => {

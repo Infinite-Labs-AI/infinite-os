@@ -101,12 +101,11 @@ describe("seedCandidates", () => {
     const identify = items.find((item) => item.id === "identify_reset:auth")!
     // The signOut in a test file is ignored; the CMP file is never allowed.
     expect(identify.allow.files).toEqual(["app/login/actions.ts", "components/user-menu.tsx"])
-    // §3x.3: an outcome conversion is checked where it succeeds (static) and by its first real event, never by a
-    // click test (its success branch cannot run in a no-send load); it targets the success line, not the links.
+    // §3x.3: an outcome conversion's call is in its files (`conversion_tracked`), it carries no page-made Meta event id,
+    // and its first real event proves it; never a click test (its success branch cannot run in a no-send load). Where
+    // the call sits and that nothing is sent twice are the review agent's questions; it targets the success line.
     const signup = items.find((item) => item.id === "conversions_to_tools:signup")!
-    // Review r3: a browser conversion also may never add a second send of what a tool already gets, nor a page-made
-    // Meta event id (both only fail the job, never tick it).
-    expect(signup.checks.map((c) => `${c.tier}:${c.id}`)).toEqual(["S:no_fbq_standard_on_click", "S:track_after_success", "S:no_double_count", "S:meta_event_id_from_server", "P:first_real_conversion"])
+    expect(signup.checks.map((c) => `${c.tier}:${c.id}`)).toEqual(["S:conversion_tracked", "S:meta_event_id_from_server", "P:first_real_conversion"])
     expect(signup.trigger.evidence).toEqual([{ file: "app/signup/page.tsx", line: 5 }])
     expect(signup.allow.files).toEqual(["app/signup/page.tsx"])
     // P0-5: the title names the tools that miss the conversion, never "every tool".
