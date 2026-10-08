@@ -252,8 +252,10 @@ export function completeWorkerSteps(correctServerOutcome = false, options: Compl
     replaceStep("app/layout.tsx", GTAG_LOADER, ""),
     replaceStep("app/layout.tsx", ga4, escapeForTemplateLiteral(ga4Guard)), claim(ITEMS.guardGa4, "done", "Guarded both the remaining GA4 loader and config."),
     replaceStep("app/layout.tsx", "!function(f,b,e,v,n,t,s)", `${metaOpen}!function(f,b,e,v,n,t,s)`),
-    replaceStep("app/layout.tsx", "fbq('track', 'PageView');", `fbq('track', 'PageView');\n${escapeForTemplateLiteral(META_PAGE_CHANGE_SCRIPT)}\n})();`), claim(ITEMS.guardMeta, "done", "Wrapped the pixel bootstrap only; managed click-id capture stays outside."),
-    claim(ITEMS.metaSpa, "done", "Installed the supplied page-change subscription after the initial page view."),
+    // One job at a time, as the brief asks (edits are credited by claim): the guard's wrap, claimed; then the page-change
+    // subscription inside it, claimed.
+    replaceStep("app/layout.tsx", "fbq('track', 'PageView');", "fbq('track', 'PageView');\n})();"), claim(ITEMS.guardMeta, "done", "Wrapped the pixel bootstrap only; managed click-id capture stays outside."),
+    replaceStep("app/layout.tsx", "fbq('track', 'PageView');\n})();", `fbq('track', 'PageView');\n${escapeForTemplateLiteral(META_PAGE_CHANGE_SCRIPT)}\n})();`), claim(ITEMS.metaSpa, "done", "Installed the supplied page-change subscription after the initial page view."),
     ...(options.posthog === false ? [] : [
       replaceStep("app/providers.tsx", 'api_host: "https://us.i.posthog.com"', 'api_host: "/ingest", ui_host: "https://us.posthog.com"'),
       replaceStep("next.config.mjs", "    return [\n", `    return [\n${rewrites}\n`), claim(ITEMS.posthogProxy, "done", "Added /ingest and all three exact proxy rewrites, preserving the Infinite rewrite."),
