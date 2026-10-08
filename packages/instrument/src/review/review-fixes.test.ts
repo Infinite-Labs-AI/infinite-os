@@ -270,7 +270,7 @@ describe("P1-4 and P3-1: every part of a review post is scanned and has no ticka
   })
 
   it("final round (P3): an ASK the owner chose to leave replies with Infinite's rule, never 'Waiting on the repo owner'; the ledger records it as left", () => {
-    const rule = "Infinite counts a conversion from your server (the server lane's reportInfiniteOutcome), never from the page; the page helpers send it to GA4 and PostHog only, by design."
+    const rule = "Infinite counts server-twin conversions from your server (the server lane's reportInfiniteOutcome); the page helpers send browser events to GA4, PostHog, Infinite's browser ledger and safe browser-only Meta events without building Meta event ids."
     const asked = { item: item({ body: "The signup never reaches Infinite." }), action: "ASK" as const, askReason: "infinite_design" as const, reason: `${rule} If the finding is also about something your page does, you decide.`, rule }
     // Still waiting (not answered yet): the reply says so.
     expect(buildReply(scanner, asked, null)).toMatch(/^Waiting on the repo owner: /)

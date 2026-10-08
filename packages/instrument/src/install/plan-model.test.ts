@@ -500,3 +500,17 @@ it("does not call a browser conversion unwired when only its server job is unava
   expect(plan.withheld).not.toContain("conversions_to_tools:lead")
   expect(plan.lines.find(line => line.id === "user_action:conversions_unwired")?.text).toContain("Other conversion jobs shown in this plan can still run")
 })
+
+it("puts an event-delivery summary near the top, including Meta gaps instead of burying them", () => {
+  const plan = buildPlanModel(input({
+    keys: fakeKeys({ meta: { status: "not_connected", pixels: [] } }),
+    candidates: [candidate("server_conversions", "purchase"), candidate("conversions_to_tools", "purchase")]
+  }))
+  const ids = plan.lines.map(line => line.id)
+  expect(ids.slice(0, 6)).toEqual(expect.arrayContaining(["conversion_names", "event_delivery:ga4", "event_delivery:posthog", "event_delivery:meta", "event_delivery:infinite"]))
+  expect(plan.lines.find(line => line.id === "event_delivery:ga4")?.text).toContain("purchase")
+  expect(plan.lines.find(line => line.id === "event_delivery:posthog")?.text).toContain("purchase")
+  expect(plan.lines.find(line => line.id === "event_delivery:infinite")?.text).toContain("server lane")
+  expect(plan.lines.find(line => line.id === "event_delivery:meta")?.text).toContain("not connected")
+  expect(plan.lines.find(line => line.id === "event_delivery:meta")?.text).toContain("purchase")
+})

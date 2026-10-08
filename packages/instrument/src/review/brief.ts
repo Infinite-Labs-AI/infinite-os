@@ -19,7 +19,7 @@ export const REVIEW_ITEM_TEXT: { readonly [K in ReviewChecklistItemId]: string }
   R7: "No secrets: only env var NAMES appear, never values. No server keys in client code. No .env* file committed.",
   R8: "No PII: no email, name or phone in event properties, identify calls or URLs. Identify uses the account id only.",
   R9: "SPA page views: exactly one page view per client-side navigation per tool, with no double counting.",
-  R10: "Server lane: the route is mounted, its signature/secret check is present, conversion names match the approved list, and no browser-only click is counted as a server conversion. Infinite counts conversions only from the server lane; the page helpers (infiniteTrack…) send to GA4 and PostHog only, by design.",
+  R10: "Server lane: the route is mounted, its signature/secret check is present, conversion names match the approved list, and no browser-only click is counted as a server conversion. Server-twin conversions go server first; the page helpers (infiniteTrack…) send browser events to GA4, PostHog, Infinite and safe browser-only Meta events without building Meta event ids.",
   R11: "Ad-blocker path: the PostHog /ingest rewrite is correct. There is NO GA4 proxy.",
   R12: "CSP: if a CSP exists, only the needed hosts were added. Never * and never a new unsafe-inline.",
   R13: "Build safety: generated or build output is untouched, and no runtime dependency was added beyond the approved one.",

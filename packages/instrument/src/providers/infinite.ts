@@ -117,7 +117,7 @@ export const infiniteProviderAdapter: ProviderAdapter = {
           : []),
         ...(infinite && context?.artifacts.conversions?.helpers === true
           ? [
-              "Conversions reach GA4 and PostHog only when your own code calls the managed helpers (infiniteTrack and friends); the Infinite runtime itself forwards nothing."
+              "Conversions reach GA4, PostHog, Infinite's browser ledger and safe browser-only Meta events when your own code calls the managed helpers (infiniteTrack and friends); server-twin Meta conversions still go server first and mirror only with Infinite's returned id."
             ]
           : [])
       ],

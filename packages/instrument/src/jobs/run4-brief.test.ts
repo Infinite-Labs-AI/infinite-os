@@ -110,7 +110,7 @@ describe("R4-6: run 4's brief hands each job its exact change", () => {
     expect(cookTemplateLiteral(body)).toBe(buildMetaClickIdCaptureScript({ gate: { kind: "infinite-consent", mode: "not_required" } }))
     expect(brief).toContain("What: Add Infinite's `_fbc` capture beside the existing pixel, exactly as Plan data gives it.")
     // NEGATIVE: run 4's capture job read the whole job's gist (mirror + boot), which is not this job.
-    expect(brief).not.toContain("send browser conversions only through `infiniteMetaMirror(metaEventId)`")
+    expect(brief).not.toContain("send server-twin browser conversions only through `infiniteMetaMirror(metaEventName, metaEventId)`")
   })
 
   it("the autoConfig job gets the one line, with the pixel id read from the site's own init", () => {
@@ -124,7 +124,7 @@ describe("R4-6: run 4's brief hands each job its exact change", () => {
     const brief = buildBrief([item("meta_improve:capture", ["app/layout.tsx"])], facts(root))
     expect(brief).toContain(`Infinite's own files (never open or edit them; everything you need from them is in this brief): ["lib/infinite-analytics.ts","lib/infinite-analytics-client.tsx"].`)
     expect(brief).toContain(HELPER_API)
-    expect(HELPER_API).toContain("never Infinite's ledger")
+    expect(HELPER_API).toContain("It never builds a Meta eventID")
   })
 
   it("negative: a capture job with no consent answer refuses to brief (never a guessed consent hook)", () => {

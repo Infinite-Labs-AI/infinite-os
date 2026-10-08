@@ -323,7 +323,7 @@ export function renderApplied(input: {
 }
 
 const HELPERS_LINE =
-  "Your own code sends conversions to GA4 and PostHog through the managed helpers (infiniteTrack, infiniteTrackThenNavigate, infiniteIdentify); they follow the visitor's consent at every call."
+  "Your own code sends browser conversions to GA4, PostHog, Infinite and safe browser-only Meta events through the managed helpers (infiniteTrack, infiniteTrackThenNavigate, infiniteIdentify); they follow the visitor's consent at every call."
 
 function consentGuidance(artifacts: WorkspaceInstallArtifacts): string[] {
   if (artifacts.infinite?.consentMode === "required") {

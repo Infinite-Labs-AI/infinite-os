@@ -331,7 +331,7 @@ describe("consent-separated entry: the budget ends with kept edits in the tree",
 // check failed on code that IS in the tree was called "not in the code".
 describe("consent-separated entry: a job is done in code only when the committed tree holds its change", () => {
   it("(a) an untouched click conversion on Next (download) is never done: its only local check passes on absence; its own proof finds the call missing", async () => {
-    const download = untouched(SIGNUP, "conversions_to_tools:download", "Send the download conversion to GA4 and PostHog", itemChecksFor("conversions_to_tools", "download", "next-app-router"))
+    const download = untouched(SIGNUP, "conversions_to_tools:download", "Send the download conversion to every tool", itemChecksFor("conversions_to_tools", "download", "next-app-router"))
     expect(download.checks.map((check) => `${check.tier}:${check.id}`)).toContain("S:conversion_tracked")
     const w = world({ round1Claims: [JOB6, GA4_GUARD, META_GUARD, SIGNUP, CAPTURE], fbcCapture: ["pass"], extraItems: [download], real: ["no_fbq_standard_on_click", "conversion_tracked"] })
     const outcome = await step.run(w.ctx, w.deps)

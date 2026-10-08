@@ -186,9 +186,9 @@ export const JOB_TABLE: { readonly [J in JobId]: JobSpec & { jobId: J } } = {
   conversions_to_tools: {
     jobId: "conversions_to_tools",
     n: 10,
-    // R4-5 (live run 4): the helpers send to GA4 and PostHog only; Infinite counts conversions from the server lane. "to
-    // every tool" promised more, and the reviewer flagged the missing Infinite event as a bug.
-    title: "Send conversions to GA4 and PostHog",
+    // Browser-only Meta events carry no page-built eventID; server-twin Meta conversions still go server first and mirror
+    // only with Infinite's returned id.
+    title: "Send conversions to every tool",
     requiresApprovedLine: ["conversion_names"],
     // T0 click_test for static HTML / Vite, RH click_test for every other framework.
     // §3z.12 §3e.1 (B15): `first_real_conversion` (P) reads baseline(runId, since = the deploy time) on a re-run.

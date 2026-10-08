@@ -240,7 +240,7 @@ describe("plan blockers", () => {
 })
 
 describe("the plan says how conversions reach the providers", () => {
-  const line = /Conversions reach GA4 and PostHog only when your own code calls the managed helpers/
+  const line = /Conversions reach GA4, PostHog, Infinite's browser ledger and safe browser-only Meta events when your own code calls the managed helpers/
   it("with the helpers: the runtime forwards nothing, the site's code calls the helpers", () => {
     expect(planFixture("static-html-basic", ARTIFACTS).assumptions.join("\n")).toMatch(line)
   })

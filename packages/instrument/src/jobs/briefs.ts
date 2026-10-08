@@ -137,7 +137,7 @@ export const JOB_GISTS: { readonly [J in JobId]: string } = {
   ga4_improve:
     "Make the configured measurement id equal the connection's (only where the plan line says so) and add the single-page-app `page_view` wiring the line names. Never remove a config or a gtag here (that is the duplicates job).",
   meta_improve:
-    "Boot the pixel on landing pages; send browser conversions only through `infiniteMetaMirror(metaEventId)` with the id the server returned. Never reduce the number of pixel inits here (that is the duplicates job).",
+    "Boot the pixel on landing pages; send server-twin browser conversions only through `infiniteMetaMirror(metaEventName, metaEventId)` with the id the server returned. Browser-only AddToCart/ViewContent/custom CTA events go through `infiniteTrack`, never raw fbq. Never reduce the number of pixel inits here (that is the duplicates job).",
   duplicates_remove: "Delete only the redundant tag owner named below, and nothing else.",
   preview_guard:
     "Guard the existing init with the emitted host expression (`buildHostGuardExpression`). It compiles as written in strict TypeScript: paste it byte-for-byte with no type annotations. In a plain Meta module, insert the early-return recipe before the bootstrap; leave every existing statement on its original line and indentation. Never place a guard between an init and a later revoke, deny or opt-out. If consent code is in the way, skip the task and leave it for the site owner. Never guard the `_fbc` capture.",
@@ -145,7 +145,7 @@ export const JOB_GISTS: { readonly [J in JobId]: string } = {
     "After the success branch, `await reportInfiniteOutcome({ type: <an approved conversion name from Plan data>, path, eventId: <a stable id such as the order or row id>, adMatch? })`. Payment webhooks use the checkout-capture recipe. Pass `metaEventId` to the browser only for requests the browser awaits.",
   identify_reset: "Call `infiniteIdentify(accountId)` after a VERIFIED login (an account id, never an email). Call `infiniteReset()` in every logout.",
   conversions_to_tools:
-    "At each conversion point call `infiniteTrack(<an approved conversion name from Plan data>)` (or `infiniteTrackThenNavigate(…)` before a navigation). Never call `fbq` for a standard conversion on a click.",
+    "At each conversion point call `infiniteTrack(<an approved conversion name from Plan data>)` (or `infiniteTrackThenNavigate(…)` before a navigation). It fans out to GA4, PostHog, Infinite and browser-only Meta without a page-built eventID. Server-twin Meta conversions go server first and mirror only with the returned `metaEventId`; never call `fbq` yourself.",
   setup_check_fixes: "Fix exactly what the setup check found: move `data-conversion`, wire the silent form's success path, add the missing capture.",
   csp: "Add exactly the needed hosts to each directive of the policy. Never `*`, never a new `unsafe-inline`.",
   redirect_utms: "Keep the query string through every redirect hop; move counted paths out of host-level redirects into the middleware.",
@@ -163,7 +163,7 @@ export const TARGET_GISTS: Readonly<Record<string, string>> = {
   "ga4_improve:id": "Here: make the configured measurement id the connection's id, only where the plan line says so.",
   "ga4_improve:spa_page_view":
     "Here: paste `pageViewOnPageChange.pasteAsWritten` from Plan data exactly, as the next statement after `pageViewOnPageChange.insertAfter`, inside the same script and block (so any preview guard around it covers it too). It sends one page_view per page change and never on the first load. Change nothing else.",
-  "meta_improve:mirror": "Here: move the browser standard conversions named below onto `infiniteMetaMirror(metaEventId)`.",
+  "meta_improve:mirror": "Here: move the server-twin browser standard conversions named below onto `infiniteMetaMirror(metaEventName, metaEventId)`.",
   "meta_improve:spa_page_view": "Here: paste `pageViewOnPageChange.pasteAsWritten` from Plan data exactly as the next statement after the existing fbq('track', 'PageView'), inside the same script and block. It sends nothing on the first load. Change nothing else.",
   "meta_improve:capture":
     "Here: paste `capture.pasteAsWritten` from Plan data exactly at `capture.insertBefore`. In a plain module it is a top-level statement after imports, outside the pixel function and every preview or consent early return; its own consent gate waits for a grant when required and writes nothing on a recorded no, DNT or GPC. In JSX or HTML it is its own element before the pixel. Never write your own capture, host-guard it or change the pixel.",
@@ -238,11 +238,11 @@ export const NEVER_LIST: readonly string[] = [
 
 /**
  * R4-6: what the conversion helpers do, so no agent opens the managed module to find out. Facts of the helpers' own code
- * (`conversions/*.ts`): GA4 + PostHog only, never Meta, never Infinite's ledger (Infinite counts a conversion from the
- * server lane's `reportInfiniteOutcome`, never from the page).
+ * (`conversions/*.ts`): browser helpers fan out to GA4, PostHog, Infinite's browser ledger and safe browser-only Meta
+ * events; server-twin Meta conversions still go through `reportInfiniteOutcome` plus `infiniteMetaMirror`.
  */
 export const HELPER_API =
-  "Helper API: `infiniteTrack(name, props?)` sends one named event to GA4 and PostHog (never Meta, never Infinite's ledger: Infinite counts conversions from your server). `infiniteTrackThenNavigate(event, href, name, props?)` does the same, waits for GA4 at most 1 s, then navigates to href (call it in place of your own navigation). `infiniteIdentify(accountId)` / `infiniteReset()` for PostHog. `infiniteMetaMirror(metaEventName, metaEventId)` fires the browser twin of a server Meta event, only with the id the server returned."
+  "Helper API: `infiniteTrack(name, props?, options?)` sends one named browser event to GA4, PostHog, Infinite and safe browser-only Meta events. It never builds a Meta eventID. `options.destinations.<tool> = false` skips a tool the site already sends to; `options.destinations.meta = true` enables a custom Meta CTA (`trackCustom`) with no eventID. `infiniteTrackThenNavigate(event, href, name, props?)` does the same and waits at most 1 s for GA4 plus about 400 ms for browser-only Meta before navigating. `infiniteIdentify(accountId)` / `infiniteReset()` are PostHog only. `infiniteMetaMirror(metaEventName, metaEventId)` fires the browser twin of a server Meta event, only with the id the server returned."
 
 /** The operator rules: appended to the worker's system prompt for every jobs turn. */
 export function operatorRules(facts: BriefFacts): string {

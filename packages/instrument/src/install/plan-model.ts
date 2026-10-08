@@ -616,6 +616,48 @@ export function buildPlanModel(input: PlanModelInput): WizardPlanModel {
       })
     )
   }
+  if (conversionNames.length > 0) {
+    const named = conversionNames.join(" · ")
+    const adoptedProviders = new Set(scan.adopted.map(entry => entry.provider))
+    const toolConnected = (tool: "ga4" | "posthog" | "meta"): boolean =>
+      tool === "meta"
+        ? (keys.meta.status === "connected" && keys.meta.pixels.length > 0) || adoptedProviders.has("meta")
+        : (keys[tool].status === "connected" || adoptedProviders.has(tool))
+    lines.push(
+      line({
+        id: "event_delivery:ga4",
+        kind: "user_action",
+        requires: "info",
+        text: toolConnected("ga4")
+          ? `GA4: ${named} will be sent by the managed helper where the site is not already sending it.`
+          : `GA4: not connected — this run cannot send ${named} to GA4; connect GA4 in Infinite and rerun.`
+      }),
+      line({
+        id: "event_delivery:posthog",
+        kind: "user_action",
+        requires: "info",
+        text: toolConnected("posthog")
+          ? `PostHog: ${named} will be sent by the managed helper where the site is not already sending it.`
+          : `PostHog: not connected — this run cannot send ${named} to PostHog; connect PostHog in Infinite and rerun.`
+      }),
+      line({
+        id: "event_delivery:meta",
+        kind: "user_action",
+        requires: "info",
+        text: toolConnected("meta")
+          ? `Meta: browser-only events use the pixel with no eventID; server-twin conversions (${named}) go server first through the server lane and mirror only with Infinite's returned metaEventId.`
+          : `Meta: not connected — this run cannot send ${named} to Meta; connect Meta in Infinite and rerun.`
+      }),
+      line({
+        id: "event_delivery:infinite",
+        kind: "user_action",
+        requires: "info",
+        text: infiniteRecordable
+          ? `Infinite: browser intent is recorded by the pixel; server outcomes (${named}) use the server lane when available, otherwise the plan leaves an owner handoff.`
+          : `Infinite: not ready — this run cannot record ${named} in Infinite until the site source is connected.`
+      })
+    )
+  }
   for (const item of candidates) {
     if (item.jobId !== "conversions_to_tools" || item.state !== "blocked" || item.blockedReason !== "needs_you" || item.allow.files.length > 0 || item.allow.create.length > 0) continue
     item.note = `${item.title}: not wired. No successful completion handler was found in the browser code; add or identify that success handler before this conversion can be sent. A link or button click alone is not a completed outcome.`

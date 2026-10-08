@@ -89,8 +89,8 @@ describe("R4-5: live run 4's findings never reach an agent that cannot fix them"
 
   it("F4 ('the signup never reaches Infinite's collector', on the helper's call) is ASKED with the real reason, naming the missing server lane; never declined on its words", () => {
     const [decision] = triage([finding(F4)], ctx())
-    expect(decision).toEqual({ item: expect.anything(), action: "ASK", askReason: "infinite_design", reason: infiniteDesignAsk(false), rule: expect.stringContaining("Infinite counts a conversion from your server") })
-    expect(decision!.reason).toContain("never from the page")
+    expect(decision).toEqual({ item: expect.anything(), action: "ASK", askReason: "infinite_design", reason: infiniteDesignAsk(false), rule: expect.stringContaining("Infinite counts server-twin conversions from your server") })
+    expect(decision!.reason).toContain("page helpers send browser events to GA4, PostHog, Infinite's browser ledger")
     expect(decision!.reason).toContain("connect your Vercel project in Infinite")
     expect(decision!.reason).not.toMatch(/^Not changed/)
   })
@@ -128,7 +128,7 @@ describe("R4-5: live run 4's findings never reach an agent that cannot fix them"
       item: "R16",
       path: "app/api/signup/route.ts",
       line: 8,
-      body: "The signup route returns 200 but never reports the signup to Infinite's ledger: it does not call reportInfiniteOutcome, and the client helper only reaches GA4 and PostHog.",
+      body: "The signup route returns 200 but never reports the signup with the server lane: it does not call reportInfiniteOutcome, and the browser helper cannot replace the server-twin outcome.",
       suggestedFix: "Call reportInfiniteOutcome after the account is created."
     })
     const decided = triage([server], ctx({ allowlist: ["app/layout.tsx", "app/signup/page.tsx", "app/api/signup/route.ts"] }))[0]!

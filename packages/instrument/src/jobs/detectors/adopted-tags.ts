@@ -8,8 +8,8 @@
 //   snapshot is not reported.
 // - Job 3 (`posthog_improve`): the adopted PostHog's `api_host` (direct to PostHog = ad blockers drop
 //   it), `capture_pageview` on an SPA, `ui_host`.
-// - Job 5 (`meta_improve`): browser STANDARD conversions fired with `fbq('track', …)` (they belong on
-//   the server-instructed mirror, never on a click).
+// - Job 5 (`meta_improve`): browser STANDARD events fired with `fbq('track', …)` (server-twin
+//   conversions belong on the server-returned mirror id; browser-only events belong on Infinite helpers).
 import { readPosthogOption, readPosthogOptionValue } from "../../inspect.js"
 import type { CensusEntry, CensusResult } from "../../wizard/contracts/jobs.js"
 import type { RepoSnapshot } from "../repo-files.js"
@@ -154,7 +154,7 @@ export function detectAdoptedPosthogConfig(snapshot: RepoSnapshot, census: Censu
   return sortFindings(out)
 }
 
-/** Meta's standard events (fbevents' list). A browser `fbq('track', <standard>)` belongs on the mirror. */
+/** Meta's standard events (fbevents' list). Raw browser `fbq('track', <standard>)` belongs on Infinite helpers. */
 export const META_STANDARD_EVENTS = [
   "AddPaymentInfo",
   "AddToCart",

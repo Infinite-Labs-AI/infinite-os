@@ -224,14 +224,14 @@ function onPageHelperCall(item: TriageItem, text: string, role: FileRole | null,
 
 /**
  * LF4 close round 2 (P1-3): the ASK for a finding on the page helper's call that says the conversion never reaches
- * Infinite. It explains Infinite's server-only conversion rule (and this run's server lane) and leaves the rest to the
+ * Infinite. It explains Infinite's server-twin conversion rule (and this run's server lane) and leaves the rest to the
  * user: the finding may also name a real bug in the page (a page view, a navigation, a GA4 or PostHog effect).
  */
 export function infiniteDesignAsk(serverLaneInstalled: boolean | null | undefined): string {
   return `${infiniteConversionRule(serverLaneInstalled)} If the finding is also about something your page does (a page view, a navigation, GA4 or PostHog), that part may be a real bug: you decide whether the agent fixes it.`
 }
 
-/** Infinite's server-only conversion rule, with this run's server lane said as it is. */
+/** Infinite's server-twin conversion rule, with this run's server lane said as it is. */
 function infiniteConversionRule(serverLaneInstalled: boolean | null | undefined): string {
   const lane =
     serverLaneInstalled === true
@@ -239,7 +239,7 @@ function infiniteConversionRule(serverLaneInstalled: boolean | null | undefined)
       : serverLaneInstalled === false
         ? " This run did not install the server lane, so Infinite has no conversion from this site yet: connect your Vercel project in Infinite and run npx infinite-tag again."
         : ""
-  return `Infinite counts a conversion from your server (the server lane's reportInfiniteOutcome), never from the page; the page helpers send it to GA4 and PostHog only, by design.${lane}`
+  return `Infinite counts server-twin conversions from your server (the server lane's reportInfiniteOutcome); the page helpers send browser events to GA4, PostHog, Infinite's browser ledger and safe browser-only Meta events without building Meta event ids.${lane}`
 }
 
 /** The reply to "the page never sends the conversion to Infinite", with this run's server lane said as it is. */
