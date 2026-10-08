@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest"
 import { jobBlock } from "../jobs/briefs.js"
 import type { ChecklistItem } from "../wizard/contracts/jobs.js"
 
+import type { TrackingSignal } from "../scan/event-inventory.js"
 import { outcomeImportFrom, serverConversionInstructions, serverConversionInstructionsForItem } from "./job-brief.js"
 
 const PAGES = { framework: "next-pages-router", router: "pages" as const, outcomeHelper: "lib/infinite-outcome.ts", appRoot: "." }
@@ -22,7 +23,7 @@ describe("serverConversionInstructions", () => {
     expect(text).toContain('the scan points at "pages/api/checkout.ts" line 40')
     expect(text).toContain("contextMetadata(context, { contentIds, numItems })")
     expect(text).toContain("Do not also report the purchase anywhere else")
-    expect(text).toContain("never change consent code")
+    expect(text).toContain("Never change consent code")
     expect(text).toContain("Never write an email, a name or an address into metadata, logs")
   })
 
@@ -118,3 +119,35 @@ describe("the jobs brief routes the server-conversions job here (the one edit in
     )
   })
 })
+
+describe("P1-B: the page's tracking signal is true for every visitor who allowed tracking, on any route", () => {
+  const entry = { event: "lead" as const, sites: [{ file: "pages/join.tsx", line: 20, via: "helper:generateLead" }, { file: "pages/api/join.ts", line: 9, via: "form-api" }], tools: {}, missing: ["meta_server" as const, "infinite" as const] }
+  const lead = (trackingSignal: TrackingSignal | null) => serverConversionInstructions({ event: "lead", entry, file: "pages/api/join.ts", line: 9 }, { ...PAGES, trackingSignal })
+
+  it("names the site's own consent reader, read only, as the signal the page sends", () => {
+    const text = lead({ kind: "site_getter", expression: 'getConsent() === "granted"', name: "getConsent", file: "src/analytics/tracking.ts", line: 53 })
+    expect(text).toContain('On the page that sends this request ("pages/join.tsx"), add the visitor\'s tracking signal to it and change nothing else there: the signal is the site\'s own consent reader `getConsent() === "granted"` (`getConsent` is exported by "src/analytics/tracking.ts" line 53; import it relative to the page).')
+    expect(text).toContain('Send `adMatch: getConsent() === "granted"` in a JSON body')
+    expect(text).toContain("only import and call the reader, never edit it")
+    expect(text).not.toContain("infiniteAdMatchAllowed")
+  })
+
+  it("is `true` on a site with no consent gate", () => {
+    const text = lead({ kind: "always" })
+    expect(text).toContain("this site has no consent gate, so the signal is always `true`: send `adMatch: true` in a JSON body")
+    expect(text).not.toContain("infiniteAdMatchAllowed")
+    expect(text).not.toContain("On a site with no consent gate that is always")
+  })
+
+  it("falls back to the tag's own answer only when a gate exists and no reader can be imported", () => {
+    for (const signal of [{ kind: "tag_helper" } as const, null]) expect(lead(signal)).toContain("`adMatch: infiniteAdMatchAllowed()` in a JSON body")
+  })
+
+  it("the lead always passes a fallbackId, one per submission when the route stores no row", () => {
+    const text = lead(null)
+    expect(text).toContain("fallbackId: signupId")
+    expect(text).toContain("Always pass `fallbackId`: without it nothing is reported until the owner sets LEAD_ID_SECRET")
+    expect(text).toContain("`randomUUID()` from `node:crypto`")
+  })
+})
+

@@ -304,12 +304,16 @@ describe("store: the wizard's own scan, plan and briefs", () => {
     expect(checkout).toContain('"pages/api/checkout.ts" line 67')
     expect(checkout).toContain("reportStripeCheckoutStarted")
     expect(checkout).toContain("buyerContext")
-    expect(checkout).toContain("adMatch: infiniteAdMatchAllowed()")
+    // P1-B: the store's own consent reader is the signal (read only), never the tag's same-tab memory.
+    expect(checkout).toContain('the signal is the site\'s own consent reader `getConsent() === "granted"` (`getConsent` is exported by "src/analytics/tracking.ts" line 53')
+    expect(checkout).not.toContain("infiniteAdMatchAllowed()")
     const lead = block("server_conversions:lead")
     expect(lead).toContain('"pages/api/mailing-list.ts"')
     expect(lead).toContain("reportInfiniteLead")
     expect(lead).toContain("trackingAllowed: body.adMatch === true")
     expect(lead).toContain('"pages/mailing-list.tsx"')
+    expect(lead).toContain('Send `adMatch: getConsent() === "granted"` in a JSON body')
+    expect(lead).toContain("fallbackId: signupId")
     for (const text of [purchase, checkout, lead]) expect(text).toContain('"lib/infinite-outcome.ts"')
     // The page that sends each request may carry the visitor's tracking signal: it is in the job's files.
     const allowed = (id: string) => items.find((item) => item.id === id)?.allow.files ?? []

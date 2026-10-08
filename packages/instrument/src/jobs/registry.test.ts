@@ -475,7 +475,7 @@ describe("briefs carry the plan's decisions as data (review P0-1)", () => {
   it("binds each conversion job to the APPROVED (edited) name, never the agent's choice", () => {
     expect(block("server_conversions:signup")).toContain('"approvedConversionNames":["sign_up"]')
     expect(block("conversions_to_tools:signup")).toContain('"approvedConversionNames":["sign_up"]')
-    expect(block("server_conversions:signup")).toContain("type: <an approved conversion name from Plan data>")
+    expect(block("server_conversions:signup")).toContain('type: "sign_up"')
   })
 
   it("omits privacy copy while handing over the guard expression and connection IDs", () => {

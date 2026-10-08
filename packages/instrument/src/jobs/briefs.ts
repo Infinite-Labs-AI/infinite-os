@@ -34,7 +34,8 @@ import {
   type EventInventoryEntry,
   type EventSite,
   type FunnelEvent,
-  type InventoryTool
+  type InventoryTool,
+  type TrackingSignal
 } from "../scan/event-inventory.js"
 
 export { escapeForTemplateLiteral }
@@ -237,7 +238,7 @@ export const JOB_GISTS: { readonly [J in JobId]: string } = {
   preview_guard:
     "Guard the existing init with the emitted host expression (`buildHostGuardExpression`). It compiles as written in strict TypeScript: paste it byte-for-byte with no type annotations. In a plain Meta module, insert the early-return recipe before the bootstrap; leave every existing statement on its original line and indentation. Never place a guard between an init and a later revoke, deny or opt-out. If consent code is in the way, skip the task and leave it for the site owner. Never guard the `_fbc` capture.",
   server_conversions:
-    "After the success branch, `await reportInfiniteOutcome({ type: <an approved conversion name from Plan data>, path, eventId: <a stable id such as the order or row id>, adMatch? })`. Payment webhooks use the checkout-capture recipe. Pass `metaEventId` to the browser only for requests the browser awaits.",
+    "Report the conversion from your server at the moment it becomes real, with the generated outcome helper's reporter named below: `reportStripeCheckoutPurchase` in the Stripe payment webhook, `reportStripeCheckoutStarted` where the checkout session is created, `reportInfiniteLead` where a sign-up is stored, else `reportInfiniteOutcome({ type, path, eventId, adMatch })`. Never from the page. Pass `metaEventId` to the browser only for requests the browser awaits.",
   identify_reset: "Call `infiniteIdentify(accountId)` after a VERIFIED login (an account id, never an email). Call `infiniteReset()` in every logout.",
   conversions_to_tools:
     "At each conversion point call `infiniteTrack(<an approved conversion name from Plan data>)` (or `infiniteTrackThenNavigate(…)` before a navigation), sending only to the tools Plan data names in `destinations` when it names them. It never builds a Meta eventID. Purchases, checkout starts and leads reach Meta and Infinite from your server; never call `fbq` yourself.",
@@ -305,14 +306,14 @@ const SERVER_ONLY_CONVERSIONS: ReadonlySet<string> = new Set(["purchase"])
  * already sends GA4 there never gets a second GA4 event; Meta and Infinite get a conversion from the server, never here.
  * A purchase is never sent from the browser at all.
  */
-function conversionGist(target: string, data: Record<string, unknown> | Error): string {
+function conversionGist(target: string, data: Record<string, unknown> | Error, signal?: TrackingSignal | null): string {
   const helper = data instanceof Error || typeof data.helperImport !== "string" ? "" : ` The helpers are already in your repo: ${data.helperImport}. Never re-implement them.`
   if (SERVER_ONLY_CONVERSIONS.has(target)) {
     return `Here: add NOTHING in the browser. A ${target} is reported from your server when the payment is confirmed (its own job), and Infinite sends it to Meta from there. Never send it with infiniteTrack or fbq. Claim this job blocked with the note "reported from the server".`
   }
   const destinations = !(data instanceof Error) && Array.isArray(data.destinations) ? (data.destinations as string[]) : null
   if (destinations && OUTCOME_CONVERSION_TYPES.has(target as never)) {
-    return `Here: right after the success is confirmed and before any navigation, call infiniteTrack(<the approved name>, {}, { destinations: ${JSON.stringify(destinations)} }) (or infiniteTrackThenNavigate(…) with the same destinations when the success navigates) — exactly those tools: the site already sends this to the others (alreadySentTo), and Meta and Infinite get it from your server (its own job). Never on the link or button that leads to the form. Where this form posts to your own API route, also send adMatch: infiniteAdMatchAllowed() in its JSON body (or ad_match=1 in a form post when it is true), so your server can attach Meta match data; change nothing else in the request.${helper}`
+    return `Here: right after the success is confirmed and before any navigation, call infiniteTrack(<the approved name>, {}, { destinations: ${JSON.stringify(destinations)} }) (or infiniteTrackThenNavigate(…) with the same destinations when the success navigates) — exactly those tools: the site already sends this to the others (alreadySentTo), and Meta and Infinite get it from your server (its own job). Never on the link or button that leads to the form. Where this form posts to your own API route, also send ${signalWords(signal)} in its JSON body (or ad_match=1 in a form post when it is true), so your server can attach Meta match data; change nothing else in the request.${helper}`
   }
   if (OUTCOME_CONVERSION_TYPES.has(target as never)) {
     return `Here: call infiniteTrack(${JSON.stringify(target)}) right after the success is confirmed and before any navigation (or use infiniteTrackThenNavigate). Never on the link or button that leads to the form.${helper}`
@@ -432,6 +433,13 @@ function commerceImports(places: readonly CommercePlace[], module: string): Reco
   return Object.fromEntries([...names].sort(([a], [b]) => (a < b ? -1 : 1)).map(([file, set]) => [file, helperImportFor(file, module, order.filter((name) => set.has(name)))]))
 }
 
+/** P1-B: the signal a page sends its own API route, as one phrase (the site's own reader, `true`, or the tag's helper). */
+function signalWords(signal: TrackingSignal | null | undefined): string {
+  if (signal?.kind === "site_getter") return `adMatch: ${signal.expression} (the site's own consent reader, exported by ${quoted(signal.file)}: import and call it, never edit it)`
+  if (signal?.kind === "always") return "adMatch: true (this site has no consent gate)"
+  return "adMatch: infiniteAdMatchAllowed()"
+}
+
 /**
  * Review P0-5 / P1-7 / P1-A: the browser commerce job (`<tool>_improve:commerce_events`). For each event, the ONE place
  * the send goes and the ONE shape it takes there (Plan data `events[].places`), the product and price from the site's
@@ -488,7 +496,7 @@ export const NEVER_LIST: readonly string[] = [
  * events; server-twin Meta conversions still go through `reportInfiniteOutcome` plus `infiniteMetaMirror`.
  */
 export const HELPER_API =
-  "Helper API: `infiniteTrack(name, props?, options?)` sends one named browser event to GA4, PostHog, Infinite and safe browser-only Meta events (ViewContent, AddToCart). It never builds a Meta eventID. `options.destinations` names the tools: a list sends to exactly those (`[\"meta\"]` = Meta only); `{ ga4: false }` skips one; `{ meta: true }` enables a custom Meta CTA (`trackCustom`). Product props: `item_id`, `item_name`, `price`, `quantity`, `currency`; Meta gets content_ids, content_name, contents, value and currency from them. `infiniteTrackThenNavigate(event, href, name, props?, options?)` does the same, then navigates once GA4 has the hit (at most 1 s) and a browser-only Meta request is out (at most 400 ms); a second click while it is leaving does nothing. `infiniteAdMatchAllowed()` is true when the visitor allowed tracking: pass it to your own API routes (`adMatch: infiniteAdMatchAllowed()`). `infiniteIdentify(accountId)` / `infiniteReset()` are PostHog only. `infiniteMetaMirror(metaEventName, metaEventId, { identity: { email, externalId } })` fires the browser twin of a server Meta event, only with the id the server returned. Purchase, checkout starts and leads go to Meta and Infinite from the server, never from these helpers."
+  "Helper API: `infiniteTrack(name, props?, options?)` sends one named browser event to GA4, PostHog, Infinite and safe browser-only Meta events (ViewContent, AddToCart). It never builds a Meta eventID. `options.destinations` names the tools: a list sends to exactly those (`[\"meta\"]` = Meta only); `{ ga4: false }` skips one; `{ meta: true }` enables a custom Meta CTA (`trackCustom`). Product props: `item_id`, `item_name`, `price`, `quantity`, `currency`; Meta gets content_ids, content_name, contents, value and currency from them. `infiniteTrackThenNavigate(event, href, name, props?, options?)` does the same, then navigates once GA4 has the hit (at most 1 s) and a browser-only Meta request is out (at most 400 ms); a second click while it is leaving does nothing. `infiniteTrackBeforeLeaving(name, props?, options?)` sends the same and returns a promise that settles once the request is out (Meta at most 400 ms); a site helper returns it when a caller then does a full page load. `infiniteLeaveAfter(start, go)` wraps such a click handler: `start` does what the handler did and returns that promise, `go` is the handler's own navigation; a second click while it leaves does nothing. `infiniteAdMatchAllowed()` is the tag's own 'visitor allowed tracking' answer, the fallback signal for your own API routes when a job names no better one (it is false for a visitor who lands straight on a page the site keeps its pixels off). `infiniteIdentify(accountId)` / `infiniteReset()` are PostHog only. `infiniteMetaMirror(metaEventName, metaEventId, { identity: { email, externalId } })` fires the browser twin of a server Meta event, only with the id the server returned. Purchase, checkout starts and leads go to Meta and Infinite from the server, never from these helpers."
 
 /** The operator rules: appended to the worker's system prompt for every jobs turn. */
 export function operatorRules(facts: BriefFacts): string {
@@ -507,8 +515,8 @@ export function operatorRules(facts: BriefFacts): string {
     ...(facts.helpers
       ? [
           facts.helpers.module
-            ? `The conversion helpers are already in your repo, exported by ${quoted(facts.helpers.module)} (\`infiniteTrack\`, \`infiniteTrackThenNavigate\`, \`infiniteIdentify\`, \`infiniteReset\`, \`infiniteMetaMirror\`, \`infiniteAdMatchAllowed\`). Never re-implement them.`
-            : "The conversion helpers are already on every page as globals (`window.infiniteTrack`, `window.infiniteTrackThenNavigate`, `window.infiniteIdentify`, `window.infiniteReset`, `window.infiniteMetaMirror`, `window.infiniteAdMatchAllowed`). Never re-implement them."
+            ? `The conversion helpers are already in your repo, exported by ${quoted(facts.helpers.module)} (\`infiniteTrack\`, \`infiniteTrackBeforeLeaving\`, \`infiniteTrackThenNavigate\`, \`infiniteLeaveAfter\`, \`infiniteIdentify\`, \`infiniteReset\`, \`infiniteMetaMirror\`, \`infiniteAdMatchAllowed\`). Never re-implement them.`
+            : "The conversion helpers are already on every page as globals (`window.infiniteTrack`, `window.infiniteTrackBeforeLeaving`, `window.infiniteTrackThenNavigate`, `window.infiniteLeaveAfter`, `window.infiniteIdentify`, `window.infiniteReset`, `window.infiniteMetaMirror`, `window.infiniteAdMatchAllowed`). Never re-implement them."
         ]
       : []),
     // R4-6 (live run 4): the agent opened the 56 KB managed module and thought 4.2 minutes before its first edit.
@@ -924,7 +932,7 @@ export function jobBlock(item: ChecklistItem, facts: BriefFacts): string {
     guardNote ??
     (commerceTool ? commerceGist(commerceTool, inventoryOf(item).filter((entry) => entry.missing.includes(commerceTool)).map((entry) => entry.event)) : undefined) ??
     TARGET_GISTS[item.id] ??
-    (item.jobId === "duplicates_remove" ? duplicateGist(itemTargetOf(item)) : item.jobId === "conversions_to_tools" ? conversionGist(itemTargetOf(item), data) : item.jobId === "server_conversions" ? serverConversionInstructionsForItem(item, facts, Array.isArray(data.approvedConversionNames) ? String(data.approvedConversionNames[0]) : undefined) : undefined)
+    (item.jobId === "duplicates_remove" ? duplicateGist(itemTargetOf(item)) : item.jobId === "conversions_to_tools" ? conversionGist(itemTargetOf(item), data, facts.inventory?.trackingSignal) : item.jobId === "server_conversions" ? serverConversionInstructionsForItem(item, facts, Array.isArray(data.approvedConversionNames) ? String(data.approvedConversionNames[0]) : undefined) : undefined)
   const lines = (facts.plan?.lines ?? []).filter((line) => line.jobIds.includes(item.id))
   const out = [
     `### Job ${quoted(item.id)} (${item.n}. ${title})`,
