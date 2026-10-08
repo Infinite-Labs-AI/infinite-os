@@ -283,7 +283,37 @@ describe("review (read-only, detached worktree)", () => {
     const fakes = fakeAgents({ turns: [{ schemaProblem: "'schema.properties.findings.items.required' is required to include every key in properties. Missing 'category'.", final: CODEX_ANSWER }] })
     dirs.push(fakes.home)
     const result = await reviewInDetachedWorktree(makeRunner(fakes, repo), git, { headSha: head, reviewer: "codex", brief: "R1-R16 brief" })
-    expect(result).toEqual({ error: "rejected" })
+    // The service's own words are kept (from the JSON body's error.message), never the 400 JSON itself.
+    expect(result).toMatchObject({ error: "rejected", message: expect.stringMatching(/^Invalid schema for response_format/) })
+    expect((result as { message: string }).message.length).toBeLessThanOrEqual(200)
+  })
+
+  it("Codex: a failed turn (non-zero exit) is `error` with its last message, never `unparseable`", async () => {
+    const { repo, head, git } = reviewRepo()
+    const fakes = fakeAgents({ turns: [{ steps: [{ emit: { type: "error", message: "Reconnecting... 1/5" } }, { emit: { type: "turn.failed", error: { message: "stream disconnected before completion" } } }], final: null, exit: 1 }] })
+    dirs.push(fakes.home)
+    const result = await reviewInDetachedWorktree(makeRunner(fakes, repo), git, { headSha: head, reviewer: "codex", brief: "R1-R16 brief" })
+    expect(result).toEqual({ error: "error", message: "stream disconnected before completion" })
+  })
+
+  it("Claude Code: an error result with no answer is `error` with its text; a non-zero exit with nothing said is `error` too", async () => {
+    const { repo, head, git } = reviewRepo()
+    const fakes = fakeAgents({ turns: [{ result: { subtype: "error_during_execution", is_error: true, result: "API Error: 500 internal server error" }, structured: null, exit: 1 }] })
+    dirs.push(fakes.home)
+    const result = await reviewInDetachedWorktree(makeRunner(fakes, repo), git, { headSha: head, reviewer: "claude_code", brief: "R1-R16 brief" })
+    expect(result).toMatchObject({ error: "error", message: expect.stringContaining("API Error: 500") })
+    const silent = fakeAgents({ turns: [{ structured: null, exit: 2 }] })
+    dirs.push(silent.home)
+    expect(await reviewInDetachedWorktree(makeRunner(silent, repo), git, { headSha: head, reviewer: "claude_code", brief: "R1-R16 brief" })).toEqual({ error: "error" })
+  })
+
+  it("a reviewer that is not usable here is `unavailable` with why, and no agent is spawned", async () => {
+    const { repo, head, git } = reviewRepo()
+    const fakes = fakeAgents({ claude: { authExit: 1 }, codex: {} })
+    dirs.push(fakes.home)
+    const result = await reviewInDetachedWorktree(makeRunner(fakes, repo), git, { headSha: head, reviewer: "claude_code", brief: "R1-R16 brief" })
+    expect(result).toEqual({ error: "unavailable", message: "is not signed in" })
+    expect(runs(fakes, "claude")).toEqual([])
   })
 
   it("refuses the repo itself, or a worktree holding an untracked .env (negatives)", async () => {

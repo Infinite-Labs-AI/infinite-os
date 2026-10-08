@@ -397,10 +397,18 @@ export class AgentRunnerImpl implements AgentRunner {
     return join(wizardCacheRoot(this.options.home), runId, `review-${n}-${reviewer === "claude_code" ? "claude" : "codex"}.jsonl`)
   }
 
+  /**
+   * Every outcome that is not a parsed review is a failure that says WHY (live runs: a refused request, a missing
+   * binary and a crash were all reported as "unparseable", so the review step asked again with "your answer did not
+   * match the schema" and then said exactly that, when no answer had ever come back). Only `unparseable` is an answer.
+   */
   async review(input: ReviewRunInput): Promise<ReviewResult | ReviewFailure> {
     await assertReviewWorktree(input.worktreeDir, this.options.root)
     const info = await this.infoFor(input.reviewer)
-    if (!info) return { error: "unparseable" }
+    if (!info) {
+      const reason = (await this.detect()).unavailable?.find((entry) => entry.kind === input.reviewer)?.reason
+      return { error: "unavailable", message: reason === "logged_out" ? "is not signed in" : reason === "not_installed" ? "is not installed" : "was not found on this computer" }
+    }
     this.reviews += 1
     const runId = this.options.runId() ?? "local-run"
     const scratch = join(runScratchDir(this.options.home, runId), `review-${this.reviews}`)
@@ -411,9 +419,12 @@ export class AgentRunnerImpl implements AgentRunner {
       result = await this.reviewAttempt(info, input, scratch, this.modelFor(input.reviewer))
     }
     await rm(scratch, { recursive: true, force: true })
+    const message = result.errorText ? { message: result.errorText } : {}
     if (result.outcome === "out_of_usage") return { error: "out_of_usage" }
     if (result.outcome === "timeout") return { error: "timeout" }
-    if (result.requestRejected) return { error: "rejected" }
+    if (result.requestRejected) return { error: "rejected", ...message }
+    // A non-zero exit, a failed turn or a kill; also a run that "finished" on an error result with no answer.
+    if (result.outcome === "error" || (result.review === null && result.errorText !== null)) return { error: "error", ...message }
     return result.review ?? { error: "unparseable" }
   }
 
@@ -699,7 +710,7 @@ export class AgentRunnerImpl implements AgentRunner {
     input: ReviewRunInput,
     scratch: string,
     model: ModelChoice
-  ): Promise<{ outcome: "completed" | "out_of_usage" | "timeout" | "error"; review: ReviewResult | null; modelRejected: boolean; requestRejected?: boolean }> {
+  ): Promise<{ outcome: "completed" | "out_of_usage" | "timeout" | "error"; review: ReviewResult | null; modelRejected: boolean; requestRejected?: boolean; errorText: string | null }> {
     const sensitive = await resolveSensitivePaths({ home: this.options.home, env: this.options.env })
     // §3x.3 (D3) The reviewer's event stream is kept (0600), so the next slow review can be measured, and its tool
     // beats are narrated like the worker's (run 3's Codex review left no trace of its 8.5 minutes).
@@ -719,8 +730,11 @@ export class AgentRunnerImpl implements AgentRunner {
     let modelRejected = false
     let requestRejected = false
     let structured: unknown = null
-    const stop = (value: "out_of_usage" | "error") => {
+    // The reviewer's last error, in its own words (sanitized, ≤ 200 chars), so a failed review says why.
+    let errorText: string | null = null
+    const stop = (value: "out_of_usage" | "error", text?: string | null) => {
       if (outcome === null) outcome = value
+      if (text && errorText === null) errorText = text
       void child.kill()
     }
     let child: ReturnType<AgentProcessRegistry["spawn"]>
@@ -730,7 +744,8 @@ export class AgentRunnerImpl implements AgentRunner {
       const cwd = await resolveRealpath(input.worktreeDir)
       if (reviewerDenyCoveringCwd(sensitive, cwd) !== null) {
         clearInterval(tickTimer)
-        return { outcome: "error", review: null, modelRejected: false }
+        await log.close().catch(() => undefined)
+        return { outcome: "error", review: null, modelRejected: false, errorText: "its safety settings would have kept it from reading the pull request's files" }
       }
       const argv = buildClaudeReviewerArgv({
         sensitive,
@@ -764,13 +779,14 @@ export class AgentRunnerImpl implements AgentRunner {
             modelRejected = true
             return stop("error")
           }
-          if (event.kind === "init" && !apiKeySourceMatches(info.whoPays, event.apiKeySource)) return stop("error")
+          if (event.kind === "init" && !apiKeySourceMatches(info.whoPays, event.apiKeySource)) return stop("error", "it would have billed a different account than the plan showed")
           if (event.kind === "assistant_error" && (event.error === "rate_limit" || event.error === "billing_error")) return stop("out_of_usage")
           if (event.kind === "rate_limit" && claudeUsageSignals(event.event).some((signal) => signal.kind === "rejected")) return stop("out_of_usage")
           if (event.kind === "result") {
             if (event.apiErrorStatus === 429) return stop("out_of_usage")
             // A review made while denied the PR's own files is not a review: never posted (review I1 P1-4).
-            if (reviewerWasBlind(event.permissionDenials, cwd)) return stop("error")
+            if (reviewerWasBlind(event.permissionDenials, cwd)) return stop("error", "it was denied the pull request's own files")
+            if (event.isError && errorText === null) errorText = sanitizeUntrusted(event.text, 200) || null
             structured = event.structuredOutput
           }
         }
@@ -818,11 +834,14 @@ export class AgentRunnerImpl implements AgentRunner {
             modelRejected = true
             return stop("error")
           }
-          if (codexUnrecognizedConfig(event.message)) return stop("error")
+          if (codexUnrecognizedConfig(event.message)) return stop("error", reviewerErrorText(event.message))
           if (codexRequestRejected(event.message)) {
             requestRejected = true
-            return stop("error")
+            return stop("error", reviewerErrorText(event.message))
           }
+          // A top-level error can be transient ("Reconnecting… 1/5"): kept as the last word, never a stop by itself.
+          // A failed turn is the reason itself, so it replaces an earlier transient line.
+          if (event.fatal || errorText === null) errorText = reviewerErrorText(event.message)
         }
       })
     }
@@ -837,8 +856,23 @@ export class AgentRunnerImpl implements AgentRunner {
       }
     }
     const final: "completed" | "out_of_usage" | "timeout" | "error" = outcome ?? (exit.timedOut ? "timeout" : exit.code === 0 ? "completed" : "error")
-    return { outcome: final, review: final === "completed" ? parseReview(structured) : null, modelRejected, requestRejected }
+    const review = final === "completed" ? parseReview(structured) : null
+    // A completed run that answered keeps no stale transient error (a "Reconnecting…" before a good answer).
+    return { outcome: final, review, modelRejected, requestRejected, errorText: review ? null : errorText }
   }
+}
+
+/** A reviewer's error line in plain words: a JSON service body is reduced to its `error.message`; sanitized, ≤ 200. */
+export function reviewerErrorText(raw: string): string | null {
+  let text = raw
+  try {
+    const parsed = JSON.parse(raw) as { error?: { message?: unknown } | unknown; message?: unknown }
+    const inner = typeof parsed === "object" && parsed !== null && typeof parsed.error === "object" && parsed.error !== null ? (parsed.error as { message?: unknown }).message : parsed?.message
+    if (typeof inner === "string" && inner.trim() !== "") text = inner
+  } catch {
+    // Not JSON: the line itself is the message.
+  }
+  return sanitizeUntrusted(text, 200) || null
 }
 
 /** §3y.10: the worker's Codex profile also denies `<root>/.infinite` (its realpath, when it exists). */

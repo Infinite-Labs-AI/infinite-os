@@ -78,24 +78,90 @@ describe("step `review` (§3g.4)", { timeout: 60_000 }, () => {
     expect(await reviewSentence(w.ctx, w.deps, RUN_ID, "codex")).toContain("could not read")
   })
 
-  it("a review request the service refused is reported as not run, never as an answer that broke the schema, and is not asked again", async () => {
-    const w = await opened({ reviews: [{ error: "rejected" }, review([])] })
+  /** Both agents installed: the other one (Claude Code, the worker) can review when Codex's review does not run. */
+  function bothInstalled(w: World): void {
+    const info = (kind: "claude_code" | "codex") => ({ kind, binPath: `/bin/${kind}`, version: "1", whoPays: null as never })
+    w.agents.detect = async () => ({ worker: info("claude_code"), reviewer: info("codex"), nested: null })
+  }
+
+  /** The PR is still a draft, no final comment was posted, and the run halted (or parked) with the plain words. */
+  async function expectHeldDraft(w: World, outcome: Awaited<ReturnType<typeof reviewStep.run>>, words: string): Promise<void> {
+    const text = outcome.kind === "failed" ? outcome.message : outcome.kind === "parked" ? outcome.reason : ""
+    expect(text).toContain(`No second review ran on this pull request. ${words}.`)
+    expect(text).toContain("stays a draft")
+    expect(text).not.toContain("marked ready")
+    expect(text).not.toMatch(/INF_WIZ/)
+    if (outcome.kind === "failed") expect(outcome.next).toBe("halt")
+    const pr = w.gh.read().prs[0]!
+    expect(pr.isDraft).toBe(true)
+    expect(JSON.stringify(pr.comments ?? [])).not.toContain(PR_MARKERS.final(RUN_ID))
+    expect(await reviewSentence(w.ctx, w.deps, RUN_ID, "codex")).toBe(`No second review (${words})`)
+  }
+
+  it("a review request the service refused keeps the draft, says so (never 'schema'), and is not asked again", async () => {
+    const w = await opened({ reviews: [{ error: "rejected", message: "Invalid schema for response_format: 'required' did not match" }, review([])] })
     const outcome = await reviewStep.run(w.ctx, w.deps)
     expect(outcome).toMatchObject({ kind: "failed", code: "INF_WIZ_AGENT_FAILED" })
-    expect(JSON.stringify(outcome)).toContain("refused")
+    await expectHeldDraft(w, outcome, "Codex's service refused the request")
+    expect(JSON.stringify(outcome)).not.toMatch(/schema/i)
     expect(w.agents.reviewCalls).toHaveLength(1)
     const ledger = JSON.parse(readFileSync(join(w.fx.root, REVIEW_LEDGER_PATH), "utf8"))
-    expect(ledger.completeness).toEqual({ reviewer: "codex", state: "incomplete", unchecked: ["the reviewer's service refused the request before it answered"] })
-    expect(JSON.stringify(ledger)).not.toContain("did not match the schema")
-    expect(await reviewSentence(w.ctx, w.deps, RUN_ID, "codex")).toBe("No second review (Codex's service refused the request)")
+    expect(ledger.completeness).toEqual({ reviewer: "codex", state: "incomplete", unchecked: ["no review ran: Codex's service refused the request"] })
+    expect(JSON.stringify(ledger)).not.toMatch(/schema/i)
   })
 
-  it("an answer that broke the schema is asked for once more, then reported unreadable", async () => {
+  it("an answer that broke the schema is asked for once more, then keeps the draft", async () => {
     const w = await opened({ reviews: [{ error: "unparseable" }, { error: "unparseable" }] })
-    expect(await reviewStep.run(w.ctx, w.deps)).toMatchObject({ kind: "failed", code: "INF_WIZ_REVIEW_UNPARSEABLE" })
+    const outcome = await reviewStep.run(w.ctx, w.deps)
+    expect(outcome).toMatchObject({ kind: "failed", code: "INF_WIZ_REVIEW_UNPARSEABLE" })
     expect(w.agents.reviewCalls).toHaveLength(2)
     expect(w.agents.reviewCalls[1]!.brief).toContain("did not match the JSON schema")
-    expect(await reviewSentence(w.ctx, w.deps, RUN_ID, "codex")).toBe("No second review (Codex's answer could not be read)")
+    await expectHeldDraft(w, outcome, "Codex's answer did not match the format twice")
+  })
+
+  it.each([
+    [{ error: "error" as const, message: "stream disconnected before completion" }, "INF_WIZ_AGENT_FAILED", "Codex stopped with an error: stream disconnected before completion"],
+    [{ error: "unavailable" as const, message: "is not installed" }, "INF_WIZ_AGENT_FAILED", "Codex is not installed"],
+    [{ error: "timeout" as const }, "INF_WIZ_AGENT_TIMEOUT", "Codex ran out of time (10 minutes)"]
+  ])("a review that did not run (%j) keeps the draft and is not asked again", async (failure, code, words) => {
+    const w = await opened({ reviews: [failure, review([])] })
+    const outcome = await reviewStep.run(w.ctx, w.deps)
+    expect(outcome).toMatchObject({ kind: "failed", code })
+    expect(w.agents.reviewCalls).toHaveLength(1)
+    await expectHeldDraft(w, outcome, words)
+  })
+
+  it("out of usage parks with the draft kept, and does not hand the review to the other agent", async () => {
+    const w = await opened({ reviews: [{ error: "out_of_usage" }, review([])] })
+    bothInstalled(w)
+    const outcome = await reviewStep.run(w.ctx, w.deps)
+    expect(outcome).toMatchObject({ kind: "parked", code: "INF_WIZ_AGENT_OUT_OF_USAGE" })
+    expect(w.agents.reviewCalls.map((call) => call.reviewer)).toEqual(["codex"])
+    await expectHeldDraft(w, outcome, "Codex is out of usage")
+  })
+
+  it("when Codex's review does not run, Claude Code reviews instead (read-only), and the run goes on with its review", async () => {
+    const w = await opened({ reviews: [{ error: "rejected" }, review([])], gh: { checks: { "42": [{ name: "ci", bucket: "pass", state: "SUCCESS" }] } } })
+    bothInstalled(w)
+    const outcome = await reviewStep.run(w.ctx, w.deps)
+    expectOk(outcome)
+    expect(w.agents.reviewCalls.map((call) => call.reviewer)).toEqual(["codex", "claude_code"])
+    expect(outcome.status).toContain("reviewed by Claude Code")
+    expect(w.gh.read().prs[0]!.isDraft).toBe(false)
+    expect(eventText(w.ctx)).toContain("Claude Code reviewed this pull request instead: Codex's service refused the request.")
+    const ledger = JSON.parse(readFileSync(join(w.fx.root, REVIEW_LEDGER_PATH), "utf8"))
+    expect(ledger.rounds[0].reviewer).toBe("claude_code")
+    expect(ledger.completeness.reviewer).toBe("claude_code")
+    expect(await reviewSentence(w.ctx, w.deps, RUN_ID, "codex")).toBe("Reviewed by Claude Code")
+  })
+
+  it("when the other agent's review does not run either, the draft is kept with both reasons", async () => {
+    const w = await opened({ reviews: [{ error: "unavailable", message: "is not signed in" }, { error: "error", message: "API Error: 500" }] })
+    bothInstalled(w)
+    const outcome = await reviewStep.run(w.ctx, w.deps)
+    expect(outcome).toMatchObject({ kind: "failed", code: "INF_WIZ_AGENT_FAILED" })
+    expect(w.agents.reviewCalls.map((call) => call.reviewer)).toEqual(["codex", "claude_code"])
+    await expectHeldDraft(w, outcome, "Codex is not signed in. Asked instead, Claude Code stopped with an error: API Error: 500")
   })
 
   it("a real Codex answer (every key present, category null) is posted and triaged", async () => {

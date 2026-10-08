@@ -18,6 +18,7 @@ import { commitChecks, withDeploymentStates, readinessChecks, retryCheckRead } f
 import { mergeRequirementLine } from "../../github/rules.js"
 import { parseLedger, REVIEW_LEDGER_PATH } from "../../review/ledger.js"
 import { verdictFactsFor } from "../verdict-facts.js"
+import { notRunReason } from "../review-outcome.js"
 import { incompleteParts } from "../verdict.js"
 import { repoLabelFromRemote } from "./done.js"
 
@@ -99,6 +100,9 @@ export async function reviewSentence(ctx: Pick<WizardContext, "root">, deps: Pic
   if (completeness?.state === "incomplete") {
     // No round was ever read: nothing was checked, so it is no review at all, said with why.
     if (ledger.rounds.length === 0) {
+      const notRun = notRunReason(completeness.unchecked)
+      if (notRun) return `No second review (${notRun})`
+      // Ledgers written before review-outcome.ts recorded these two.
       if (completeness.unchecked.includes("the reviewer's service refused the request before it answered")) return `No second review (${label}'s service refused the request)`
       if (completeness.unchecked.includes("answer did not match the schema")) return `No second review (${label}'s answer could not be read)`
     }

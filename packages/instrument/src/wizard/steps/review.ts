@@ -43,6 +43,7 @@ import { escapeRegExp } from "../../text-escape.js"
 import { stageAndCommit, failed, pushBranch } from "../../review/ship.js"
 import { provenPendingFor } from "./prove.js"
 import { announceRehearsal, commitStop, isShipContext, prepareShip, recordClickTests, testPageUrls, type ShipContext } from "./rehearsal.js"
+import { fallbackReviewer, notRunUnchecked, reviewFailureWords, reviewNotRunCode, reviewOutcome, shouldAskAgain, usableReviewers, type ReviewAttempt } from "../review-outcome.js"
 
 const meta = WIZARD_STEP_META.review
 const REVIEW_INPUT_DIR = ".infinite/review"
@@ -279,8 +280,9 @@ async function runReviewer(session: Session, reviewer: AgentKind, round: number,
         showStatus()
       }
       let result = await deps.agents.review({ worktreeDir: worktree.dir, reviewer, brief: text, onNarrate, onActivity })
-      // Only an answer that came back and broke the schema is asked again; a refused request has no answer to fix.
-      if ("error" in result && result.error === "unparseable") {
+      // Only an answer that came back and broke the schema is asked again; a refused request, a crash or a missing
+      // agent has no answer to fix (review-outcome.ts, the one rule both review passes use).
+      if (shouldAskAgain(result)) {
         result = await deps.agents.review({ worktreeDir: worktree.dir, reviewer, brief: `${text}\n\nYour previous answer did not match the JSON schema. Return JSON only, exactly matching it.`, onNarrate, onActivity })
       }
       // Belt and braces: whatever the runner parsed must match review.schema.json before anything is posted.
@@ -972,7 +974,8 @@ async function reviewRun(ctx: WizardContext, deps: WizardDeps): Promise<StepOutc
   if (notOpen) return notOpen
 
   const worker = state.agent?.worker ?? null
-  const agentReviewer: AgentKind | null = session.reviewer === "claude_code" || session.reviewer === "codex" ? session.reviewer : null
+  // The agent reviewing this run: the planned reviewer, or the other agent once it reviewed in its place.
+  let agentReviewer: AgentKind | null = session.reviewer === "claude_code" || session.reviewer === "codex" ? session.reviewer : null
   let briefReview: ReviewResult | null = null
   if (agentReviewer === null) {
     const brief = printedReviewBrief({
@@ -1022,6 +1025,8 @@ async function reviewRun(ctx: WizardContext, deps: WizardDeps): Promise<StepOutc
       lastRoundFixedUnreviewed = last.fixSha !== null && last.round >= PR_LOOP_LIMITS.maxFixRounds
     }
   }
+  // The agents whose review did not run this run: a later round never asks one of them again in another's place.
+  const failedReviewers = new Set<AgentKind>()
   for (let round = firstRound; round <= PR_LOOP_LIMITS.maxFixRounds; round += 1) {
     const stop = await stopIfNotOpen(session)
     if (stop) return stop
@@ -1049,36 +1054,53 @@ async function reviewRun(ctx: WizardContext, deps: WizardDeps): Promise<StepOutc
       session.ledger.completeness = { reviewer: "brief", state: classified.state, unchecked: classified.unchecked }
     } else if (agentReviewer) {
       const openItems = session.ledger.open.map((entry) => `${entry.path ?? "general"}: ${entry.excerpt.slice(0, 120)}`)
-      const result = await runReviewer(session, agentReviewer, round, head, round === 1 ? gitState.baseSha : reviewedSha, openItems)
+      const from = round === 1 ? gitState.baseSha : reviewedSha
+      const planned = agentReviewer
+      let reviewer: AgentKind = planned
+      let result = await runReviewer(session, reviewer, round, head, from, openItems)
+      const attempts: ReviewAttempt[] = []
+      if ("error" in result) {
+        attempts.push({ reviewer, result })
+        failedReviewers.add(reviewer)
+        // A review that did not run is never the end by itself: the other installed agent is asked once, read-only.
+        const other = fallbackReviewer(reviewer, result, usableReviewers(await deps.agents.detect()), [reviewer, ...failedReviewers])
+        if (other) {
+          sub(ctx, "review", `${reviewFailureWords(reviewer, result)}; asking ${AGENT_LABEL[other]} to review instead (read-only)`, "info")
+          reviewer = other
+          result = await runReviewer(session, reviewer, round, head, from, openItems)
+          if ("error" in result) {
+            attempts.push({ reviewer, result })
+            failedReviewers.add(reviewer)
+          }
+        }
+      }
       if ("blind" in result) {
         // §3y.7: still blind after its one retry: nothing is posted as a review, and the one-agent brief path runs.
-        await blindFallback(session, agentReviewer, prepared)
+        await blindFallback(session, reviewer, prepared)
         break
       }
-      if ("error" in result) {
+      const outcome = reviewOutcome("error" in result ? attempts : [...attempts, { reviewer, result }])
+      if (!("review" in result) || !outcome.ran) {
+        // Any review that did not run keeps the pull request a draft (live runs: a refused review was followed by
+        // "marked ready" and a merge 20 seconds later). Nothing is marked ready, merged or commented as final.
+        session.ledger.completeness = { reviewer: planned, state: "incomplete", unchecked: [notRunUnchecked(outcome.reasonWords)] }
         await saveLedger(session)
         await ctx.state.save()
-        if (result.error === "out_of_usage") {
-          return { kind: "parked", code: "INF_WIZ_AGENT_OUT_OF_USAGE", reason: "The reviewer agent is out of usage.", resumeHint: "Run `npx infinite-tag` again when your plan resets; the pull request stays a draft." }
-        }
-        if (result.error === "timeout") {
-          return failed("INF_WIZ_AGENT_TIMEOUT", "The second review timed out. The pull request stays a draft; run `npx infinite-tag` again to retry the review.")
-        }
-        if (result.error === "rejected") {
-          // The reviewer never answered: its service refused the request. Never reported as "did not match the schema".
-          session.ledger.completeness = { reviewer: agentReviewer, state: "incomplete", unchecked: ["the reviewer's service refused the request before it answered"] }
-          session.notes.push(`The second review did not run: ${AGENT_LABEL[agentReviewer]}'s service refused the review request before it answered. Nothing from it was acted on.`)
-          await finish(session)
-          return failed("INF_WIZ_AGENT_FAILED", `The second review did not run (${AGENT_LABEL[agentReviewer]}'s service refused the request); the pull request was marked ready without it.`, "continue")
-        }
-        session.ledger.completeness = { reviewer: agentReviewer, state: "incomplete", unchecked: ["answer did not match the schema"] }
-        session.notes.push("The second review could not be read (its answer did not match the schema twice). Nothing from it was acted on.")
-        await finish(session)
-        return failed("INF_WIZ_REVIEW_UNPARSEABLE", "The second review could not be read; the pull request was marked ready without it.", "continue")
+        sub(ctx, "review", `! ${outcome.message}`, "warn")
+        const code = reviewNotRunCode(outcome.stoppedBy ?? "error")
+        if (code === "INF_WIZ_AGENT_OUT_OF_USAGE") return { kind: "parked", code, reason: outcome.message, resumeHint: "Run `npx infinite-tag` again when your plan resets; the pull request stays a draft." }
+        return failed(code, `${outcome.message} Run \`npx infinite-tag\` again to retry the review.`)
       }
+      if (outcome.note) {
+        session.notes.push(outcome.note)
+        sub(ctx, "review", outcome.note, "info")
+      }
+      // The agent that reviewed reviews the later rounds too (the first one just failed; it is not asked again).
+      agentReviewer = reviewer
+      session.reviewer = reviewer
       review = result.review
-      session.ledger.completeness = { reviewer: agentReviewer, state: result.classified.state, unchecked: result.classified.unchecked }
-      await postRound(session, review, agentReviewer, round, head, result.classified)
+      session.ledger.completeness = { reviewer, state: result.classified.state, unchecked: result.classified.unchecked }
+      await postRound(session, review, reviewer, round, head, result.classified)
     } else {
       break
     }
