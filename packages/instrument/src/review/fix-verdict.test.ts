@@ -77,7 +77,7 @@ describe("verifyFix: a review fix is ticked by its recorded change", () => {
   })
 })
 
-it("restores a shared review hunk and cannot close its verified co-owner after all edits are gone", async () => {
+it("keeps a review hunk shared with a verified co-owner (never revert verified work), and the unverified co-owner is not done", async () => {
   const root = mkdtempSync(join(tmpdir(), "fix-settlement-"))
   dirs.push(root)
   const file = "app/layout.tsx"
@@ -93,8 +93,9 @@ it("restores a shared review hunk and cannot close its verified co-owner after a
     outcome: "completed", session: null, claims: [], questions: [], permissionDenials: 0, reverted: [], edits: [edit],
     attribution: [{ editId: edit.id, itemIds: [a.id, b.id], textEditItems: [[a.id, b.id]] }]
   } as never })
-  expect(readFileSync(join(root, file), "utf8")).toBe("original\n")
+  // Founder decision (live run 2): a block stays when ANY owner was verified on a tree that held it.
+  expect(readFileSync(join(root, file), "utf8")).toBe("changed\n")
   expect(statSync(join(root, file)).mode & 0o777).toBe(0o755)
-  expect(settled.edits).toEqual([])
-  expect(settled.items.map(item => item.state)).toEqual(["left_for_you", "left_for_you"])
+  expect(settled.edits.map(edit => edit.file)).toEqual([file])
+  expect(settled.items.map(item => item.state)).toEqual(["done_in_code", "left_for_you"])
 })
