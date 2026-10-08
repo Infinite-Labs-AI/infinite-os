@@ -123,6 +123,31 @@ describe("infiniteTrack", () => {
     expect(p.fbqCalls).toEqual([])
   })
 
+  it("sends browser-only commerce events to Meta without an eventID, and records them in Infinite when the runtime is present", () => {
+    const p = page({ posthog: true, ga4: "managed" })
+    const infiniteCalls: Call[] = []
+    p.vm.window.__infiniteRecordEvent = (...args: unknown[]) => {
+      infiniteCalls.push(args)
+      return true
+    }
+    expect(p.call("infiniteTrack('add_to_cart', { item_id: 'sku_1', value: 20 })")).toBe(true)
+    expect(plain(p.posthogCalls)).toEqual([["capture", "add_to_cart", { item_id: "sku_1", value: 20 }]])
+    expect(plain(p.gtagCalls)).toEqual([
+      ["event", "add_to_cart", { item_id: "sku_1", value: 20, send_to: "G-TEST123" }]
+    ])
+    expect(plain(p.fbqCalls)).toEqual([["track", "AddToCart", { item_id: "sku_1", value: 20 }]])
+    expect(plain(infiniteCalls)).toEqual([["add_to_cart", { item_id: "sku_1", value: 20 }]])
+  })
+
+  it("can send a browser-only custom CTA to Meta without an eventID, but never auto-fires server-twin conversions", () => {
+    const p = page({ posthog: true })
+    expect(p.call("infiniteTrack('hero_cta_clicked', { cta_location: 'hero' }, { destinations: { meta: true } })")).toBe(true)
+    expect(plain(p.fbqCalls)).toEqual([["trackCustom", "hero_cta_clicked", { cta_location: "hero" }]])
+    p.call("infiniteTrack('sign_up')")
+    p.call("infiniteTrack('purchase')")
+    expect(plain(p.fbqCalls)).toEqual([["trackCustom", "hero_cta_clicked", { cta_location: "hero" }]])
+  })
+
   it("drops a property that could carry personal data or a click id, and bounds the rest", () => {
     const p = page({ posthog: true })
     const props: Record<string, unknown> = {
@@ -476,6 +501,21 @@ describe("infiniteTrackThenNavigate", () => {
     p.call("infiniteTrackThenNavigate(window.__event, '/download', 'download_clicked')")
     expect(event.defaultPrevented).toBe(true)
     expect(p.vm.assigned).toEqual(["https://acme.com/download"])
+  })
+
+  it("waits briefly for a browser-only Meta event before navigating when GA4 is not holding the click", async () => {
+    const p = page({ posthog: true, ga4: false })
+    const event = p.click()
+    p.vm.window.__event = event
+    p.call(`window.__event.currentTarget = ${BUTTON}`)
+    p.call("infiniteTrackThenNavigate(window.__event, '/cart', 'add_to_cart', { item_id: 'sku_1' })")
+    expect(event.defaultPrevented).toBe(true)
+    expect(p.vm.assigned).toEqual([])
+    expect(plain(p.fbqCalls)).toEqual([["track", "AddToCart", { item_id: "sku_1" }]])
+    await p.vm.resourceLoaded("https://www.facebook.com/tr/?id=1234567890123456&ev=AddToCart")
+    expect(p.vm.assigned).toEqual(["https://acme.com/cart"])
+    await p.vm.advance(1000)
+    expect(p.vm.assigned).toHaveLength(1)
   })
 })
 

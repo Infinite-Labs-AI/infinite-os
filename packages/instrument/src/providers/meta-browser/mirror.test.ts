@@ -9,7 +9,7 @@
 //     the budget releases an ad-blocked page, and no PerformanceObserver still means one event within the
 //     budget (around L335).
 // Plus: an identity hash that settles after 50 ms keeps the order, a POST /tr releases at 400 ms and
-// never earlier, Purchase is refused, once per id, two ids mirror twice.
+// never earlier, Purchase is refused, InitiateCheckout is a server-twin mirror, once per id, two ids mirror twice.
 import { describe, expect, it } from "vitest"
 
 import { createBrowserVm, plain, type BrowserVmOptions } from "../../../test/site-code/browser-vm.js"
@@ -107,11 +107,12 @@ describe("infiniteMetaMirror: the server's instruction or nothing", () => {
     expect(META_MIRROR_EVENTS).not.toContain("Purchase")
   })
 
-  it("mirrors each allowlisted event (StartTrial and Subscribe included, decision 16)", async () => {
+  it("mirrors each allowlisted event (StartTrial, Subscribe and InitiateCheckout included)", async () => {
     const page = mirrorPage()
     for (const name of META_MIRROR_EVENTS) page.mirror(name, `id-${name}`, "{ wait: 'none' }")
     await page.vm.settle()
     expect(tracks(page).map((entry) => entry[3])).toEqual([...META_MIRROR_EVENTS])
+    expect(META_MIRROR_EVENTS).toContain("InitiateCheckout")
   })
 
   it("once per id; two ids → two mirrors", async () => {

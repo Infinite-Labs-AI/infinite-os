@@ -129,9 +129,13 @@ describe("the tag follows the site's own pixels", () => {
     page.window.dataLayer = [["consent", "default", { analytics_storage: "granted" }]]
     page.tick()
     expect(page.allowed()).toBe(true)
+    expect(page.stored.has("infinite_analytics_visitor")).toBe(true)
+    expect(page.stored.has("infinite_analytics_session")).toBe(true)
     ;(page.window.dataLayer as unknown[]).push(["consent", "update", { analytics_storage: "denied" }])
     page.tick()
     expect(page.allowed()).toBe(false)
+    expect(page.stored.has("infinite_analytics_visitor")).toBe(false)
+    expect(page.stored.has("infinite_analytics_session")).toBe(false)
     const sent = page.requests.length
     page.tick()
     expect(page.requests.length).toBe(sent)

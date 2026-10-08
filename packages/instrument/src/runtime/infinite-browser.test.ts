@@ -14,6 +14,7 @@ interface HandoffContextShape {
 
 type HarnessWindow = Record<string, unknown> & {
   __infiniteHandoffContext?: () => HandoffContextShape | null
+  __infiniteRecordEvent?: (name: string, properties?: Record<string, string | number | boolean>) => boolean
 }
 
 interface HarnessOptions {
@@ -749,6 +750,28 @@ describe("renderInfiniteBrowserTag", () => {
     runtime.setConsent(false)
     runtime.setConsent(true)
     expect(runtime.requests.map((r) => (r.body.properties as { nav: string }).nav)).toEqual(["navigate", "history", "navigate"])
+  })
+
+  it("the helper event lane records a PII-free browser event to Infinite, and revocation clears local ids", () => {
+    const runtime = executeTag({ siteSourceKey: "site_public_123", consent: "granted" })
+    expect(typeof runtime.window.__infiniteRecordEvent).toBe("function")
+    expect(runtime.window.__infiniteRecordEvent!("add_to_cart", { value: 20, email: "buyer@example.com" })).toBe(true)
+    const event = runtime.requests.at(-1)!.body
+    expect(event).toMatchObject({
+      eventName: "site_click",
+      url: "https://example.com/privacy/",
+      properties: { cta_id: "add_to_cart", cta_location: "conversion" }
+    })
+    expect(event.properties).not.toHaveProperty("value")
+    expect(JSON.stringify(event.properties)).not.toContain("buyer@example.com")
+    expect(runtime.storedIds().anonymousId).toBeTruthy()
+    expect(runtime.storedIds().sessionId).toBeTruthy()
+
+    const count = runtime.requests.length
+    runtime.setConsent(false)
+    expect(runtime.storedIds()).toEqual({ anonymousId: null, sessionId: null })
+    expect(runtime.window.__infiniteRecordEvent!("add_to_cart")).toBe(false)
+    expect(runtime.requests).toHaveLength(count)
   })
 
   it("omits an empty referrer and reduces a populated referrer to the cloud-stored host", () => {

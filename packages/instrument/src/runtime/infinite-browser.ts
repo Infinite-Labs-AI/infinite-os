@@ -88,6 +88,7 @@ function infiniteBrowserRuntime(config: InfiniteBrowserConfig): void {
     __infiniteAnalyticsRuntime?: boolean
     __infiniteHandoffContext?: () => InfiniteHandoffContext | null
     __infiniteConsentAllowed?: (options?: { privacySignal?: boolean }) => boolean
+    __infiniteRecordEvent?: (name: string, properties?: Record<string, string | number | boolean>) => boolean
   }
 
   const runtimeWindow = window as RuntimeWindow
@@ -434,6 +435,29 @@ function infiniteBrowserRuntime(config: InfiniteBrowserConfig): void {
   let anonymousId: string | undefined
   let sessionId: string | undefined
 
+  function clearStoredRuntimeState(): void {
+    anonymousId = undefined
+    sessionId = undefined
+    try {
+      localStorage.removeItem("infinite_analytics_visitor")
+    } catch {
+      // Storage may be blocked; the in-memory ids above are still cleared.
+    }
+    try {
+      sessionStorage.removeItem("infinite_analytics_session")
+      sessionStorage.removeItem("infinite_landing_attribution_v1")
+    } catch {
+      // Optional attribution cleanup; blocked storage already means no durable tab record.
+    }
+    try {
+      document.cookie =
+        "infinite_landing_attribution_v1=;path=/;max-age=0;samesite=Lax" +
+        (location.protocol === "https:" ? ";secure" : "")
+    } catch {
+      // A blocked cookie jar cannot hold the attribution cookie.
+    }
+  }
+
   function privacySignalBlocks(): boolean {
     if (!config.respectDnt) return false
     const privacyNavigator = navigator as Navigator & {
@@ -750,6 +774,7 @@ function infiniteBrowserRuntime(config: InfiniteBrowserConfig): void {
         emitPageView()
       } else {
         // A revocation: the next grant re-observes the page as a fresh initial view.
+        clearStoredRuntimeState()
         lastPageViewPath = null
         initialView = true
       }
@@ -795,6 +820,7 @@ function infiniteBrowserRuntime(config: InfiniteBrowserConfig): void {
         consentOverride = running
         if (!running) {
           // The site stopped its pixels: the next start re-observes the page as a fresh initial view.
+          clearStoredRuntimeState()
           lastPageViewPath = null
           initialView = true
           return
@@ -833,6 +859,15 @@ function infiniteBrowserRuntime(config: InfiniteBrowserConfig): void {
   // identity — which is why this is a live accessor and not a frozen value.
   if (config.siteSourceKey) {
     const siteSourceKey = config.siteSourceKey
+    runtimeWindow.__infiniteRecordEvent = (name: string) => {
+      if (typeof name !== "string" || !structuralTokenPattern.test(name)) return false
+      if (!hasConsent()) return false
+      emit("site_click", normalizePath(location.href), {
+        cta_id: name,
+        cta_location: "conversion"
+      })
+      return true
+    }
     runtimeWindow.__infiniteHandoffContext = () => {
       if (!hasConsent()) return null
       anonymousId ??= storageId(() => localStorage, "infinite_analytics_visitor")

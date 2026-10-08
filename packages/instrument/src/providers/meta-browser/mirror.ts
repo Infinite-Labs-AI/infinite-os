@@ -20,8 +20,9 @@
 //   - Fires only on a non-empty string `metaEventId`, only when `fbq` exists (the pixel ran: consent,
 //     preview guard and blockers all allowed it), and ONCE per id (decision 18: assume Meta does not merge
 //     two browser events with one id). Two different ids on one SPA page mirror twice.
-//   - Only `Lead`, `CompleteRegistration`, `StartTrial` and `Subscribe` (decision 16). `Purchase` is
-//     REFUSED: a purchase reaches Meta from the payment webhook only, never as a browser event.
+//   - Only `Lead`, `CompleteRegistration`, `StartTrial`, `Subscribe` and server-confirmed
+//     `InitiateCheckout` (decision 16 + 2026-10-08 correction). `Purchase` is REFUSED: a purchase
+//     reaches Meta from the payment webhook only, never as a browser event.
 //   - The id is used VERBATIM as `eventID`. Custom data is empty: no value, no contact data, never `ph`.
 //   - It fires on the INSTALLED pixel only (§3z.10, B16): the managed helper bakes the chosen pixel id (the
 //     keys step's choice = the relay's binding) and calls `fbq('trackSingle', <pixel>, name, {}, {eventID})`,
@@ -43,7 +44,7 @@ import { consentAllowsSource, type MetaBrowserGate } from "./consent.js"
 export const META_MIRROR_GLOBAL = "infiniteMetaMirror"
 
 /** The Meta standard events a browser twin may carry (decision 16). `Purchase` is server-only. */
-export const META_MIRROR_EVENTS = ["Lead", "CompleteRegistration", "StartTrial", "Subscribe"] as const
+export const META_MIRROR_EVENTS = ["Lead", "CompleteRegistration", "StartTrial", "Subscribe", "InitiateCheckout"] as const
 
 /** The default AND the longest a mirror holds the page, in ms. */
 export const META_MIRROR_BUDGET_MS = 400

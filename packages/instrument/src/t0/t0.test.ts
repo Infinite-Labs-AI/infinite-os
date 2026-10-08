@@ -517,7 +517,7 @@ describe("click_test (jobs 10, 11: static HTML / Vite markup only)", () => {
     expect(only(results, "problem").reason).toContain("ga4 did not receive sign_up")
   })
 
-  it("negative: fbq('track', 'Lead') on a click is a problem (browser conversions only through the mirror)", async () => {
+  it("negative: fbq('track', 'Lead') on a click is a problem (server-twin conversions only through the server-returned mirror id)", async () => {
     const results = await t0({
       id: "click_test",
       params: {

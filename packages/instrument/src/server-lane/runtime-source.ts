@@ -99,9 +99,10 @@ export interface InfiniteServerEventInput {
    * on in Infinite, this outcome is forwarded to Meta's Conversions API and the block is then
    * DISCARDED - never stored. YOUR server hashes: em and external_id are sha256 hex
    * (crypto.subtle / node:crypto), so a raw email never leaves this process. fbc and fbp are
-   * Meta's own first-party cookies on your domain.
+   * Meta's own first-party cookies on your domain. client_ip_address and client_user_agent must
+   * be the buyer browser request's values, never the server-to-server request to Infinite.
    */
-  adMatch?: { em?: string; fbc?: string; fbp?: string; external_id?: string }
+  adMatch?: { em?: string; fbc?: string; fbp?: string; external_id?: string; client_ip_address?: string; client_user_agent?: string }
   /** Pass the incoming request (or its headers) so the outcome carries the same visitKey as the page view. */
   request?: { headers: Headers }
 }

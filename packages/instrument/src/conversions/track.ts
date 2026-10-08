@@ -1,4 +1,5 @@
-// `window.infiniteTrack(name, props?, { gate? })` — one named event to PostHog and GA4 (§3j.6).
+// `window.infiniteTrack(name, props?, { gate?, destinations?, metaEventName? })` — one named browser
+// event to the safe destinations that are live on this page (§3j.6).
 //
 // Source: `track()` in infinite-site `get-started/index.html` L296-307 and the CTA intent snippet in
 // `.github/scripts/inject-analytics.cjs` L577-595 @ 9f65b47, generalised for customer sites (decisions 9
@@ -19,8 +20,10 @@
 //     return and is not suppressed.
 //   - Each provider is reached behind its own existence check and try/catch, so a missing or broken
 //     tool can never throw into the site's code.
-//   - NEVER `fbq`. A click is intent, not a conversion; Meta conversions come from the server, and the
-//     browser twin only through `infiniteMetaMirror` with the id the server returned.
+//   - Meta server-twin conversions (Purchase, Lead, CompleteRegistration, StartTrial, Subscribe and
+//     server-reported InitiateCheckout) are NEVER fired here. They go server first, then through
+//     `infiniteMetaMirror` with the id the server returned. Browser-only Meta events such as AddToCart,
+//     ViewContent and explicit custom CTA events carry NO eventID.
 //
 // Plain ES5 source, free of backticks, `${` and `</`. These fragments are assembled into one helper
 // script by `./globals.ts`, which supplies `infiniteConsentAllows` and `infiniteUnsafeText`.
@@ -74,6 +77,77 @@ export function helperCoreSource(): string {
     "  var copy = {};",
     "  for (var key in source) if (Object.prototype.hasOwnProperty.call(source, key)) copy[key] = source[key];",
     "  return copy;",
+    "}",
+    "function infiniteDestinationAllowed(options, tool, defaultValue) {",
+    "  var destinations = options && typeof options === 'object' ? (options.destinations || options.tools) : null;",
+    "  if (!destinations || typeof destinations !== 'object') return defaultValue;",
+    "  if (!Object.prototype.hasOwnProperty.call(destinations, tool)) return defaultValue;",
+    "  return destinations[tool] !== false;",
+    "}",
+    "var INFINITE_META_SERVER_TWIN = { Purchase: true, Lead: true, CompleteRegistration: true, StartTrial: true, Subscribe: true, InitiateCheckout: true };",
+    "var INFINITE_META_SERVER_TWIN_NAME = { purchase: true, lead: true, sign_up: true, signup: true, complete_registration: true, start_trial: true, trial: true, subscribe: true, begin_checkout: true, initiate_checkout: true, checkout: true };",
+    "function infiniteMetaBrowserEvent(name, options) {",
+    "  var explicit = options && typeof options === 'object' ? options.metaEventName : null;",
+    "  if (typeof explicit === 'string' && INFINITE_EVENT_NAME.test(explicit)) {",
+    "    if (INFINITE_META_SERVER_TWIN[explicit]) return null;",
+    "    if (explicit === 'AddToCart' || explicit === 'ViewContent') return { method: 'track', name: explicit };",
+    "    return { method: 'trackCustom', name: explicit };",
+    "  }",
+    "  var lower = String(name).toLowerCase();",
+    "  if (lower === 'add_to_cart' || lower === 'addtocart') return { method: 'track', name: 'AddToCart' };",
+    "  if (lower === 'view_content' || lower === 'viewcontent' || lower === 'view_item') return { method: 'track', name: 'ViewContent' };",
+    "  if (INFINITE_META_SERVER_TWIN_NAME[lower]) return null;",
+    "  var destinations = options && typeof options === 'object' ? (options.destinations || options.tools) : null;",
+    "  if (destinations && typeof destinations === 'object' && destinations.meta === true) return { method: 'trackCustom', name: name };",
+    "  return null;",
+    "}",
+    "function infiniteIsMetaRequest(resource, eventName) {",
+    "  try {",
+    "    var url = new URL(String(resource));",
+    "    if (url.hostname !== 'facebook.com' && url.hostname.slice(-13) !== '.facebook.com') return false;",
+    "    if (url.pathname.indexOf('/tr') !== 0) return false;",
+    "    return url.searchParams.get('ev') === eventName;",
+    "  } catch (_error) { return false; }",
+    "}",
+    "function infiniteMetaWaiter(eventName, budgetMs) {",
+    "  var timeout = typeof budgetMs === 'number' && budgetMs >= 0 && budgetMs <= 400 ? budgetMs : 400;",
+    "  var release = function () {};",
+    "  var promise = new Promise(function (resolve) {",
+    "    var settled = false, observer = null, timer = 0;",
+    "    release = function () {",
+    "      if (settled) return;",
+    "      settled = true;",
+    "      clearTimeout(timer);",
+    "      try { if (observer) observer.disconnect(); } catch (_error) {}",
+    "      resolve();",
+    "    };",
+    "    try {",
+    "      if (typeof PerformanceObserver === 'function') {",
+    "        observer = new PerformanceObserver(function (list) {",
+    "          var entries = list.getEntries();",
+    "          for (var index = 0; index < entries.length; index += 1) if (infiniteIsMetaRequest(entries[index].name, eventName)) release();",
+    "        });",
+    "        observer.observe({ type: 'resource' });",
+    "      }",
+    "    } catch (_error) { observer = null; }",
+    "    timer = setTimeout(release, timeout);",
+    "  });",
+    "  return { promise: promise, release: release };",
+    "}",
+    "function infiniteSendMetaBrowserEvent(name, clean, options, wait) {",
+    "  if (!infiniteDestinationAllowed(options, 'meta', true)) return { sent: false, wait: null };",
+    "  var meta = infiniteMetaBrowserEvent(name, options);",
+    "  if (!meta || typeof window.fbq !== 'function' || window.fbq.__infiniteSilenced === true) return { sent: false, wait: null };",
+    "  var watcher = wait ? infiniteMetaWaiter(meta.name, options && typeof options === 'object' ? options.budgetMs : undefined) : null;",
+    "  try { window.fbq(meta.method, meta.name, infiniteCopy(clean)); } catch (_error) { if (watcher) watcher.release(); return { sent: false, wait: null }; }",
+    "  return { sent: true, wait: watcher ? watcher.promise : null };",
+    "}",
+    "function infiniteRecordEvent(name, clean, options) {",
+    "  if (!infiniteDestinationAllowed(options, 'infinite', true)) return false;",
+    "  try {",
+    "    var record = window.__infiniteRecordEvent;",
+    "    return typeof record === 'function' && record(name, infiniteCopy(clean)) === true;",
+    "  } catch (_error) { return false; }",
     "}"
   ].join("\n")
 }
@@ -91,10 +165,10 @@ export function trackSource(): string {
     "    if (typeof name !== 'string' || !INFINITE_EVENT_NAME.test(name) || !infiniteMayTrack(options)) return false;",
     "    var clean = infiniteCleanProps(props), sent = false;",
     "    try {",
-    "      if (window.posthog && typeof window.posthog.capture === 'function') { window.posthog.capture(name, infiniteCopy(clean)); sent = true; }",
+    "      if (infiniteDestinationAllowed(options, 'posthog', true) && window.posthog && typeof window.posthog.capture === 'function') { window.posthog.capture(name, infiniteCopy(clean)); sent = true; }",
     "    } catch (_error) {}",
     "    try {",
-    "      if (typeof window.gtag === 'function') {",
+    "      if (infiniteDestinationAllowed(options, 'ga4', true) && typeof window.gtag === 'function') {",
     "        var params = infiniteCopy(clean);",
     `        var lane = window.${GA4_LANE_MARKER};`,
     "        if (lane && typeof lane.id === 'string') params.send_to = lane.id;",
@@ -102,6 +176,8 @@ export function trackSource(): string {
     "        sent = true;",
     "      }",
     "    } catch (_error) {}",
+    "    if (infiniteRecordEvent(name, clean, options)) sent = true;",
+    "    if (infiniteSendMetaBrowserEvent(name, clean, options, false).sent) sent = true;",
     "    return sent;",
     "  } catch (_error) { return false; }",
     "};"

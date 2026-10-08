@@ -396,7 +396,7 @@ export function metaEventIdPageBuiltMessage(input: { file: string; line: number 
     `A Meta event id is built in the page at ${input.file}:${input.line}. Meta merges a browser event with its server ` +
     `twin only when both carry the SAME id, and the page cannot know the id the server sent — so this event is ` +
     `either counted twice or, when the server sent nothing, it is a phantom conversion. Fire the browser event only ` +
-    `with the \`metaEventId\` the server returned (\`infiniteMetaMirror(metaEventId)\`), and stay silent when it is null.`
+    `with the \`metaEventId\` the server returned (\`infiniteMetaMirror(metaEventName, metaEventId)\`), and stay silent when it is null.`
   )
 }
 

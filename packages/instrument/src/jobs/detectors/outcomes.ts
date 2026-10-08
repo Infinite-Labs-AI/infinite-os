@@ -152,6 +152,9 @@ const OUTCOME_REQUEST = /\b(?:fetch|axios\s*\.\s*post|ky\s*\.\s*post)\s*\(\s*["'
 const SUCCESS_OK = /\bif\s*\(\s*(?:await\s+)?[\w$.]+\.ok(?:\s*&&\s*[\w$]+(?:\?\.|\.)success(?:\s*===\s*true)?)?\s*\)/g
 const SUCCESS_NO_ERROR = /\bif\s*\(\s*!\s*(?:error|err|result\.error|res\.error)\s*\)/g
 const NAVIGATION = /\b(?:router\s*\.\s*(?:push|replace)|(?:window\s*\.\s*)?location\s*\.\s*(?:assign|replace)|redirect)\s*\(|\b(?:window\s*\.\s*)?location\s*\.\s*href\s*=/g
+const PURCHASE_SUCCESS_PATH = /(?:^|\/)(?:success|thank-you|thanks|order-confirmation)(?:\/|$)/i
+const PURCHASE_ANALYTICS = /\b(?:gtag\s*\(\s*["'`]event["'`]\s*,\s*["'`]purchase["'`]|posthog\s*\.\s*capture\s*\(\s*["'`]purchase["'`]|fbq\s*\(\s*["'`]track["'`]\s*,\s*["'`]Purchase["'`])/g
+const CHECKOUT_SUCCESS_MARKER = /\b(?:session_id|checkout_session|checkout\.session|payment_intent|stripe)\b/gi
 
 /**
  * §3x.3 (B3) Pure: where a conversion SUCCEEDS in the browser — the success branch of a form's submit handler (or of
@@ -164,6 +167,7 @@ export function detectConversionSuccessPaths(snapshot: RepoSnapshot): Conversion
   for (const [path, text] of snapshot.files) {
     if (isNonProductPath(path) || !isCodeFile(path) || isServerFile(path, text)) continue
     const types = new Set<ConversionType>()
+    const evidenceLines = new Map<ConversionType, number>()
     if (textMatches(text, /<form\b[^>]*>/gi).length > 0) {
       const type = pathConversionType(path)
       if (type && OUTCOME_CONVERSION_TYPES.has(type)) types.add(type)
@@ -171,6 +175,15 @@ export function detectConversionSuccessPaths(snapshot: RepoSnapshot): Conversion
     for (const request of textMatches(text, new RegExp(OUTCOME_REQUEST.source, OUTCOME_REQUEST.flags))) {
       const type = pathConversionType(`/api/${request.match[1] ?? ""}`)
       if (type && OUTCOME_CONVERSION_TYPES.has(type)) types.add(type)
+    }
+    const route = routePathOf(path, snapshot.appRoot) ?? path
+    if (PURCHASE_SUCCESS_PATH.test(route)) {
+      const purchase = codeMatches(text, new RegExp(PURCHASE_ANALYTICS.source, PURCHASE_ANALYTICS.flags))[0]
+      const checkout = purchase ?? textMatches(text, new RegExp(CHECKOUT_SUCCESS_MARKER.source, CHECKOUT_SUCCESS_MARKER.flags))[0]
+      if (checkout) {
+        types.add("purchase")
+        evidenceLines.set("purchase", checkout.line)
+      }
     }
     if (types.size === 0) continue
     const ok = codeMatches(text, new RegExp(SUCCESS_OK.source, SUCCESS_OK.flags))[0] ?? codeMatches(text, new RegExp(SUCCESS_NO_ERROR.source, SUCCESS_NO_ERROR.flags))[0]
@@ -180,8 +193,11 @@ export function detectConversionSuccessPaths(snapshot: RepoSnapshot): Conversion
       const navigation = codeMatches(text, new RegExp(NAVIGATION.source, NAVIGATION.flags)).find((entry) => awaited !== undefined && entry.index > awaited.index)
       line = navigation?.line ?? null
     }
-    if (line === null) continue
-    for (const type of types) findings.push({ file: path, line, detail: `${type} success`, conversionType: type })
+    for (const type of types) {
+      const foundLine = line ?? evidenceLines.get(type) ?? null
+      if (foundLine === null) continue
+      findings.push({ file: path, line: foundLine, detail: `${type} success`, conversionType: type })
+    }
   }
   return sortFindings(findings)
 }

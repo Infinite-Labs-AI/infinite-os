@@ -30,7 +30,11 @@
 //     backstop (L532): the visitor never waits more than one second for analytics.
 //   - Follow ONCE (L519-524): a callback that fires twice, or the backstop after the callback, cannot
 //     navigate twice.
-//   - PostHog gets the same event name; it has no delivery callback, so it never holds a click.
+//   - PostHog and Infinite get the same event name; they have no delivery callback, so they never
+//     hold a click.
+//   - Browser-only Meta events (AddToCart, ViewContent, explicit custom CTA events) carry no
+//     eventID. When the helper owns or holds a same-tab navigation, it waits for that event's `/tr`
+//     request or a 400 ms budget, ported from infinite.fast's mirror wait.
 //   - Consent, the optional gate and the OAuth-return rule are `infiniteMayTrack` (`./track.ts`). When
 //     they say no, nothing is sent and the navigation happens exactly as if no tool were present.
 //
@@ -99,22 +103,27 @@ export function trackThenNavigateSource(): string {
     "    if (typeof name !== 'string' || !INFINITE_EVENT_NAME.test(name) || !infiniteMayTrack()) { leave(); return; }",
     "    var clean = infiniteCleanProps(props);",
     "    try { if (window.posthog && typeof window.posthog.capture === 'function') window.posthog.capture(name, infiniteCopy(clean)); } catch (_error) {}",
+    "    infiniteRecordEvent(name, clean, null);",
     `    var lane = window.${GA4_LANE_MARKER};`,
     "    var ours = !!(lane && typeof lane.id === 'string');",
     "    // R4-5: the site's OWN GA4 started too once gtag.js itself loaded (it defines google_tag_manager); a stub with no",
     "    // loader (a guarded preview, consent not given) never calls back, so it still holds nothing (F15).",
     "    var loaded = !!(window.google_tag_manager && typeof window.google_tag_manager === 'object');",
     "    var started = typeof window.gtag === 'function' && (ours || loaded);",
+    "    var metaResult = infiniteSendMetaBrowserEvent(name, clean, null, sameTab);",
     "    if (!started) {",
-    "      // GA4 did not start here: send what we can, hold nothing.",
+    "      // GA4 did not start here: send what we can, and only hold for a browser-only Meta request.",
     "      try { if (typeof window.gtag === 'function') window.gtag('event', name, infiniteCopy(clean)); } catch (_error) {}",
-    "      leave();",
+    "      if (sameTab && metaResult.wait) {",
+    "        try { if (event && typeof event.preventDefault === 'function' && !event.defaultPrevented) event.preventDefault(); } catch (_error) {}",
+    "        metaResult.wait.then(follow, follow);",
+    "      } else leave();",
     "      return;",
     "    }",
     "    var params = infiniteCopy(clean);",
     "    if (ours) params.send_to = lane.id;",
     "    if (sameTab) {",
-    "      params.event_callback = follow;",
+    "      params.event_callback = metaResult.wait ? function () { metaResult.wait.then(follow, follow); } : follow;",
     `      params.event_timeout = ${NAVIGATION_BUDGET_MS};`,
     "      if (event && typeof event.preventDefault === 'function') event.preventDefault();",
     "    }",

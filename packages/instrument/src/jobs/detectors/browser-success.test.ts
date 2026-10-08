@@ -29,4 +29,18 @@ describe("browser outcome success branches", () => {
   it.each(["res.ok || data.success", "res.ok && !data.success", "!res.ok && data.success", "res.ok && data.failure"])("does not turn a failure or ambiguous branch into success: %s", condition => {
     expect(detectConversionSuccessPaths(snapshotFromFiles({ [FILE]: form(condition) }))).toEqual([])
   })
+
+  it("recognizes a Stripe-style /success page with existing purchase analytics as the purchase success surface", () => {
+    const file = "pages/success.tsx"
+    const snapshot = snapshotFromFiles({
+      [file]: `export default function Success() {
+  const sessionId = new URLSearchParams(location.search).get("session_id")
+  if (sessionId) {
+    gtag("event", "purchase", { transaction_id: sessionId })
+  }
+  return <p>Thanks</p>
+}`
+    })
+    expect(detectConversionSuccessPaths(snapshot)).toEqual([{ file, line: 4, detail: "purchase success", conversionType: "purchase" }])
+  })
 })

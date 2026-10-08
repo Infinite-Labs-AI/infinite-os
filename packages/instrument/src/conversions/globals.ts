@@ -5,7 +5,7 @@
 // HTML and Vite) or in the Next bootstrap, plus typed, no-op-safe wrappers exported from the managed Next
 // module. Nothing here runs on its own: every global waits for the site's code to call it.
 //
-//   infiniteTrack(name, props?, { gate? })                 ./track.ts
+//   infiniteTrack(name, props?, { gate?, destinations?, metaEventName? }) ./track.ts
 //   infiniteTrackThenNavigate(event, hrefOrAnchor, name, props?)  ./navigate.ts
 //   infiniteIdentify(id) / infiniteReset()                 ./identify.ts
 //   infiniteMetaMirror(metaEventName, metaEventId, { wait?, identity?, budgetMs?, gate? })
@@ -133,6 +133,12 @@ export function nextHelperWrappersSource(): string {
     "  /** Your own consent check. The helper sends nothing unless it returns true. */",
     "  gate?: () => boolean",
     "}",
+    "export interface InfiniteTrackOptions extends InfiniteGateOption {",
+    "  /** Set a destination to false to avoid double-counting an event the site already sends there. */",
+    "  destinations?: { ga4?: boolean; posthog?: boolean; meta?: boolean; infinite?: boolean }",
+    "  /** Optional browser-only Meta event name. Server-twin names such as Purchase and Lead are ignored here. */",
+    "  metaEventName?: string",
+    "}",
     "export interface InfiniteClickEvent {",
     "  preventDefault(): void",
     "  defaultPrevented?: boolean",
@@ -176,8 +182,8 @@ export function nextHelperWrappersSource(): string {
     '  return typeof window === "undefined" ? null : (window as unknown as InfiniteHelperWindow)',
     "}",
     "",
-    "/** Send one named event to PostHog and GA4. Never to Meta. */",
-    "export function infiniteTrack(name: string, props?: InfiniteEventProps, options?: InfiniteGateOption): boolean {",
+    "/** Send one named browser event to the live tools, without page-built Meta event ids. */",
+    "export function infiniteTrack(name: string, props?: InfiniteEventProps, options?: InfiniteTrackOptions): boolean {",
     "  const helpers = infiniteHelpers()",
     "  if (!helpers || typeof helpers.infiniteTrack !== \"function\") return false",
     "  try {",
