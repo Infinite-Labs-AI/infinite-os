@@ -57,6 +57,14 @@ export const META_ADS_HOURLY_BREAKDOWN = "hourly_stats_aggregated_by_advertiser_
 /** Fields of the campaign hourly read. Meta returns no reach by hour, so none is asked for. */
 export const META_ADS_HOURLY_FIELDS = "campaign_id,date_start,date_stop,spend,impressions,clicks,inline_link_clicks,account_currency";
 
+/**
+ * Fields of the AD hourly read (engine 0086): delivery plus actions[] / action_values[] per hour. Meta's hourly
+ * breakdown excludes only unique_* fields, reach, frequency and video_* fields; actions and action_values are allowed
+ * (confirmed on a live level=ad hourly read, 2026-10-09). Ad set and campaign hours are sums of these ad rows.
+ */
+export const META_ADS_AD_HOURLY_FIELDS =
+  "ad_id,adset_id,campaign_id,date_start,date_stop,spend,impressions,clicks,inline_link_clicks,actions,action_values,account_currency";
+
 /** The longest window one hourly query may cover: today plus a restatement window. */
 export const META_ADS_HOURLY_MAX_WINDOW_DAYS = 8;
 
