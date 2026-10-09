@@ -728,7 +728,9 @@ describe("analytics command interception", () => {
         rmSync(home.root, { recursive: true, force: true });
         rmSync(site, { recursive: true, force: true });
       }
-    }
+    },
+    // It runs the real analytics harness (the whole infinite-tag package loads), ~2 s locally and over 5 s on CI.
+    20_000
   );
 
   it("`infinite analytics --check` with a live ready bridge runs the harness", async () => {
@@ -755,7 +757,8 @@ describe("analytics command interception", () => {
       rmSync(home.root, { recursive: true, force: true });
       rmSync(site, { recursive: true, force: true });
     }
-  });
+    // The real analytics harness runs here too (see above).
+  }, 20_000);
 });
 
 // ── `infinite contacts` interception (contacts-cli-sync design, Phase 2) ─────
