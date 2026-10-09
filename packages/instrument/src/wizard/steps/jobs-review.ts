@@ -21,7 +21,7 @@ import { AGENT_LABEL } from "../../agents/narration.js"
 import { sanitizeUntrusted } from "../../agents/sanitize.js"
 import { CHECK_LABELS } from "../../jobs/check-words.js"
 import { applyReview, withNote, type Transition } from "../../jobs/state-machine.js"
-import { jobsReviewerBrief } from "../../review/brief.js"
+import { quotedReadCheck, jobsReviewerBrief } from "../../review/brief.js"
 import { reviewQuestionsFor, type QuestionFacts, type ReviewQuestion } from "../../review/questions.js"
 import type { Scanner } from "../../review/scan.js"
 import type { AgentKind, JobReviewResult, ReviewFailure } from "../contracts/agents.js"
@@ -175,7 +175,7 @@ async function runJobsReviewer(host: JobsReviewHost, reviewer: AgentKind, dir: s
     if (shouldAskAgain(result)) result = await reviewJobs({ worktreeDir: dir, reviewer, brief: `${text}\n\nYour previous answer did not match the JSON schema. Return JSON only, exactly matching it.`, schema: "jobs", onNarrate })
     return result
   }
-  const read = (result: JobReviewResult | ReviewFailure) => "error" in result || result.summary.trimStart().startsWith(`read-check: ${nonce}`)
+  const read = (result: JobReviewResult | ReviewFailure) => "error" in result || quotedReadCheck(result.summary) === nonce
   let result = await once(brief)
   if (!read(result)) result = await once(`${brief}\n\nYour last answer shows you could not read the files. Read them now with the read-only commands named above, then answer.`)
   if (!read(result)) return { error: "error", message: "it could not read the change" }

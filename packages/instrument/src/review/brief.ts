@@ -290,13 +290,25 @@ export function redactReadCheck(review: ReviewResult, nonce: string): ReviewResu
 }
 
 /**
+ * The nonce a summary quotes after `read-check:`, without punctuation the reviewer wrapped it in (a live review wrote
+ * "read-check: a01209a6a060ad6c." and was thrown away as blind over the full stop).
+ */
+export function quotedReadCheck(summary: string): string | null {
+  const text = summary.trimStart()
+  if (!text.startsWith(READ_CHECK_PREFIX)) return null
+  const token = text.slice(READ_CHECK_PREFIX.length).trimStart().split(/\s/, 1)[0] ?? ""
+  const bare = token.replace(/^[`"'(\[<]+/, "").replace(/[`"')\]>.,;:!?]+$/, "")
+  return bare.length > 0 ? bare : null
+}
+
+/**
  * A complete review has a verified read-check and every required checklist row, with none left unchecked.
  * Missing evidence stays visible as an incomplete review. The nonce is redacted either way
  * (`redactReadCheck`).
  */
 export function classifyReview(review: ReviewResult, nonce: string): ClassifiedReview {
   const summary = review.summary.trimStart()
-  const quoted = nonce.length > 0 && summary.startsWith(`${READ_CHECK_PREFIX} `) && summary.slice(READ_CHECK_PREFIX.length).trimStart().split(/\s/, 1)[0] === nonce
+  const quoted = nonce.length > 0 && quotedReadCheck(summary) === nonce
   const clean = omitOwnerPolicyReview(redactReadCheck(review, nonce))
   const unchecked: string[] = REVIEW_ITEMS.filter(item => item !== "R6" && (!clean.checklist.some(row => row.item === item) || clean.checklist.some(row => row.item === item && row.status === "cant_tell")))
   if (!quoted) unchecked.unshift("read-check missing or incorrect")
