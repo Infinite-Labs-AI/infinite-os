@@ -98,7 +98,8 @@ describe("Infinite OS migration stack", () => {
       "0081_meta_ads_window_total_dimension.sql",
       "0082_stripe_checkout_sessions.sql",
       "0083_remove_dead_x_metrics.sql",
-      "0084_meta_local_publishing.sql"
+      "0084_meta_local_publishing.sql",
+      "0085_meta_ads_daily_breakdowns_and_hourly.sql"
     ]);
   });
 
@@ -1110,7 +1111,8 @@ describe("Infinite OS migration stack", () => {
       "0081_meta_ads_window_total_dimension.sql",
       "0082_stripe_checkout_sessions.sql",
       "0083_remove_dead_x_metrics.sql",
-      "0084_meta_local_publishing.sql"
+      "0084_meta_local_publishing.sql",
+      "0085_meta_ads_daily_breakdowns_and_hourly.sql"
     ]);
   });
 
@@ -1259,6 +1261,31 @@ describe("Infinite OS migration stack", () => {
     expect(sql).not.toContain("drop table");
     expect(sql).not.toContain("drop column");
     expect(sql).not.toContain("delete ");
+  });
+
+  it("adds daily ad set breakdowns and campaign hourly delivery, each with a per-day receipt, idempotently (0085)", () => {
+    const migration = loadMigrations().find((candidate) => candidate.id === "0085_meta_ads_daily_breakdowns_and_hourly.sql");
+    const sql = (migration?.sql ?? "").toLowerCase().replace(/--[^\n]*/g, "").replace(/\s+/g, " ").trim();
+    for (const table of [
+      "meta_ads_adset_breakdown_daily",
+      "meta_ads_adset_breakdown_daily_coverage",
+      "meta_ads_campaign_hourly",
+      "meta_ads_campaign_hourly_coverage",
+    ]) {
+      expect(sql).toContain(`create table if not exists ${table} (`);
+    }
+    expect(sql.match(/check \(dimension in \('device_platform', 'publisher_platform', 'platform_position'\)\)/g)).toHaveLength(2);
+    expect(sql).toContain("check ((dimension = 'platform_position') = (parent_value <> ''))");
+    expect(sql).toContain("primary key (workspace_id, source_id, ad_account_id, dimension, occurred_on)");
+    expect(sql).toContain("hour smallint not null check (hour between 0 and 23)");
+    expect(sql).toContain("primary key (workspace_id, source_id, ad_account_id, occurred_on, campaign_id, hour)");
+    expect(sql).toContain("check (settled = (observed_local_hour is null))");
+    expect(sql.match(/row_count integer not null check \(row_count >= 0\)/g)).toHaveLength(2);
+    // New tables only: the weekly window tables of 0080/0081 are untouched and nothing is dropped or rewritten.
+    expect(sql).not.toContain("meta_ads_adset_breakdown_windows");
+    expect(sql).not.toContain("drop ");
+    expect(sql).not.toContain("alter ");
+    expect(sql).not.toContain("delete from");
   });
 
   it("stops advertising the dead X metrics and views, and keeps the X tables (0083)", () => {
