@@ -231,7 +231,7 @@ export function computeVerdict(input: VerdictInput): ReportVerdict {
     // The site keeps its trackers off until a visitor accepts its own banner, and the test visit does not accept it:
     // nothing was measured, which is never a failure (real visitors who accept are measured from their own visits).
     headline = `${input.site}: not measured: ${HELD_BY_BANNER_WORDS}`
-    if (unchecked.length > 0) headline += ` · ${unchecked.length} earlier ${plural(unchecked.length, "problem", "problems")} not re-checked after the deploy (${listNames(unchecked)})`
+    if (unchecked.length > 0) headline += ` · ${uncheckedWords(unchecked)}`
     if (input.installedUnknown !== null) headline += ` · ${installedUnknownWords(input.installedUnknown)}`
   } else if (state === "unconfirmed") {
     const received = tools.filter((tool) => tool.receipt === "verified")
@@ -249,7 +249,7 @@ export function computeVerdict(input: VerdictInput): ReportVerdict {
       const many = notConnected.length > 1
       headline += `; ${names} ${many ? "send" : "sends"}, but ${many ? "their IDs are" : "its ID is"} not checked (not connected in Infinite)`
     }
-    if (unchecked.length > 0) headline += ` · ${unchecked.length} earlier ${plural(unchecked.length, "problem", "problems")} not re-checked after the deploy (${listNames(unchecked)})`
+    if (unchecked.length > 0) headline += ` · ${uncheckedWords(unchecked)}`
     const ungraded = tools.filter((tool) => tool.installed && !tool.fired && tool.ungraded)
     if (ungraded.length > 0) headline += ` · ${andList(ungraded.map((tool) => SHORT_LABEL[tool.tool]))} could not be graded on the real visit`
     if (input.installedUnknown !== null) headline += ` · ${installedUnknownWords(input.installedUnknown)}`
@@ -267,9 +267,44 @@ export function computeVerdict(input: VerdictInput): ReportVerdict {
 function withDoes(input: VerdictInput, status: string): string {
   const does = input.does?.trim() ?? ""
   const room = VERDICT_LIMITS.headlineMaxChars - status.length - 1
-  if (does.length === 0 || room < 40) return status.slice(0, VERDICT_LIMITS.headlineMaxChars)
-  const lead = does.length > room ? `${does.slice(0, room - 1).trimEnd()}…` : does
-  return `${lead} ${status}`
+  if (does.length === 0 || room < 40) return wordsWithin(status, VERDICT_LIMITS.headlineMaxChars)
+  const lead = doesWithin(does, room)
+  return lead ? `${lead} ${status}` : status
+}
+
+/**
+ * Live run 4: the "does" sentence within `room` characters, never cut mid-word ("adds the analytics re…"). Whole
+ * clauses ("; "-separated) are dropped from the end, so the first one (the shop events) stays; a first clause wider
+ * than the room ends at a word with "…".
+ */
+export function doesWithin(does: string, room: number): string {
+  if (does.length <= room) return does
+  const clauses = does.replace(/\.$/, "").split("; ")
+  for (let keep = clauses.length - 1; keep >= 1; keep -= 1) {
+    const sentence = `${clauses.slice(0, keep).join("; ")}.`
+    if (sentence.length <= room) return sentence
+  }
+  return wordsWithin(clauses[0]!, room)
+}
+
+/** `text` within `max` characters, ending at a whole word with "…" when it had to be shortened. */
+export function wordsWithin(text: string, max: number): string {
+  if (text.length <= max) return text
+  const words = text.split(" ")
+  let out = ""
+  for (const word of words) {
+    const next = out ? `${out} ${word}` : word
+    if (next.length + 1 > max) break
+    out = next
+  }
+  return out ? `${out.replace(/[,;:·\s]+$/, "")}…` : ""
+}
+
+/** The headline's clause for problems found before the merge and not measured again (said once: report.ts skips its own line). */
+export const UNCHECKED_WORDS = "not re-checked after the deploy"
+
+function uncheckedWords(unchecked: readonly string[]): string {
+  return `${unchecked.length} earlier ${plural(unchecked.length, "problem", "problems")} ${UNCHECKED_WORDS} (${listNames(unchecked)})`
 }
 
 /** The headline's words for a proof visit the site's own cookie banner kept silent. */

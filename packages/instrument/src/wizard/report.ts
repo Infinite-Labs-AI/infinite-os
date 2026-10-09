@@ -49,7 +49,7 @@ import {
   type ReportV2
 } from "./contracts/report.js"
 import { FORBIDDEN_CHECKBOX } from "./contracts/git-host.js"
-import { computeVerdict, verdictErrors } from "./verdict.js"
+import { computeVerdict, UNCHECKED_WORDS, verdictErrors } from "./verdict.js"
 import { FINISH_LINE_WORDS, andWords, infiniteFindingLine, infiniteFindings, ownerReviewFindings, ownerReviewSuggestions, ownerStepsHeading, reviewAskLine, reviewAsksHeading } from "./pr-summary.js"
 import type { OwnerSetupSteps, VerdictOpenFinding } from "./contracts/report.js"
 
@@ -849,6 +849,8 @@ export function verdictReasonLines(report: ReportV2): string[] {
   return verdict.reasons.flatMap((entry) => {
     const words = VERDICT_REASON_WORDS[entry.kind]
     if (words === null || entry.names.length === 0) return []
+    // Live run 4: the headline already names the problems not re-checked after the deploy; said once.
+    if (entry.kind === "earlier_problem_unchecked" && verdict.headline.includes(UNCHECKED_WORDS)) return []
     const more = entry.count > entry.names.length ? ` and ${entry.count - entry.names.length} more` : ""
     return [`${words}: ${entry.names.join(", ")}${more}`]
   })

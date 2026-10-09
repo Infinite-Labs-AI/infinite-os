@@ -549,6 +549,18 @@ export interface ServerEventsHandoffFacts {
   webhookUrlPath: string
 }
 
+/** "a", "a and b", "a, b and c" (plain words). */
+const andList = (items: readonly string[]): string => (items.length <= 1 ? items.join("") : `${items.slice(0, -1).join(", ")} and ${items.at(-1)}`)
+
+/**
+ * Whether the server code reads LEAD_ID_SECRET: a sign-up's event id (`lead:<HMAC of the email>`), and the hashed
+ * `external_id` a purchase or any other outcome with the customer's email carries (`stripeCheckoutPayer` and the
+ * generic report both call `infiniteLeadId`). A checkout start has no email, so it alone never needs it.
+ */
+export function usesPersonId(conversions: readonly string[]): boolean {
+  return conversions.some((name) => name !== "begin_checkout")
+}
+
 const listOf = (names: readonly string[]): string =>
   names.length <= 1 ? names.map((name) => `\`${name}\``).join("") : `${names.slice(0, -1).map((name) => `\`${name}\``).join(", ")} and \`${names.at(-1)}\``
 
@@ -622,11 +634,14 @@ export const serverLaneWizardCopy = {
         `In **Site Analytics → Settings → Conversions**, add ${listOf(facts.conversions)}, each with the source **Your server**.`,
         `In **Site Analytics → Settings → Conversions → Server events**, click **Generate secret**. It is shown once: paste it straight into the next step, never into chat, email or a file.`,
         [
-          `In your hosting's **production** environment variables, add:`,
-          `\`${SERVER_LANE_SOURCE_KEY_ENV}\` = \`${facts.siteSourceKey ?? "site_..."}\`,`,
-          `\`${SERVER_LANE_SECRET_ENV}\` = the secret from the step above,`,
-          `\`LEAD_ID_SECRET\` = a long random value you make once and never change (for example the output of \`openssl rand -hex 32\`)`,
-          facts.usesStripe ? `and \`${STRIPE_WEBHOOK_SECRET_ENV}\` (from the Stripe step below).` : ".",
+          `In your hosting's **production** environment variables, add: ${andList([
+            `\`${SERVER_LANE_SOURCE_KEY_ENV}\` = \`${facts.siteSourceKey ?? "site_..."}\``,
+            `\`${SERVER_LANE_SECRET_ENV}\` = the secret from the step above`,
+            // Live run 4: only when the code reads it (a sign-up's id, a buyer's or subscriber's match id), never for
+            // checkout starts alone.
+            ...(usesPersonId(facts.conversions) ? ["`LEAD_ID_SECRET` = a long random value you make once and never change (for example the output of `openssl rand -hex 32`); it turns each customer's email into one private id Meta matches them by"] : []),
+            ...(facts.usesStripe ? [`\`${STRIPE_WEBHOOK_SECRET_ENV}\` (from the Stripe step below)`] : [])
+          ])}.`,
           facts.envSetByInfinite
             ? `Infinite can add the first two to your connected Vercel project for you: run \`infinite analytics\` with the Infinite app open. Then redeploy.`
             : "Then redeploy: a running deployment does not pick up new variables."
