@@ -212,6 +212,83 @@ export function writeInstallManifestIfChanged(
   }
 }
 
+/** One receipt describes one app: a run for another app root or framework is refused before it writes anything. */
+export function assertReceiptDescribesApp(
+  previous: InstallManifest | null,
+  run: Pick<InstallManifest, "appRoot" | "framework">
+): void {
+  if (!previous || (previous.appRoot === run.appRoot && previous.framework === run.framework)) return
+  throw new Error(
+    `Refusing to record this install: ${installManifestRelativePath} records a ${previous.framework} install at "${previous.appRoot}"; this run installs ${run.framework} at "${run.appRoot}". One receipt describes one app: uninstall the earlier install first (npx infinite-tag uninstall).`
+  )
+}
+
+/** Which halves of the install THIS run planned, and so owns in the receipt it writes. */
+export interface InstallReceiptScope {
+  /** The browser tag (providers, its managed files, ids, manual wiring) was planned and rendered. */
+  browser: boolean
+  /** The server lane was planned and written. */
+  serverLane: boolean
+}
+
+/**
+ * ONE receipt per repo: a run merges what it did into the receipt already there, never replaces it.
+ * (`install --server-lane` after the wizard's browser tag once replaced the tag's record, so uninstall
+ * would have left the tag behind and doctor would have seen no tag.) The rules, the same ones the
+ * wizard's re-runs follow (`WizardInstaller.writeReceipt` builds on the current receipt, its edits are
+ * kept oldest first, its ids stand unless this run emits new ones):
+ *
+ *  - files, envKeys: the union, earlier entries first (stable, so an identical re-run writes nothing).
+ *  - contentHashes, configOwnership: the union; this run's entry wins for every path it wrote.
+ *  - edits: kept in order, this run's new records appended (by id), so uninstall still walks them newest first.
+ *  - the browser half (providers, workspaceId, ids, requiresManual): this run's when it planned the browser
+ *    tag, else the earlier receipt's, untouched.
+ *  - serverLane: this run's when it planned the lane (its `created` files unioned with the earlier record's),
+ *    else the earlier receipt's.
+ *  - managedCapture, runId: only the wizard writes them; kept unless this run carries its own.
+ *
+ * One receipt describes one app: a different app root or framework is refused, never silently merged.
+ */
+export function mergeInstallManifest(
+  previous: InstallManifest | null,
+  run: InstallManifest,
+  scope: InstallReceiptScope
+): InstallManifest {
+  if (!previous) return run
+  assertReceiptDescribesApp(previous, run)
+  const browser = scope.browser ? run : previous
+  // This run's lane record, keeping every whole file an earlier run's lane record lists as created (the
+  // wizard's server-events handoff is one): uninstall removes exactly what `created` lists.
+  const laneCreated = [...new Set([...(previous.serverLane?.created ?? []), ...(run.serverLane?.created ?? [])])]
+  const lane =
+    scope.serverLane && run.serverLane
+      ? { ...run.serverLane, ...(laneCreated.length > 0 ? { created: laneCreated } : {}) }
+      : previous.serverLane
+  const configOwnership = { ...previous.configOwnership, ...run.configOwnership }
+  const known = new Set((previous.edits ?? []).map((edit) => edit.id))
+  const edits = [...(previous.edits ?? []), ...(run.edits ?? []).filter((edit) => !known.has(edit.id))]
+  const managedCapture = run.managedCapture ?? previous.managedCapture
+  const runId = run.runId ?? previous.runId
+  return {
+    ...(managedCapture ? { managedCapture } : {}),
+    workspaceId: browser.workspaceId,
+    ...(runId ? { runId } : {}),
+    appRoot: run.appRoot,
+    framework: run.framework,
+    providers: browser.providers,
+    files: [...new Set([...previous.files, ...run.files])],
+    envKeys: [...new Set([...previous.envKeys, ...run.envKeys])],
+    contentHashes: { ...previous.contentHashes, ...run.contentHashes },
+    ...(Object.keys(configOwnership).length > 0 ? { configOwnership } : {}),
+    ...(lane ? { serverLane: lane } : {}),
+    ...(browser.requiresManual && browser.requiresManual.length > 0 ? { requiresManual: browser.requiresManual } : {}),
+    ...(edits.length > 0 ? { edits } : {}),
+    ...(browser.ids ? { ids: browser.ids } : {}),
+    wiringVersion: run.wiringVersion,
+    verifiedAt: run.verifiedAt
+  }
+}
+
 export function computeContentHashes(root: string, files: string[]): Record<string, string> {
   const contentHashes: Record<string, string> = {}
   for (const relativePath of files) {

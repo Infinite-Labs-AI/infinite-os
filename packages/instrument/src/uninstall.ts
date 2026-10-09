@@ -150,7 +150,12 @@ export function uninstallInstallation(options: UninstallInstallationOptions): Un
   // A server-lane-only manifest (no providers) never ran the pixel adapter, so it has nothing
   // to reverse there; the lane's own reversal below is hash-gated per file.
   // An edits-only receipt (the wizard improved adopted tags and installed nothing) has no pixel wiring either.
-  const runAdapter = manifest.providers.length > 0 || (!manifest.serverLane && (manifest.edits ?? []).length === 0)
+  // A receipt that merged a lane into a browser install with no providers of its own (the conversion helpers
+  // beside an ADOPTED tag) still records the adapter's managed files, so the adapter reverses them.
+  const runAdapter =
+    manifest.providers.length > 0 ||
+    recordsAdapterManagedFiles(manifest) ||
+    (!manifest.serverLane && (manifest.edits ?? []).length === 0)
   const adapter = getFrameworkAdapter(manifest.framework)
   if (runAdapter && !adapter?.uninstall) {
     throw new Error(`No uninstall implementation is registered for ${manifest.framework}.`)
@@ -227,6 +232,22 @@ export function uninstallInstallation(options: UninstallInstallationOptions): Un
     manifestPath: hasWiringLeftover ? null : manifestPath,
     ...((manifest.edits ?? []).length > 0 ? { editsReversed: edits.reversed, editsLeftAsIs: edits.leftAsIs } : {})
   }
+}
+
+/**
+ * True when the receipt lists a managed file that is not the server lane's, not a recorded edit's and not
+ * the managed capture's: one only the pixel adapter wrote (and so only its uninstall takes off).
+ */
+function recordsAdapterManagedFiles(manifest: InstallManifest): boolean {
+  const lane = manifest.serverLane
+  const elsewhere = new Set<string>([
+    ...(lane?.middleware ? [lane.middleware] : []),
+    ...(lane?.module ? [lane.module] : []),
+    ...(lane?.created ?? []),
+    ...(manifest.edits ?? []).map((edit) => edit.file),
+    ...(manifest.managedCapture ? [manifest.managedCapture.module, ...manifest.managedCapture.entrypoints] : [])
+  ])
+  return manifest.files.some((file) => !elsewhere.has(file))
 }
 
 function removeDirIfEmpty(path: string): void {
