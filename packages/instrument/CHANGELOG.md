@@ -3,7 +3,7 @@
 All notable changes to the `infinite-tag` npm package (`packages/instrument`). Versions before
 0.5.0 are recorded in git history only (`git log -- packages/instrument`).
 
-## Unreleased
+## 0.13.0 — 2026-10-09
 
 ### One outcome helper on every host, with Stripe and lead reports built in
 
