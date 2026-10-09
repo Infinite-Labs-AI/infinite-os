@@ -538,6 +538,11 @@ describe("Meta Ads extended reads against real PGlite", () => {
       inline_link_clicks: "3", account_currency: "GBP", hourly_stats_aggregated_by_advertiser_time_zone: bucket(hour), ...extra,
     });
     const LEAD = { actions: [{ action_type: "offsite_conversion.fb_pixel_lead", value: "1", "1d_click": "1", "7d_click": "1" }] };
+    // Meta's Results field by the hour (live level=ad hourly read, 2026-10-09): the ad set's indicator on every row,
+    // WITH values only in an hour Meta credited one. Placeholder shapes, no real ids.
+    const TRIAL_INDICATOR = "conversions:start_trial_website";
+    const TRIAL_CREDITED = { results: [{ indicator: TRIAL_INDICATOR, values: [{ value: "1", attribution_windows: ["7d_click"] }] }] };
+    const TRIAL_NONE = { results: [{ indicator: TRIAL_INDICATOR }] };
     const PURCHASE = {
       actions: [{ action_type: "purchase", value: "2", "7d_click": "1", "1d_view": "1" }],
       action_values: [{ action_type: "purchase", value: "80", "7d_click": "50", "1d_view": "30" }],
@@ -545,8 +550,8 @@ describe("Meta Ads extended reads against real PGlite", () => {
 
     it("reads ads by advertiser-time-zone hour with actions and values, follows every page, and writes honest receipts", async () => {
       const scope = await primed();
-      const page1 = [adRow("a1", "2026-10-07", 9, "3.5", LEAD), adRow("a2", "2026-10-07", 9, "1")];
-      const page2 = [adRow("a1", "2026-10-08", 0, "0.25"), adRow("a2", "2026-10-08", 14, "2", PURCHASE)];
+      const page1 = [adRow("a1", "2026-10-07", 9, "3.5", LEAD), adRow("a2", "2026-10-07", 9, "1", TRIAL_CREDITED)];
+      const page2 = [adRow("a1", "2026-10-08", 0, "0.25", TRIAL_NONE), adRow("a2", "2026-10-08", 14, "2", PURCHASE)];
       const { result, seen } = await withMeta({
         day: "2026-10-08",
         insights: (_level, url) => url.searchParams.get("after") === "p2"
@@ -558,7 +563,7 @@ describe("Meta Ads extended reads against real PGlite", () => {
       expect(url.searchParams.get("level")).toBe("ad");
       expect(url.searchParams.get("breakdowns")).toBe("hourly_stats_aggregated_by_advertiser_time_zone");
       expect(url.searchParams.get("time_increment")).toBe("1");
-      expect(url.searchParams.get("fields")).toBe("ad_id,adset_id,campaign_id,date_start,date_stop,spend,impressions,clicks,inline_link_clicks,actions,action_values,account_currency");
+      expect(url.searchParams.get("fields")).toBe("ad_id,adset_id,campaign_id,date_start,date_stop,spend,impressions,clicks,inline_link_clicks,actions,action_values,results,account_currency");
       expect(url.searchParams.get("action_attribution_windows")).toBe(JSON.stringify(["1d_click", "7d_click", "1d_view"]));
       expect(url.searchParams.has("action_report_time")).toBe(false);
       expect(JSON.parse(url.searchParams.get("filtering")!)[0].field).toBe("ad.effective_status");
@@ -568,10 +573,15 @@ describe("Meta Ads extended reads against real PGlite", () => {
         "select occurred_on::text as day, hour, ad_id, adset_id, campaign_id, spend::float8 as spend, actions_raw from meta_ads_ad_hourly where source_id=$1 order by occurred_on, hour, ad_id",
         [scope.sourceId],
       )).toEqual([
-        { day: "2026-10-07", hour: 9, ad_id: "a1", adset_id: "s1", campaign_id: "c1", spend: 3.5, actions_raw: { actions: LEAD.actions, action_values: [] } },
-        { day: "2026-10-07", hour: 9, ad_id: "a2", adset_id: "s1", campaign_id: "c1", spend: 1, actions_raw: { actions: [], action_values: [] } },
-        { day: "2026-10-08", hour: 0, ad_id: "a1", adset_id: "s1", campaign_id: "c1", spend: 0.25, actions_raw: { actions: [], action_values: [] } },
-        { day: "2026-10-08", hour: 14, ad_id: "a2", adset_id: "s1", campaign_id: "c1", spend: 2, actions_raw: PURCHASE },
+        // results kept verbatim under the daily rows' key; absent from Meta's row = null (unknown, never 0).
+        { day: "2026-10-07", hour: 9, ad_id: "a1", adset_id: "s1", campaign_id: "c1", spend: 3.5,
+          actions_raw: { actions: LEAD.actions, action_values: [], provider_result_evidence: { results: null } } },
+        { day: "2026-10-07", hour: 9, ad_id: "a2", adset_id: "s1", campaign_id: "c1", spend: 1,
+          actions_raw: { actions: [], action_values: [], provider_result_evidence: { results: TRIAL_CREDITED.results } } },
+        { day: "2026-10-08", hour: 0, ad_id: "a1", adset_id: "s1", campaign_id: "c1", spend: 0.25,
+          actions_raw: { actions: [], action_values: [], provider_result_evidence: { results: TRIAL_NONE.results } } },
+        { day: "2026-10-08", hour: 14, ad_id: "a2", adset_id: "s1", campaign_id: "c1", spend: 2,
+          actions_raw: { ...PURCHASE, provider_result_evidence: { results: null } } },
       ]);
       expect(await db.query("select occurred_on::text as day, row_count, settled, observed_local_hour from meta_ads_ad_hourly_coverage where source_id=$1 order by occurred_on", [scope.sourceId]))
         .toEqual([
