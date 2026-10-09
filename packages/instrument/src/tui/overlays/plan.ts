@@ -1,7 +1,5 @@
-// `plan` (§3d.3): the one plan screen. It shows the user's four decisions (consent mode, conversion names,
-// privacy text, the npm-install line) and every plan line. Lines that need approval start ticked (ENTER
-// approves the plan as shown); SPACE skips a line ("that job is skipped"); E edits an editable line (the
-// consent line flips between its two values, the others take text). ESC leaves it for later (the run parks).
+// The plan shows repository work under one continue. Questions can be edited; package/account
+// changes start unchecked and require an explicit selection. ESC leaves the run for later.
 //
 // The consent mode is never assumed: when the plan has a consent line and no value was chosen, ENTER moves to
 // it and asks for a choice instead of answering.
@@ -18,6 +16,9 @@
 //   verify F18), so it is marked on the next key, once it was drawn.
 // - the box keeps its height while the plan scrolls (F19): the body takes every row it was given, so a notice
 //   or a shorter window never shrinks the box and brings the step list back above it.
+import { isContinuedWork } from "../../install/plan-permission.js"
+import { conversionWords } from "../../install/conversion-words.js"
+import { sanitizeUntrustedBlock } from "../../agents/sanitize.js"
 import { ASK_CANCELLED, type AskPayloads, type PlanLine } from "../../wizard/contracts/asks.js"
 import { wrapAnsi } from "../ansi.js"
 import type { Key } from "../keys.js"
@@ -27,8 +28,10 @@ import { OVERLAY_TEXT_CAPS } from "./types.js"
 
 export interface PlanState {
   cursor: number
-  /** Per approval line: false = skipped. Absent = approved (the plan as shown). */
+  /** Excluded repository actions and unchecked explicit choices. */
   skipped: string[]
+  /** Explicit toggles, distinct from an untouched unchecked opt-in. */
+  touched?: string[]
   edits: Record<string, string>
   editing: { lineId: string; buffer: string } | null
   notice: string | null
@@ -41,9 +44,10 @@ export interface PlanState {
 }
 
 const CONSENT_VALUES = ["not_required", "required"] as const
+// What Infinite's tag does, in plain words. Nothing about consent is asked: the tag runs like the site's own pixels.
 const CONSENT_LABEL: Record<string, string> = {
-  not_required: "collect by default (covers Infinite only)",
-  required: "wait for consent (your banner decides; Infinite never changes it)"
+  not_required: "starts and stops with your site's own analytics (on page load when the site has none)",
+  required: "waits for your banner's yes; connect the signal below"
 }
 const EDIT_MAX = 2000
 
@@ -59,6 +63,16 @@ function consentValue(payload: PlanPayload, state: PlanState): string | null {
   return payload.decisions.consentMode
 }
 
+function visiblePayload(payload: PlanPayload, state: PlanState): PlanPayload {
+  const banner = payload.bannerSignal ?? payload.lines.find(line => line.id === "user_action:banner_signal")
+  const lines = payload.lines.filter(line => line.id !== "user_action:banner_signal")
+  if (banner && consentValue(payload, state) === "required") {
+    const firstOwner = lines.findIndex(line => line.requires === "user_action")
+    lines.splice(firstOwner < 0 ? lines.length : firstOwner, 0, banner)
+  }
+  return { ...payload, lines }
+}
+
 function decisionsView(payload: PlanPayload, state: PlanState, ctx: OverlayContext): string[] {
   const s = ctx.styles
   const consent = consentValue(payload, state)
@@ -66,17 +80,13 @@ function decisionsView(payload: PlanPayload, state: PlanState, ctx: OverlayConte
   const conversions =
     conversionsLine && state.edits[conversionsLine.id] !== undefined
       ? (state.edits[conversionsLine.id] ?? "")
-      : payload.decisions.conversionNames.join(" · ")
-  const privacyLine = payload.lines.find((line) => line.kind === "privacy_text")
-  const privacy = privacyLine && state.edits[privacyLine.id] !== undefined ? state.edits[privacyLine.id] : payload.decisions.privacyText
-  const privacyShown = privacy ? `${privacy.split("\n").filter((l) => l.trim()).length} drafted lines for your privacy page` : "—"
+      : conversionWords(payload.decisions.conversionNames)
   const npm = payload.decisions.npmInstall ? ctx.sanitize(payload.decisions.npmInstall, OVERLAY_TEXT_CAPS.line) : "—"
   return [
     s.bold("Your decisions"),
     ...[
-      `· Consent: ${consent ? (CONSENT_LABEL[consent] ?? consent) : s.you("— choose it (E on the consent line)")}`,
+      ...(consent ? [`· Infinite's tag: ${CONSENT_LABEL[consent] ?? consent}`] : []),
       `· Conversions: ${conversions ? ctx.sanitize(conversions, OVERLAY_TEXT_CAPS.line) : "—"}`,
-      `· Privacy: ${privacyShown}`,
       `· npm: ${npm}`
     ].flatMap((line) => wrapAnsi(line, ctx.width, 2))
   ]
@@ -84,13 +94,20 @@ function decisionsView(payload: PlanPayload, state: PlanState, ctx: OverlayConte
 
 function lineMark(line: PlanLine, state: PlanState, ctx: OverlayContext): string {
   const s = ctx.styles
+  if (isContinuedWork(line)) return state.skipped.includes(line.id) ? s.dim("[-]") : s.ok("[+]")
   if (line.requires === "approval") return state.skipped.includes(line.id) ? s.dim("[ ]") : s.ok("[✓]")
-  if (line.requires === "user_action") return s.you(" → ")
-  return s.dim(" · ")
+  if (line.requires === "user_action") return ` ${s.you("→")} `
+  return ` ${s.dim("·")} `
 }
 
 function lineText(line: PlanLine, state: PlanState, ctx: OverlayContext): string {
-  let text = ctx.sanitize(line.text, OVERLAY_TEXT_CAPS.line)
+  let fenced = false
+  let text = line.text.split("\n").map(row => {
+    if (/^\s*`{3,}/.test(row)) fenced = !fenced
+    else if (fenced) return sanitizeUntrustedBlock(row, Math.max(OVERLAY_TEXT_CAPS.line, row.length))
+    const indent = /^ */.exec(row)![0]
+    return indent + ctx.sanitize(row.slice(indent.length), Math.max(OVERLAY_TEXT_CAPS.line, row.length))
+  }).join("\n")
   if (line.measured) text += ctx.styles.dim(` (${ctx.sanitize(String(line.measured.value), 40)} · ${ctx.sanitize(line.measured.window, 40)})`)
   const edit = state.edits[line.id]
   // The consent line's edit is one of two values: the marker says it in words (never the stored value).
@@ -110,7 +127,10 @@ function lineRows(line: PlanLine, index: number, state: PlanState, ctx: OverlayC
   const s = ctx.styles
   const pointer = index === state.cursor ? s.accent("▸") : " "
   const body = `${pointer} ${lineMark(line, state, ctx)} ${lineText(line, state, ctx)}`
-  return wrapAnsi(index === state.cursor ? s.bold(body) : body, ctx.width, ROW_PREFIX_WIDTH)
+  return body.split("\n").flatMap((row, n) => {
+    const text = n === 0 ? row : " ".repeat(ROW_PREFIX_WIDTH) + row
+    return wrapAnsi(index === state.cursor ? s.bold(text) : text, ctx.width, ROW_PREFIX_WIDTH)
+  })
 }
 
 /**
@@ -213,7 +233,7 @@ function observe(payload: PlanPayload, state: PlanState, ctx: OverlayContext): P
 
 /** A line needs the user when they approve it or must do it themselves; a plain note does not. */
 function unseenLines(payload: PlanPayload, state: PlanState): PlanLine[] {
-  return payload.lines.filter((line) => line.requires !== "info" && !state.seen.includes(line.id))
+  return payload.lines.filter((line) => !state.seen.includes(line.id))
 }
 
 function render(payload: PlanPayload, state: PlanState, ctx: OverlayContext): OverlayView {
@@ -240,11 +260,11 @@ function render(payload: PlanPayload, state: PlanState, ctx: OverlayContext): Ov
   const position = at.end - at.start === 1 ? `line ${at.start + 1} of ${count}` : `lines ${at.start + 1}–${at.end} of ${count}`
   return {
     heading: at.fits ? "The plan (one screen)" : `The plan · ${position}`,
-    question: `Approve the plan: ${counts.approval} lines to approve${counts.action ? ` · ${counts.action} ${counts.action === 1 ? "thing" : "things"} only you can do` : ""}.`,
+    question: `Here is what this run will do${counts.approval ? ` · ${counts.approval} explicit choices` : ""}${counts.action ? ` · ${counts.action} ${counts.action === 1 ? "thing" : "things"} only you can do` : ""}.`,
     body: [...at.top, ...rows, ...hold, ...at.footer],
     keys: state.editing
       ? ["ENTER save", "ESC stop editing"]
-      : [unread > 0 ? "ENTER read on" : "ENTER approve", "SPACE skip a line", "E edit a line", "↑↓ move", "ESC later"]
+      : [unread > 0 ? "ENTER read on" : "ENTER continue", "SPACE include/exclude", "E edit a line", "↑↓ move", "ESC later"]
   }
 }
 
@@ -284,8 +304,8 @@ function readOn(payload: PlanPayload, state: PlanState, ctx: OverlayContext): Pl
   const moved: PlanState = { ...state, cursor: payload.lines.indexOf(first), lineScroll: state.readRows[first.id] ?? 0 }
   const notice = (left: number) =>
     left > 0
-      ? `${left} more line${left === 1 ? "" : "s"} to read before you approve: ENTER shows the next, ↓ scrolls.`
-      : "That is the whole plan. ENTER approves it as shown."
+      ? `${left} more line${left === 1 ? "" : "s"} to read before you continue: ENTER shows the next, ↓ scrolls.`
+      : "That is the whole plan. ENTER continues with it as shown."
   // The notice takes rows from the list, so what is left is counted with the notice on screen.
   let next: PlanState = { ...moved, notice: notice(payload.lines.length) }
   for (let pass = 0; pass < 2; pass += 1) next = { ...moved, notice: notice(unseenLines(payload, observe(payload, next, ctx)).length) }
@@ -310,9 +330,9 @@ function handleKey(payload: PlanPayload, state: PlanState, key: Key, ctx: Overla
     case "tab":
       return { state: scrollInLine(payload, state, ctx, 1) ?? { ...state, notice: null, lineScroll: 0, cursor: lines.length ? (state.cursor + 1) % lines.length : 0 } }
     case "space": {
-      if (!current || current.requires !== "approval") return { state }
+      if (!current || (current.requires !== "approval" && !isContinuedWork(current))) return { state }
       const skipped = state.skipped.includes(current.id) ? state.skipped.filter((id) => id !== current.id) : [...state.skipped, current.id]
-      return { state: { ...state, skipped } }
+      return { state: { ...state, skipped, touched: [...new Set([...state.touched ?? [], current.id])] } }
     }
     case "char": {
       if (key.char.toLowerCase() !== "e" || !current) return { state }
@@ -321,7 +341,7 @@ function handleKey(payload: PlanPayload, state: PlanState, key: Key, ctx: Overla
         const next = now === CONSENT_VALUES[0] ? CONSENT_VALUES[1] : CONSENT_VALUES[0]
         return { state: { ...state, notice: null, edits: { ...state.edits, [current.id]: next } } }
       }
-      if (!current.editable) return { state: { ...state, notice: "This line can't be edited; SPACE skips it." } }
+      if (!current.editable) return { state: { ...state, notice: "This line is information only." } }
       return { state: { ...state, notice: null, editing: { lineId: current.id, buffer: initialEdit(payload, state, current) } } }
     }
     case "enter": {
@@ -335,9 +355,9 @@ function handleKey(payload: PlanPayload, state: PlanState, key: Key, ctx: Overla
       // there is no screen to have missed a line on.
       const more = ctx ? readOn(payload, state, ctx) : null
       if (more) return { state: more }
-      const approvalLines = lines.filter((line) => line.requires === "approval")
+      const approvalLines = lines.filter((line) => line.requires === "approval" || isContinuedWork(line))
       const approved = approvalLines.filter((line) => !state.skipped.includes(line.id)).map((line) => line.id)
-      const declined = approvalLines.filter((line) => state.skipped.includes(line.id)).map((line) => line.id)
+      const declined = approvalLines.filter((line) => state.skipped.includes(line.id) && ((state.touched ?? []).includes(line.id) || (payload.excluded ?? []).includes(line.id))).map((line) => line.id)
       return { state, answer: { approved, declined, edits: { ...state.edits } } }
     }
     case "escape":
@@ -354,13 +374,14 @@ function handleKey(payload: PlanPayload, state: PlanState, key: Key, ctx: Overla
  * line that was never drawn (final verify F18). It is marked on the next key, which gets the box it was drawn in.
  */
 function onKey(payload: PlanPayload, state: PlanState, key: Key, ctx?: OverlayContext): KeyOutcome<"plan", PlanState> {
+  payload = visiblePayload(payload, state)
   if (!ctx) return handleKey(payload, state, key, ctx)
   return handleKey(payload, observe(payload, state, ctx), key, ctx)
 }
 
 export const planOverlay: Overlay<"plan", PlanState> = {
   kind: "plan",
-  init: () => ({ cursor: 0, skipped: [], edits: {}, editing: null, notice: null, seen: [], lineScroll: 0, readRows: {} }),
-  render,
+  init: (payload) => ({ cursor: 0, skipped: [...new Set([...(payload.excluded ?? []), ...payload.lines.filter(line => line.requires === "approval" && !["consent_mode", "conversion_names"].includes(line.kind)).map(line => line.id)])], edits: {}, editing: null, notice: null, seen: [], lineScroll: 0, readRows: {} }),
+  render: (payload, state, ctx) => render(visiblePayload(payload, state), state, ctx),
   onKey
 }

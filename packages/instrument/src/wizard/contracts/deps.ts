@@ -120,6 +120,11 @@ export interface WizardDeps {
   tagVersion: string
   /** B29: opens a URL in the user's browser (darwin TTY runs only; absent elsewhere and in tests). */
   openUrl?(url: string): Promise<void>
+  /**
+   * P0-2: the wizard's own anonymous reads (does a preview answer with Vercel's login?), through the same
+   * proxy-aware fetch as the live checks. Absent in tests that do not fake it: nothing is asked then.
+   */
+  fetch?: typeof fetch
 }
 
 /** §3d.8. One per step file. */

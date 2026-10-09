@@ -42,6 +42,8 @@ export interface SandboxedSpawnOptions {
    * passes none; the build passes the repo root. Each is also added in realpath form.
    */
   allowWrites?: readonly string[]
+  /** pnpm probes the project filesystem with a random _tmp_<pid>_<hex> file. */
+  packageManagerTempDirs?: readonly string[]
   /** Subtrees never writable, even inside `allowWrites` (the build: `<root>/.git`, `.husky`, `.infinite`). */
   denyWrites?: readonly string[]
   /** `false` for T0 (no network at all); `true` for the build (it may fetch packages). */
@@ -56,6 +58,8 @@ export interface SandboxedSpawnOptions {
   signal?: AbortSignal
   /** stdout/stderr are each truncated to this many bytes (default 4 MiB). */
   maxOutputBytes?: number
+  /** Progress from the child while it is running (never fed back into the child). */
+  onOutput?: (chunk: string, stream: "stdout" | "stderr") => void
   /** Test seam: the platform to behave as (default `process.platform`). */
   platform?: NodeJS.Platform
 }
@@ -212,6 +216,7 @@ export function buildSandboxProfile(options: {
   /** Subtrees the child may write (its temp HOME + the caller's `allowWrites`). */
   writableRoots: readonly string[]
   denyWrites?: readonly string[]
+  packageManagerTempDirs?: readonly string[]
 }): string {
   const lines = ["(version 1)", "(allow default)"]
   if (!options.network) lines.push("(deny network*)")
@@ -222,6 +227,11 @@ export function buildSandboxProfile(options: {
   lines.push("(deny file-write*)")
   const writable = options.writableRoots.map((path) => `(subpath ${sbplString(absolute(path, "writable root"))})`)
   lines.push(`(allow file-write* ${[...writable, ...DEVICE_WRITES].join(" ")})`)
+  for (const dir of options.packageManagerTempDirs ?? []) {
+    if (/["\u0000-\u001f]/.test(dir)) throw new Error("package-manager temp directory contains a quote or control character")
+    const prefix = absolute(dir, "package-manager temp directory").replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+    lines.push(`(allow file-write* (regex #"^${prefix}/_tmp_[0-9]+_[0-9a-f]+$"))`)
+  }
   for (const path of options.denyWrites ?? []) lines.push(`(deny file-write* (subpath ${sbplString(absolute(path, "deny-write path"))}))`)
   for (const filter of [...readPaths, ...readPrefixes]) lines.push(`(deny file-write* ${filter})`)
   return lines.join("\n")
@@ -319,7 +329,8 @@ export const sandboxedSpawn: SandboxedSpawnFn = (cmd, args, options) => {
         denyReadPrefixes: options.denyReadPrefixes ?? [],
         network: options.network,
         writableRoots: withRealpaths([home, ...(options.allowWrites ?? [])]),
-        denyWrites: withRealpaths(options.denyWrites ?? [])
+        denyWrites: withRealpaths(options.denyWrites ?? []),
+        packageManagerTempDirs: withRealpaths(options.packageManagerTempDirs ?? [])
       })
     } catch (error) {
       rmSync(home, { recursive: true, force: true })
@@ -364,12 +375,14 @@ export const sandboxedSpawn: SandboxedSpawnFn = (cmd, args, options) => {
     child.stdout.setEncoding("utf8")
     child.stderr.setEncoding("utf8")
     child.stdout.on("data", (chunk: string) => {
+      options.onOutput?.(chunk, "stdout")
       if (stdout.length + chunk.length > maxBytes) {
         stdout += chunk.slice(0, Math.max(0, maxBytes - stdout.length))
         stdoutTruncated = true
       } else stdout += chunk
     })
     child.stderr.on("data", (chunk: string) => {
+      options.onOutput?.(chunk, "stderr")
       if (stderr.length + chunk.length > maxBytes) {
         stderr += chunk.slice(0, Math.max(0, maxBytes - stderr.length))
         stderrTruncated = true

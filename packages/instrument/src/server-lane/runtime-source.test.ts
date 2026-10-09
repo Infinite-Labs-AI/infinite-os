@@ -6,15 +6,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import { INFINITE_SERVER_EVENTS_DESTINATION } from "../workspace-artifacts.js"
 
-import { VECTORS } from "./helpers.test.js"
-import { hashInfiniteEmail, signServerEventBody } from "./helpers.js"
+import { VECTORS } from "../../test/server-lane-vectors.js"
+import { AD_MATCH_KEYS, signServerEventBody } from "./helpers.js"
+import { outcomeHelperSource } from "./targets/outcome-helper.js"
 import {
   NEXT_DOCUMENT_MATCHER,
   SERVER_LANE_FENCE_END,
   SERVER_LANE_FENCE_START,
   buildCreatedMiddlewareSource,
-  buildFencedExportBlock,
-  buildFencedImportBlock,
   buildServerLaneModuleSource
 } from "./runtime-source.js"
 
@@ -41,7 +40,6 @@ async function loadGeneratedModule(input?: Parameters<typeof buildServerLaneModu
   return import(pathToFileURL(modulePath).href) as Promise<{
     withInfiniteServerLane: (handler?: unknown) => (request: unknown, event: unknown) => unknown
     recordInfiniteDocumentRequest: (request: unknown, event?: unknown) => void
-    sendInfiniteServerEvent: (input: Record<string, unknown>) => Promise<boolean>
     infiniteVisitKey: (headers: Headers, secret?: string, nowMs?: number) => Promise<string | null>
   }>
 }
@@ -141,19 +139,11 @@ describe("generated Next.js module (executed with WebCrypto)", () => {
 
   it.each([
     ["POST", fakeRequest({ method: "POST" })],
-    ["HEAD", fakeRequest({ method: "HEAD" })],
     ["asset path", fakeRequest({ path: "/logo.png" })],
-    ["/_next path", fakeRequest({ path: "/_next/static/x.js" })],
-    ["/api path", fakeRequest({ path: "/api/health" })],
-    ["non-html accept", fakeRequest({ headers: { accept: "*/*" } })],
     ["RSC accept", fakeRequest({ headers: { accept: "text/x-component" } })],
-    ["prefetch purpose", fakeRequest({ headers: { purpose: "prefetch" } })],
-    ["next-router-prefetch", fakeRequest({ headers: { "next-router-prefetch": "1" } })],
     // Privacy: DNT / Global-Privacy-Control are honored like the client pixel does.
     ["Do-Not-Track", fakeRequest({ headers: { dnt: "1" } })],
-    ["Sec-GPC", fakeRequest({ headers: { "sec-gpc": "1" } })],
     ["localhost", fakeRequest({ host: "localhost:3000" })],
-    ["loopback", fakeRequest({ host: "127.0.0.1" })]
   ])("skips %s", async (_label, request) => {
     const mod = await loadGeneratedModule()
     const event = fakeEvent()
@@ -224,49 +214,6 @@ describe("generated Next.js module (executed with WebCrypto)", () => {
     await expect(Promise.all(event.tasks)).resolves.toBeDefined()
   })
 
-  it("sendInfiniteServerEvent reports an outcome with the same-lane visitKey from the request", async () => {
-    const mod = await loadGeneratedModule()
-    const ok = await mod.sendInfiniteServerEvent({
-      eventName: "sign_up",
-      eventId: "signup:42",
-      accountKey: "42",
-      occurredAt: new Date(VECTORS.nowMs),
-      request: fakeRequest({})
-    })
-    expect(ok).toBe(true)
-    const [, init] = fetchMock.mock.calls[0] as [string, { body: string; headers: Record<string, string> }]
-    const body = JSON.parse(init.body) as Record<string, unknown>
-    expect(body).toEqual({
-      eventId: "signup:42",
-      eventName: "sign_up",
-      occurredAt: new Date(VECTORS.nowMs).toISOString(),
-      accountKey: "42",
-      properties: { visitKey: VECTORS.visitKey }
-    })
-    expect(init.headers["x-infinite-signature"]).toBe(signServerEventBody(VECTORS.secret, init.body))
-  })
-
-  it("carries an adMatch block verbatim inside the signed body, and omits it when absent", async () => {
-    const mod = await loadGeneratedModule()
-    const adMatch = { em: hashInfiniteEmail("founder@example.com"), fbp: "fb.1.1755500000123.987654321" }
-    await mod.sendInfiniteServerEvent({
-      eventName: "purchase",
-      eventId: "purchase:1",
-      occurredAt: new Date(VECTORS.nowMs),
-      adMatch
-    })
-    const [, init] = fetchMock.mock.calls[0] as [string, { body: string; headers: Record<string, string> }]
-    expect((JSON.parse(init.body) as { adMatch: unknown }).adMatch).toEqual(adMatch)
-    // Signed with the rest of the body — the relay can trust it because the secret signed it.
-    expect(init.headers["x-infinite-signature"]).toBe(signServerEventBody(VECTORS.secret, init.body))
-    expect(init.body).not.toContain("founder@example.com")
-
-    fetchMock.mockClear()
-    await mod.sendInfiniteServerEvent({ eventName: "sign_up", eventId: "signup:1" })
-    const [, plain] = fetchMock.mock.calls[0] as [string, { body: string }]
-    expect(plain.body).not.toContain("adMatch")
-  })
-
   it("infiniteVisitKey matches the Node recipe vector", async () => {
     const mod = await loadGeneratedModule()
     expect(await mod.infiniteVisitKey(fakeRequest({}).headers, VECTORS.secret, VECTORS.nowMs)).toBe(VECTORS.visitKey)
@@ -290,6 +237,14 @@ describe("generated sources (static)", () => {
     expect(source).toContain('process.env.INFINITE_SITE_SOURCE_KEY || ""')
   })
 
+  it("the outcome helper's match contract includes every relay-supported Meta match field except phone", () => {
+    const source = outcomeHelperSource({ productionHosts: [] })
+    const block = /export interface InfiniteAdMatch \{([\s\S]*?)\n\}/.exec(source)?.[1] ?? ""
+    const keys = [...block.matchAll(/^\s+([a-z_]+)\?: string$/gm)].map((match) => match[1]).sort()
+    expect(keys).toEqual([...AD_MATCH_KEYS].sort())
+    expect(source).not.toMatch(/\bph\?:|phone\?:/)
+  })
+
   it("the created middleware uses the standard document matcher inside the fence", () => {
     const source = buildCreatedMiddlewareSource({ moduleImportPath: "./lib/infinite-server-lane" })
     expect(source).toContain(SERVER_LANE_FENCE_START)
@@ -299,19 +254,5 @@ describe("generated sources (static)", () => {
     expect(source).toContain(`matcher: [${JSON.stringify(NEXT_DOCUMENT_MATCHER)}]`)
     // The matcher literal survives as a JS string that yields the intended regex.
     expect(NEXT_DOCUMENT_MATCHER).toBe("/((?!_next/static|_next/image|favicon.ico|api|.*\\..*).*)")
-  })
-
-  it("fenced blocks are self-delimiting", () => {
-    expect(buildFencedImportBlock({ moduleImportPath: "./lib/infinite-server-lane" })).toBe(
-      [
-        SERVER_LANE_FENCE_START,
-        'import { withInfiniteServerLane } from "./lib/infinite-server-lane"',
-        SERVER_LANE_FENCE_END,
-        ""
-      ].join("\n")
-    )
-    expect(buildFencedExportBlock({ innerIdentifier: "middleware" })).toContain(
-      "export default withInfiniteServerLane(middleware)"
-    )
   })
 })

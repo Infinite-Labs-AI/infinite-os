@@ -54,6 +54,8 @@ describe("rebuildFromPrMarker (B25)", () => {
     expect(state.runId).toBe(RUN)
     expect(state.pr).toMatchObject({ host: "github", number: 7, url: "https://github.com/acme/acme-store/pull/7", isDraft: true, round: 0, mergeSha: null })
     expect(state.git).toEqual({ base: "main", baseSource: "default_branch", branch: "infinite/tag/2026-10-02-7f3c2a", baseSha: "", headSha: null })
+    expect(state.wizardCommits).toBeUndefined()
+    expect(state.commitHistory).toBeUndefined()
     expect(calls[0]).toEqual(expect.arrayContaining(["pr", "list", "--author", "@me"]))
   })
 

@@ -247,8 +247,20 @@ const INFINITE_NON_DOCUMENT_PREFIXES = ${jsStringArray(nonDocumentPrefixes(input
 const INFINITE_REFERRER_HOST = /${REFERRER_HOST_PATTERN.source}/
 
 ${exported}interface InfiniteAdMatch {
-  /** sha256 hex of the lowercased, trimmed email — hashed by YOUR server, never by Infinite. */
+  /** sha256 hex of the Meta-normalized email — hashed by YOUR server, never by Infinite. */
   em?: string
+  /** sha256 hex of the Meta-normalized first name. */
+  fn?: string
+  /** sha256 hex of the Meta-normalized last name. */
+  ln?: string
+  /** sha256 hex of the Meta-normalized city. */
+  ct?: string
+  /** sha256 hex of the Meta-normalized state/region. */
+  st?: string
+  /** sha256 hex of the Meta-normalized postal code. */
+  zp?: string
+  /** sha256 hex of the Meta-normalized two-letter country. */
+  country?: string
   /** Meta's own _fbc first-party cookie on your domain, verbatim. */
   fbc?: string
   /** Meta's own _fbp first-party cookie on your domain, verbatim. */
@@ -468,15 +480,6 @@ export function managedGeneratedFile(header: string[], body: string): string {
   return [managedFileBanner, ...header, SERVER_LANE_FENCE_START, body, SERVER_LANE_FENCE_END, ""].join("\n")
 }
 
-export const OUTCOME_HELPER_EXPORT = "postInfiniteOutcome"
-
-/**
- * The outcome reporter that returns Infinite's 202 (§3j.5): `{ accepted, duplicate, metaEventId,
- * metaEventName }`. A non-null `metaEventId` is the server's instruction to mirror THIS conversion in the
- * browser under exactly that id (`infiniteMetaMirror`); null means Infinite is not sending one.
- */
-export const OUTCOME_REPORT_EXPORT = "reportInfiniteOutcome"
-
 /** The language the generated outcome helper is authored in. */
 export type OutcomeHelperLanguage = "ts" | "js"
 
@@ -533,7 +536,8 @@ function directoryLanguage(directoryAbsolute: string): OutcomeHelperLanguage | n
  * wins; only when there is no api directory do we fall back to a whole-project TypeScript signal.
  */
 export function detectServerLaneHelperLanguage(appRootAbsolute: string): OutcomeHelperLanguage {
-  for (const apiDir of ["api", "src/api"]) {
+  // Vercel functions (api/), and Next.js API routes / route handlers, which import the helper too.
+  for (const apiDir of ["api", "src/api", "pages/api", "src/pages/api", "app/api", "src/app/api"]) {
     const language = directoryLanguage(join(appRootAbsolute, apiDir))
     if (language) return language
   }
@@ -541,6 +545,11 @@ export function detectServerLaneHelperLanguage(appRootAbsolute: string): Outcome
   const packageJson = readWorkspacePackageJson(appRootAbsolute)
   if (packageJson?.dependencies?.typescript || packageJson?.devDependencies?.typescript) return "ts"
   if (directoryLanguageTopLevel(appRootAbsolute) === "ts") return "ts"
+  // The app's own source (a Next app/ or pages/ tree, or src/): TypeScript there means the server is too.
+  for (const sourceDir of ["app", "src/app", "pages", "src/pages", "src"]) {
+    const language = directoryLanguage(join(appRootAbsolute, sourceDir))
+    if (language) return language
+  }
   return "js"
 }
 
@@ -582,473 +591,6 @@ export function outcomeHelperTarget(
   if (language === "ts") return { path: `${basename}.ts`, language, extension: "ts" }
   const extension = projectIsEsm(appRootAbsolute) ? "js" : "mjs"
   return { path: `${basename}.${extension}`, language, extension }
-}
-
-/**
- * lib/infinite-outcome.ts — the outcome poster any server route can import.
- *
- * WebCrypto + fetch only, so the same file works from a Vercel `api/` function (Node >= 18), an
- * edge function, a Netlify function, and a Worker (pass `credentials` there, since Workers hand
- * environment variables to the handler rather than exposing process.env).
- */
-export function outcomeHelperSource(
-  input: TargetBuildInput,
-  options: { language?: OutcomeHelperLanguage; extension?: OutcomeHelperTarget["extension"] } = {}
-): string {
-  const bakedSourceKey = JSON.stringify(input.siteSourceKey ?? "")
-  const ts = (options.language ?? "ts") === "ts"
-  // Type-only text: present in the .ts helper, stripped from the .js/.mjs helper so it runs verbatim
-  // when a JS server route imports it (a .ts helper does not resolve from a .js Vercel function).
-  const t = (typeText: string): string => (ts ? typeText : "")
-  const importExample = `../lib/infinite-outcome${ts ? "" : `.${options.extension ?? "js"}`}`
-  const interfaceBlock = String.raw`export interface InfiniteAdMatch {
-  /** sha256 hex of the lowercased, trimmed email. */
-  em?: string
-  /** Meta's _fbc cookie, verbatim. */
-  fbc?: string
-  /** Meta's _fbp cookie, verbatim. */
-  fbp?: string
-  /** sha256 hex of your own account id, trimmed only (case kept — never lowercase an id). */
-  external_id?: string
-  /** The BUYER'S BROWSER ip, from YOUR inbound request. Meta needs the browser's, not your server's. */
-  client_ip_address?: string
-  /** The BUYER'S BROWSER user agent, from the same request. Meta REQUIRES it for website events. */
-  client_user_agent?: string
-}
-
-export interface InfiniteVisitKeyInputs {
-  /** The client IP as your server sees it. Hashed here; it never leaves this process. */
-  clientIp?: string
-  userAgent?: string
-}
-
-/**
- * A request-like value whose headers may be a WHATWG \`Headers\` (edge / newer Vercel) OR a plain
- * object (\`req.headers\` on a Vercel Node function, Express, Node http). Both are read correctly.
- */
-export interface InfiniteVisitKeyRequest {
-  headers: Headers | Record<string, string | string[] | undefined>
-}
-
-export interface InfiniteOutcomeInput {
-  /** The exact outcome name from Infinite -> Conversions ("sign_up", "purchase", "download"). */
-  type: string
-  /** The page path the outcome belongs to (pathname only — no query string). */
-  path?: string
-  /**
-   * Stable per-outcome id (order id, subscription id, account id, or a namespaced email hash for a
-   * lead) so retries dedupe. REQUIRED by reportInfiniteOutcome (it throws without one); postInfiniteOutcome
-   * still defaults it to a random UUID for older callers, which is why a retry there can count twice.
-   */
-  eventId?: string
-  /** Opaque account or order id; Infinite hashes it at rest. */
-  accountKey?: string
-  occurredAt?: Date
-  /** Up to 16 extra properties: snake_case keys, short token / number / boolean values. */
-  properties?: Record<string, string | number | boolean>
-  /**
-   * OPTIONAL ad-match block — for founders who run Meta ads and have NO PostHog. Turn the relay on
-   * in Infinite -> Site -> Settings and an outcome carrying this is forwarded to Meta's Conversions
-   * API at ingest, then the block is DISCARDED: Infinite never stores it.
-   *
-   * YOUR server hashes; Infinite never does. em / external_id are sha256 HEX, so a raw email never
-   * leaves this process:
-   *
-   *   import { createHash } from "node:crypto"
-   *   const em = createHash("sha256").update(email.trim().toLowerCase()).digest("hex")
-   *
-   * fbc / fbp are Meta's own first-party cookies on your domain (the _fbc / _fbp values), and
-   * client_ip_address / client_user_agent are the BUYER'S BROWSER's, from YOUR inbound request --
-   * adMatchFromRequest(request, { em }) fills all four for you. They cannot come from the call to
-   * Infinite: that call is server-to-server, so its ip is your host's egress address and its user
-   * agent is "node". Meta REQUIRES client_user_agent for a website event; without it the relay
-   * declines to send rather than post something Meta can never match.
-   * https://developers.facebook.com/docs/marketing-api/conversions-api/parameters/fbp-and-fbc
-   *
-   * Never send a raw email here: a value that is not a 64-character hex digest is rejected with a
-   * 400 rather than forwarded. A malformed cookie, ip or user agent is DROPPED instead, so a
-   * visitor who tampered with their own _fbc can never delete your conversion.
-   */
-  adMatch?: InfiniteAdMatch
-  /**
-   * Same-lane attribution: the incoming request (WHATWG \`Request\` OR a Node request with a plain
-   * \`headers\` object), or an explicit { clientIp, userAgent }, so the outcome carries the same
-   * visitKey as the page view that produced it. A plain-object request is read correctly, never
-   * swallowed. In a webhook, pass \`properties.visitKey\` instead (see the header for the carry pattern).
-   */
-  visitKeyInputs?: InfiniteVisitKeyInputs | InfiniteVisitKeyRequest
-  /** Runtimes without process.env (Cloudflare Workers) pass the values from their own env here. */
-  credentials?: { secret?: string; sourceKey?: string }
-  /**
-   * The visitor's first-touch campaign context, from the page's \`infiniteCampaign()\` passed through your
-   * own request: recorded as the bounded properties campaign_provenance (tab / cookie / none) and
-   * browser_context (facebook_app / instagram_app / other_in_app / browser / unknown). Other values are dropped.
-   */
-  campaign?: { campaignProvenance?: string; browserContext?: string }
-}
-
-/** Infinite's answer to one outcome (the 202 body). Every field is false / null when it could not be read. */
-export interface InfiniteOutcomeReport {
-  accepted: boolean
-  duplicate: boolean
-  /** Mirror THIS conversion in the browser under exactly this id (infiniteMetaMirror), or null: do not. */
-  metaEventId: string | null
-  /** The Meta standard event the server is sending (Lead, CompleteRegistration, StartTrial, Subscribe), or null. */
-  metaEventName: string | null
-}`
-  return managedGeneratedFile(
-    [
-      "// Infinite server lane — report an outcome the moment it becomes REAL (row committed,",
-      "// payment captured, file served). Never from a click: a click is intent, not an outcome.",
-      "//",
-      `//   import { ${OUTCOME_HELPER_EXPORT}, infiniteVisitKey } from "${importExample}"`,
-      "//",
-      "// ATTRIBUTION — carry the buyer's visit key from the page view to the outcome. `visitKeyInputs`",
-      "// accepts a WHATWG `Request`, a Node request whose `.headers` is a PLAIN OBJECT (Vercel Node",
-      "// functions, Express), OR an explicit { clientIp, userAgent }. On a browser-facing route you",
-      "// can just pass the request:",
-      "//",
-      `//   await ${OUTCOME_HELPER_EXPORT}({ type: "purchase", path: "/checkout", accountKey: order.id, visitKeyInputs: req })`,
-      "//",
-      "// In a WEBHOOK the request is the PROVIDER'S, not the buyer's, so compute the key at CHECKOUT",
-      "// from the buyer's request, stash it, and carry it to the webhook:",
-      "//",
-      "//   // 1. In the checkout route, from the BUYER'S request:",
-      "//   const infinite_visit_key = await infiniteVisitKey({",
-      "//     clientIp: String(req.headers['x-forwarded-for'] || '').split(',')[0].trim(),",
-      "//     userAgent: req.headers['user-agent'] || ''",
-      "//   })",
-      "//   // 2. Stash it where the outcome can read it later (e.g. Stripe checkout metadata):",
-      "//   await stripe.checkout.sessions.create({ /* … */ metadata: { infinite_visit_key } })",
-      "//   // 3. In the webhook, once the payment is REAL, pass it straight through:",
-      `//   await ${OUTCOME_HELPER_EXPORT}({ type: "purchase", path: "/checkout", accountKey: order.id,`,
-      "//     properties: { visitKey: session.metadata.infinite_visit_key } })",
-      "//",
-      "// The browser is waiting on this request and you run Meta ads? Use reportInfiniteOutcome with a",
-      "// STABLE eventId: its answer carries metaEventId, which the page passes to infiniteMetaMirror.",
-      "//",
-      `//   const { metaEventId, metaEventName } = await ${OUTCOME_REPORT_EXPORT}({ type: "sign_up", eventId: user.id, path: "/signup", visitKeyInputs: req })  // sent as "sign_up:<id>"`,
-      "//",
-      "// Running Meta ads without PostHog? Add adMatch: adMatchFromRequest(request, { em }) and turn",
-      "// the relay on in Infinite -> Site -> Settings; the outcome is forwarded to Meta's Conversions",
-      "// API and the match data is discarded, never stored. You hash the email, Infinite never sees it.",
-      "//",
-      `// Secrets come from the environment only: ${SERVER_LANE_SECRET_ENV} + ${SERVER_LANE_SOURCE_KEY_ENV}.`
-    ],
-    String.raw`const INFINITE_SERVER_EVENTS_URL = ${JSON.stringify(infiniteServerEventsDestination(input.apiOrigin))}
-const INFINITE_SOURCE_KEY_FALLBACK = ${bakedSourceKey}
-const INFINITE_DELIVERY_TIMEOUT_MS = ${SERVER_LANE_DELIVERY_TIMEOUT_MS}
-const INFINITE_VISIT_BUCKET_SECONDS = ${VISIT_BUCKET_SECONDS}
-
-${ts ? interfaceBlock + "\n\n" : ""}function infiniteEnv(name${t(": string")})${t(": string")} {
-  const scope = globalThis${t(` as {
-    process?: { env?: Record<string, string | undefined> }
-    Netlify?: { env?: { get(name: string): string | undefined } }
-    Deno?: { env?: { get(name: string): string | undefined } }
-  }`)}
-  return scope.process?.env?.[name] ?? scope.Netlify?.env?.get(name) ?? scope.Deno?.env?.get(name) ?? ""
-}
-
-async function infiniteHmacHex(secret${t(": string")}, message${t(": string")})${t(": Promise<string>")} {
-  const encoder = new TextEncoder()
-  const key = await crypto.subtle.importKey(
-    "raw",
-    encoder.encode(secret),
-    { name: "HMAC", hash: "SHA-256" },
-    false,
-    ["sign"]
-  )
-  const signature = await crypto.subtle.sign("HMAC", key, encoder.encode(message))
-  return Array.from(new Uint8Array(signature))
-    .map((byte) => byte.toString(16).padStart(2, "0"))
-    .join("")
-}
-
-/**
- * The 30-minute visit key for a request, as a hex string — the same recipe the page-view lane uses.
- * Compute it at CHECKOUT from the BUYER'S request and carry it (e.g. in Stripe checkout metadata) so
- * a later webhook can attribute the outcome to the same visit. The IP is hashed here and never
- * leaves this process. Returns "" only when no secret is available.
- */
-export async function infiniteVisitKey(inputs${t(`: {
-  clientIp?: string
-  userAgent?: string
-  nowMs?: number
-  /** Runtimes without process.env (Cloudflare Workers) pass the secret here. */
-  secret?: string
-}`)})${t(": Promise<string>")} {
-  const secret = inputs.secret || infiniteEnv(${JSON.stringify(SERVER_LANE_SECRET_ENV)})
-  if (!secret) return ""
-  const nowMs = inputs.nowMs ?? Date.now()
-  const bucket = Math.floor(Math.floor(nowMs / 1000) / INFINITE_VISIT_BUCKET_SECONDS)
-  return infiniteHmacHex(
-    secret,
-    ${JSON.stringify(VISIT_KEY_MESSAGE_PREFIX)} +
-      (inputs.clientIp ?? "") +
-      "|" +
-      (inputs.userAgent ?? "") +
-      "|" +
-      bucket
-  )
-}
-
-/**
- * One header value from EITHER a WHATWG \`Headers\` (\`.get\`) OR a plain object (\`req.headers\` on a
- * Vercel Node function / Express). A plain object silently returned undefined from \`.get\` before,
- * which threw and swallowed the whole outcome as false — the bug this handles.
- */
-function infiniteHeaderValue(headers${t(": Headers | Record<string, string | string[] | undefined>")}, name${t(": string")})${t(": string")} {
-  if (headers && typeof (headers${t(" as Headers")}).get === "function") {
-    return (headers${t(" as Headers")}).get(name) ?? ""
-  }
-  const bag = (headers ?? {})${t(" as Record<string, string | string[] | undefined>")}
-  let value = bag[name]
-  if (value === undefined) {
-    const lower = name.toLowerCase()
-    for (const key of Object.keys(bag)) {
-      if (key.toLowerCase() === lower) {
-        value = bag[key]
-        break
-      }
-    }
-  }
-  if (Array.isArray(value)) return value[0] ?? ""
-  return typeof value === "string" ? value : ""
-}
-
-function infiniteClientIpFrom(headers${t(": Headers | Record<string, string | string[] | undefined>")})${t(": string")} {
-  const forwarded = infiniteHeaderValue(headers, "x-forwarded-for").split(",")[0].trim()
-  if (forwarded) return forwarded
-  return (
-    infiniteHeaderValue(headers, "cf-connecting-ip").trim() ||
-    infiniteHeaderValue(headers, "x-real-ip").trim() ||
-    ""
-  )
-}
-
-function infiniteVisitKeyInputsOf(input${t(': InfiniteOutcomeInput["visitKeyInputs"]')})${t(": InfiniteVisitKeyInputs | null")} {
-  if (!input) return null
-  // A request-like value: WHATWG Request, OR a Node request whose .headers is a plain object.
-  if ("headers" in input && input.headers) {
-    const headers = input.headers${t(" as Headers | Record<string, string | string[] | undefined>")}
-    return {
-      clientIp: infiniteClientIpFrom(headers),
-      userAgent: infiniteHeaderValue(headers, "user-agent")
-    }
-  }
-  // The explicit { clientIp, userAgent } shape — never throws, never silently false.
-  return input${t(" as InfiniteVisitKeyInputs")}
-}
-
-// Meta's documented _fbc / _fbp shape: fb.<subdomainIndex>.<creationTimeMs>.<payload>. The same rule
-// Infinite's relay applies, so a value that passes here is one the whole pipeline accepts; anything
-// else would be dropped downstream anyway (and must never hide a valid value listed after it).
-const INFINITE_FB_COOKIE = /^fb\.[0-9]{1,2}\.[0-9]{1,20}\.[A-Za-z0-9_%.-]{1,512}$/
-
-/** EVERY value the Cookie header carries for this name, in the order the browser listed them. */
-function infiniteCookieValues(header${t(": string")}, name${t(": string")})${t(": string[]")} {
-  const values${t(": string[]")} = []
-  if (!header) return values
-  for (const part of header.split(";")) {
-    const index = part.indexOf("=")
-    if (index === -1) continue
-    if (part.slice(0, index).trim() !== name) continue
-    values.push(part.slice(index + 1).trim())
-  }
-  return values
-}
-
-/**
- * The NEWEST ad click among every _fbc the browser sent, by the creation time inside Meta's format.
- * A browser can hold two _fbc cookies (one host-only, one on the registrable domain) and lists the
- * OLDER one first, so "first listed" would credit an earlier ad than the one the visitor last
- * clicked. Malformed values are skipped, never returned. Ties keep the first listed.
- */
-function infiniteNewestFbc(header${t(": string")})${t(": string | undefined")} {
-  let newest = ""
-  for (const value of infiniteCookieValues(header, "_fbc")) {
-    if (!INFINITE_FB_COOKIE.test(value)) continue
-    if (!newest || Number(value.split(".")[2]) > Number(newest.split(".")[2])) newest = value
-  }
-  return newest || undefined
-}
-
-/**
- * _fbp is a random browser id, not a click, so there is no "newest": the first-listed value is read
- * (as Meta's own pixel does) and kept only when it has Meta's shape.
- */
-function infiniteFbp(header${t(": string")})${t(": string | undefined")} {
-  const first = infiniteCookieValues(header, "_fbp")[0]
-  return first && INFINITE_FB_COOKIE.test(first) ? first : undefined
-}
-
-/**
- * Build an adMatch block from the BUYER'S OWN request — the browser request your route is handling.
- *
- * This is the only place the buyer's ip and user agent exist. Your call to Infinite is
- * server-to-server: from Infinite's side its ip is your host's egress address and its user agent is
- * "node", and Meta's spec wants "the IP address of the browser" and "the user agent for the browser
- * … required for website events shared using the Conversions API". So read them here and pass them
- * along; the relay declines to send an event with no client_user_agent rather than post one Meta can
- * never match.
- *
- * PASS THE BROWSER'S REQUEST. In a webhook (Stripe, for example) the incoming request is the
- * PROVIDER'S, not your buyer's — capture the block during the checkout request instead and carry it
- * to the webhook, or report the outcome from the browser-facing route.
- *
- * You supply em / external_id yourself, already hashed. em is trimmed AND lowercased; external_id is
- * trimmed ONLY (an id keeps its case, exactly as the browser pixel's matching helper hashes it):
- *   adMatchFromRequest(request, {
- *     em: createHash("sha256").update(email.trim().toLowerCase()).digest("hex"),
- *     // only when the buyer has an account id; String() so a numeric id cannot throw
- *     ...(user?.id != null ? { external_id: createHash("sha256").update(String(user.id).trim()).digest("hex") } : {})
- *   })
- */
-export function adMatchFromRequest(request${t(": InfiniteVisitKeyRequest")}, hashed${t(": { em?: string; external_id?: string }")} = {})${t(": InfiniteAdMatch")} {
-  // A WHATWG Headers (edge, newer Vercel) OR a plain object (req.headers on a Vercel Node function,
-  // Express, Node http): both are read correctly.
-  const headers = request.headers
-  const cookie = infiniteHeaderValue(headers, "cookie")
-  const clientIp = infiniteClientIpFrom(headers)
-  const userAgent = infiniteHeaderValue(headers, "user-agent")
-  const fbc = infiniteNewestFbc(cookie)
-  const fbp = infiniteFbp(cookie)
-  return {
-    ...(hashed.em ? { em: hashed.em } : {}),
-    ...(hashed.external_id ? { external_id: hashed.external_id } : {}),
-    ...(fbc ? { fbc } : {}),
-    ...(fbp ? { fbp } : {}),
-    ...(clientIp ? { client_ip_address: clientIp } : {}),
-    ...(userAgent ? { client_user_agent: userAgent } : {})
-  }
-}
-
-const INFINITE_NO_REPORT${t(": InfiniteOutcomeReport")} = { accepted: false, duplicate: false, metaEventId: null, metaEventName: null }
-const INFINITE_CAMPAIGN_PROVENANCE = ["tab", "cookie", "none"]
-const INFINITE_BROWSER_CONTEXT = ["facebook_app", "instagram_app", "other_in_app", "browser", "unknown"]
-/** Infinite accepts at most this many properties on one event (more and the whole event is refused). */
-const INFINITE_MAX_PROPERTIES = 16
-
-/** The 202 body, read strictly: anything unreadable is "not accepted, nothing to mirror". */
-function infiniteReadReport(body${t(": unknown")})${t(": InfiniteOutcomeReport")} {
-  if (!body || typeof body !== "object") return INFINITE_NO_REPORT
-  const value = body${t(" as Record<string, unknown>")}
-  const accepted = value.accepted === true
-  const duplicate = value.duplicate === true
-  // Only an accepted, first-time outcome can carry a mirror instruction (§3j.1: a duplicate is null).
-  const mirror = accepted && !duplicate
-  const metaEventId = mirror && typeof value.metaEventId === "string" && value.metaEventId.length > 0 ? value.metaEventId : null
-  const metaEventName =
-    metaEventId && typeof value.metaEventName === "string" && value.metaEventName.length > 0 ? value.metaEventName : null
-  return { accepted, duplicate, metaEventId: metaEventName ? metaEventId : null, metaEventName }
-}
-
-/** Sign and POST one outcome; resolve Infinite's answer. Never throws and never rejects. */
-async function infiniteSendOutcome(input${t(": InfiniteOutcomeInput")}, eventId${t(": string")})${t(": Promise<InfiniteOutcomeReport>")} {
-  const controller = new AbortController()
-  const timer = setTimeout(() => controller.abort(), INFINITE_DELIVERY_TIMEOUT_MS)
-  try {
-    const secret = input.credentials?.secret || infiniteEnv(${JSON.stringify(SERVER_LANE_SECRET_ENV)})
-    const sourceKey =
-      input.credentials?.sourceKey ||
-      infiniteEnv(${JSON.stringify(SERVER_LANE_SOURCE_KEY_ENV)}) ||
-      INFINITE_SOURCE_KEY_FALLBACK
-    if (!secret || !sourceKey) return INFINITE_NO_REPORT
-
-    // One clock for the whole call: the event time and the visit-key bucket must agree.
-    const nowMs = input.occurredAt ? input.occurredAt.getTime() : Date.now()
-    const properties${t(": Record<string, string | number | boolean>")} = { ...(input.properties ?? {}) }
-    if (input.path) properties.path = input.path
-    // Skip our own derivation when the caller already carried a visitKey (the webhook path); drop
-    // nothing when there is neither. One shared recipe with the exported infiniteVisitKey, so a key
-    // computed at checkout and one derived here for the same request are byte-identical.
-    const visitInputs = infiniteVisitKeyInputsOf(input.visitKeyInputs)
-    if (visitInputs && properties.visitKey === undefined) {
-      properties.visitKey = await infiniteVisitKey({
-        clientIp: visitInputs.clientIp,
-        userAgent: visitInputs.userAgent,
-        nowMs,
-        secret
-      })
-    }
-    // The campaign context rides along only while the event stays within Infinite's 16-property limit:
-    // a 17th property would make Infinite refuse the WHOLE outcome, and the outcome matters more.
-    const campaign = input.campaign
-    if (campaign && INFINITE_CAMPAIGN_PROVENANCE.includes(String(campaign.campaignProvenance)) && Object.keys(properties).length < INFINITE_MAX_PROPERTIES) {
-      properties.campaign_provenance = String(campaign.campaignProvenance)
-    }
-    if (campaign && INFINITE_BROWSER_CONTEXT.includes(String(campaign.browserContext)) && Object.keys(properties).length < INFINITE_MAX_PROPERTIES) {
-      properties.browser_context = String(campaign.browserContext)
-    }
-
-    const body = JSON.stringify({
-      eventId,
-      eventName: input.type,
-      occurredAt: new Date(nowMs).toISOString(),
-      ...(input.accountKey ? { accountKey: input.accountKey } : {}),
-      properties,
-      // Signed with everything else, so a match block cannot be injected by a third party.
-      ...(input.adMatch ? { adMatch: input.adMatch } : {})
-    })
-    const response = await fetch(INFINITE_SERVER_EVENTS_URL, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        ${JSON.stringify(SERVER_LANE_SOURCE_KEY_HEADER)}: sourceKey,
-        ${JSON.stringify(SERVER_LANE_SIGNATURE_HEADER)}: await infiniteHmacHex(secret, body)
-      },
-      body,
-      signal: controller.signal
-    })
-    if (!response.ok) return INFINITE_NO_REPORT
-    // Inside the same 2 s budget: Infinite replies BEFORE it calls Meta, so this never waits on Meta.
-    return infiniteReadReport(await response.json())
-  } catch {
-    return INFINITE_NO_REPORT
-  } finally {
-    clearTimeout(timer)
-  }
-}
-
-/**
- * Sign and POST one outcome and return Infinite's answer: { accepted, duplicate, metaEventId,
- * metaEventName }. Use it where the browser is waiting on your response, and hand metaEventId (with
- * metaEventName) to the page's infiniteMetaMirror. A network failure, a timeout or an unreadable reply
- * resolves all-false / all-null, so a failed report can never fail the sign-up it describes.
- *
- * eventId is REQUIRED and must be STABLE for this outcome (an order, subscription or account id, or a
- * namespaced email hash for a lead): Infinite counts an eventId once, and the Meta id it returns is tied
- * to it. Calling without one throws at once, so the mistake shows up in development, not as a double
- * count in production.
- */
-export function ${OUTCOME_REPORT_EXPORT}(input${t(": InfiniteOutcomeInput & { eventId: string }")})${t(": Promise<InfiniteOutcomeReport>")} {
-  if (!input || typeof input.eventId !== "string" || input.eventId.trim().length === 0) {
-    throw new TypeError("${OUTCOME_REPORT_EXPORT} needs a stable eventId (an order, subscription or account id).")
-  }
-  return infiniteOutcomeWireId(input.type, input.eventId).then((wireId) => infiniteSendOutcome(input, wireId))
-}
-
-/**
- * The wire eventId of an outcome: "<type>:<eventId>" (a sha256 of the eventId once that would pass 160
- * characters), so one stable id reused for two outcome types (sign_up and trial for one account) never
- * collides in Infinite's dedupe. The echoed metaEventId is this wire id.
- */
-async function infiniteOutcomeWireId(type${t(": string")}, eventId${t(": string")})${t(": Promise<string>")} {
-  const wire = String(type) + ":" + eventId
-  if (wire.length <= 160) return wire
-  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(eventId))
-  return String(type) + ":" + Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("")
-}
-
-/**
- * Sign and POST one outcome. Resolves true when Infinite accepted it (the 202's \`accepted\`); never
- * throws, so a failed report can never fail the checkout, sign-up, or download it describes.
- */
-export async function ${OUTCOME_HELPER_EXPORT}(input${t(": InfiniteOutcomeInput")})${t(": Promise<boolean>")} {
-  const report = await infiniteSendOutcome(input, input.eventId ?? crypto.randomUUID())
-  return report.accepted
-}`
-  )
 }
 
 export { SERVER_LANE_FENCE_END, SERVER_LANE_FENCE_START }

@@ -28,6 +28,8 @@ import { gradeContextFrom } from "../../checks/grade-context.js"
 import { BEFORE_FACTS_SCHEMA, writeBeforeFactsFile, type BeforeFactsFile } from "../handoff/before-facts.js"
 import { createHash } from "node:crypto"
 import { join } from "node:path"
+import { isSupportedFramework } from "../../frameworks/index.js"
+import { prepareLocalValidation } from "../local-validation.js"
 
 import { scanForJobs, jobScanFrom, type JobScan } from "../../jobs/detectors/index.js"
 import { detectDuplicates } from "../../jobs/detectors/duplicates.js"
@@ -45,6 +47,7 @@ import type { BaseSource, WizardRunState } from "../contracts/state.js"
 import { WIZARD_PATHS } from "../contracts/state.js"
 import { wizardBranchName } from "../contracts/git-host.js"
 import { wizardGitExtras } from "../../git/index.js"
+import { ensurePushTarget } from "../push-target.js"
 import { buildColumn } from "../report.js"
 import { EVENT_LIMITS } from "../contracts/events.js"
 import { WIZARD_STEP_META } from "../contracts/steps.js"
@@ -422,6 +425,8 @@ export function createBeforeStep(options: BeforeStepOptions = {}): WizardStep<"b
       }
 
       try {
+        const pushAccess = await ensurePushTarget(ctx, deps, (line) => sub(line, "info"))
+        if (pushAccess) return pushAccess
         // ---- hosting (read-only; the base is the production branch) → branch ----
         const hosting: TagHosting = withoutEnvelope(await deps.bridge.hosting(undefined, { signal: ctx.signal }))
         const existing = ctx.state.get().git
@@ -503,9 +508,13 @@ export function createBeforeStep(options: BeforeStepOptions = {}): WizardStep<"b
         const productionHost = await decideProductionHost(ctx, deps, keys, hosting, sub)
 
         // ---- baseline build, scan, census, setup checks ----
-        const baselineBuild = await deps.checks.buildBaseline()
-        if (!baselineBuild.ok) sub("! Your build already fails on production; the wizard reports it and only fixes new failures", "warn")
+        const local = await prepareLocalValidation(ctx, deps)
+        if ("kind" in local) return local
+        const { baselineBuild, localValidation } = local
         const scan = await deps.installer.scan({ root: ctx.root, appRoot: ctx.appRoot, hosting })
+        if (!isSupportedFramework(scan.framework)) {
+          return { kind: "failed", code: "INF_WIZ_APPLY_ROLLED_BACK", message: "Unsupported repository shape for instrumentation. No install or plan was started. Choose a supported website root with --app-root.", next: "halt" }
+        }
         sub(`Scanning ${scan.fileCount} files…`, "pending")
         if (scan.truncated) sub(`! The scan stopped at ${scan.fileCount} files; some code was not read`, "warn")
         const census = await deps.checks.census(ctx.root, scan.appRoot)
@@ -597,7 +606,7 @@ export function createBeforeStep(options: BeforeStepOptions = {}): WizardStep<"b
           measuredAt,
           productionHost,
           scan: { framework: scan.framework, packageManager: scan.packageManager, appRoot: scan.appRoot, fileCount: scan.fileCount, truncated: scan.truncated },
-          facts: { ...facts, baseline, baselineBuild },
+          facts: { ...facts, baseline, baselineBuild, localValidation },
           grades,
           setupChecks,
           envTargetChecks,
@@ -605,7 +614,9 @@ export function createBeforeStep(options: BeforeStepOptions = {}): WizardStep<"b
           cmpDetected: dryLive?.environment.cmpDetected ?? cmpDetectedStatic,
           loginFound,
           // Only a navigation that was measured (a dry load that came back) is one to repeat.
-          spaNavigation: dryLive ? spaNavigation : null
+          spaNavigation: dryLive ? spaNavigation : null,
+          // What the plan promised each tool, read back by the commerce checks, the reviewer and prove.
+          eventInventory: jobScan.detections.eventInventory ?? null
         }
         await writeBeforeFactsFile(deps.fs, ctx.root, factsFile)
         const duplicates = detectDuplicates(census, dryLive)

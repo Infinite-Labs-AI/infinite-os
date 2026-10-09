@@ -6,7 +6,7 @@
 // NORMATIVE. The agent can only CLAIM; the wizard's checks decide. Nothing here spends a prompt.
 import { posix } from "node:path"
 
-import type { ChecklistItem, Claim, AgentQuestion, WizardEditRecord } from "./jobs.js"
+import type { ChecklistItem, Claim, ClaimStaticChecks, AgentQuestion, WizardEditRecord } from "./jobs.js"
 
 /** Who does the work (`runs.worker`). `none` = deterministic lanes only. */
 export type AgentWorkerKind = "claude_code" | "codex" | "none"
@@ -102,9 +102,11 @@ export interface RunJobsInput {
   brief: string
   budget: { maxTurns: number; wallMs: number }
   resume?: SessionRef
-  onClaim(claim: Claim): void
+  onClaim(claim: Claim): void | ClaimStaticChecks | Promise<ClaimStaticChecks>
   onAsk(question: AgentQuestion): void
   onProgress(progress: { jobId: string; text: string }): void
+  /** Typed tool activity and ticker time, never the agent's report_progress prose. */
+  onActivity?(activity: { kind: "read" | "edit"; path: string } | { kind: "thinking"; seconds: number }): void
   onNarrate(beat: { agent: AgentKind; role: "worker" | "reviewer"; text: string }): void
 }
 
@@ -116,6 +118,7 @@ export interface ReviewResult {
   summary: string
   checklist: Array<{ item: ReviewChecklistItemId; status: "pass" | "fail" | "cant_tell"; note: string }>
   findings: Array<{
+    category?: "analytics" | "security" | "owner_consent_privacy" | "request_ga4_proxy" | "request_meta_unsupported" | "request_meta_deletion"
     id: string
     item: ReviewChecklistItemId
     severity: "blocker" | "should" | "nit" | "question"
@@ -126,7 +129,45 @@ export interface ReviewResult {
   }>
 }
 
-export type ReviewFailure = { error: "unparseable" | "timeout" | "out_of_usage" }
+/**
+ * The parsed `JOB_REVIEW_SCHEMA` output: the review agent's answer to each of the jobs' questions
+ * (`review/questions.ts`), asked right after the coding agent's turns and before the edits settle.
+ */
+export interface JobReviewResult {
+  summary: string
+  answers: Array<{
+    question_id: string
+    answer: "pass" | "fail" | "cant_tell"
+    evidence: Array<{ path: string; line: number | null }>
+    note: string
+  }>
+}
+
+/**
+ * A review that did not run, with why. Only `unparseable` is an answer: the agent finished, but its JSON did not
+ * parse or match the schema, so only it is asked once more. Every other kind means NO answer came back:
+ *   - `rejected`: the agent's service refused the review request before the agent answered (Codex: an
+ *     `invalid_request_error`, e.g. a schema strict mode will not take); "did not match the schema" would be a lie;
+ *   - `error`: the agent stopped with an error (a non-zero exit, a failed turn, a kill for a billing-account or
+ *     configuration mismatch, a reviewer denied its own files); `message` is its last error text, sanitized, ≤ 200 chars;
+ *   - `unavailable`: the reviewer agent is not usable here; `message` says why in plain words ("is not installed",
+ *     "is not signed in");
+ *   - `timeout`, `out_of_usage`: as named.
+ * The wizard never marks a pull request ready on any of them (wizard/review-outcome.ts).
+ */
+export type ReviewFailureKind = "unparseable" | "rejected" | "timeout" | "out_of_usage" | "error" | "unavailable"
+export type ReviewFailure = { error: ReviewFailureKind; message?: string }
+
+export interface ReviewRunInput {
+  worktreeDir: string
+  reviewer: AgentKind
+  brief: string
+  /** Which answer the reviewer gives: the pull request's checklist (default) or the jobs' questions (`JOB_REVIEW_SCHEMA`). */
+  schema?: "pull_request" | "jobs"
+  onNarrate?: (beat: { agent: AgentKind; role: "reviewer"; text: string }) => void
+  /** Trusted tool events and thinking-ticker time, like the worker's status line. */
+  onActivity?: RunJobsInput["onActivity"]
+}
 
 /** §3f.1. Lane O3 implements it; every other lane gets it through WizardDeps. */
 export interface AgentRunner {
@@ -136,7 +177,13 @@ export interface AgentRunner {
    * §3x.3 `onNarrate` (optional): the reviewer's tool beats, narrated like the worker's. Every reviewer event stream is
    * also kept (0600) at `~/Library/Caches/infinite-tag/<runId>/review-<n>-<agent>.jsonl`, so a slow review can be measured.
    */
-  review(input: { worktreeDir: string; reviewer: AgentKind; brief: string; onNarrate?: (beat: { agent: AgentKind; role: "reviewer"; text: string }) => void }): Promise<ReviewResult | ReviewFailure>
+  review(input: ReviewRunInput): Promise<ReviewResult | ReviewFailure>
+  /**
+   * The jobs' review (`wizard/steps/jobs-review.ts`): the same read-only reviewer, answering the jobs' questions in the
+   * strict `JOB_REVIEW_SCHEMA`. Optional for fakes: a runner without it means no review can run (the edits are kept and
+   * the pull request stays a draft).
+   */
+  reviewJobs?(input: ReviewRunInput): Promise<JobReviewResult | ReviewFailure>
   /** True while any agent child of this run is running (the engine invariant, §3a.9.4). */
   isAgentAlive(): boolean
   killAll(): Promise<void>
@@ -475,15 +522,56 @@ export const REVIEW_SCHEMA = {
       items: {
         type: "object",
         additionalProperties: false,
-        required: ["id", "item", "severity", "path", "line", "body", "suggested_fix"],
+        // Every key is required (`category` is null when the finding has none): Codex sends this schema to OpenAI's
+        // strict structured outputs, which refuses the whole request when an object leaves a key out of `required`.
+        required: ["id", "category", "item", "severity", "path", "line", "body", "suggested_fix"],
         properties: {
           id: { type: "string", pattern: "^F[0-9]{1,2}$" },
+          category: { type: ["string", "null"], enum: ["analytics", "security", "owner_consent_privacy", "request_ga4_proxy", "request_meta_unsupported", "request_meta_deletion", null] },
           item: { enum: [...REVIEW_ITEMS] },
           severity: { enum: ["blocker", "should", "nit", "question"] },
           path: { type: "string", maxLength: 300 },
           line: { type: ["integer", "null"] },
           body: { type: "string", maxLength: 1500 },
           suggested_fix: { type: ["string", "null"], maxLength: 1500 }
+        }
+      }
+    }
+  }
+} as const
+
+/**
+ * The jobs' review answers (`JobReviewResult`). Strict-mode safe: every object lists every property as required and sets
+ * `additionalProperties: false`; an optional value is nullable instead of absent (Codex sends this schema to OpenAI's
+ * strict structured outputs, which refuses the whole request otherwise).
+ */
+export const JOB_REVIEW_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  required: ["summary", "answers"],
+  properties: {
+    summary: { type: "string", maxLength: 1000 },
+    answers: {
+      type: "array",
+      maxItems: 80,
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["question_id", "answer", "evidence", "note"],
+        properties: {
+          question_id: { type: "string", pattern: "^Q[0-9]{1,3}$" },
+          answer: { enum: ["pass", "fail", "cant_tell"] },
+          evidence: {
+            type: "array",
+            maxItems: 6,
+            items: {
+              type: "object",
+              additionalProperties: false,
+              required: ["path", "line"],
+              properties: { path: { type: "string", maxLength: 300 }, line: { type: ["integer", "null"] } }
+            }
+          },
+          note: { type: "string", maxLength: 800 }
         }
       }
     }

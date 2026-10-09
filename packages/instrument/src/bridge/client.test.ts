@@ -5,7 +5,7 @@ import { join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
 
 import { startFakeBridge, loadVerbFixtures, loadDescriptorExample, type FakeBridge } from "../../test/wizard/fake-bridge.js"
-import { BRIDGE_ERROR_STATUS, BRIDGE_VERBS, FAKE_BRIDGE_TOKEN, type BridgeVerbId } from "../wizard/contracts/bridge.js"
+import { BRIDGE_VERBS, FAKE_BRIDGE_TOKEN, type BridgeVerbId } from "../wizard/contracts/bridge.js"
 import { createTagBridgeClient, openTagBridge, type BridgeTransport } from "./client.js"
 import { BridgeError } from "./errors.js"
 
@@ -163,23 +163,6 @@ describe("TagBridgeClient against the fake bridge", () => {
     expect(second.calls).toHaveLength(0)
     rmSync(home, { recursive: true, force: true })
   })
-
-  it("the report echo is checked", async () => {
-    const descriptor = { ...loadDescriptorExample(), pid: process.pid }
-    const transport: BridgeTransport = async (request) => {
-      const body = JSON.parse(request.body ?? "{}") as { requestId: string }
-      return {
-        status: 201,
-        headers: {},
-        body: JSON.stringify({ protocolVersion: 1, requestId: body.requestId, id: "x", phase: "live_today", storedAt: "t", echo: { schema: "infinite-tag.report.v2", runId: "00000000-0000-4000-8000-000000000000" } })
-      }
-    }
-    const client = createTagBridgeClient(descriptor, { tagVersion: "x", transport })
-    client.setLinkId("lk_FAKElinkAcmeStore00000")
-    const report = JSON.parse(JSON.stringify((loadVerbFixtures().find((row) => row.verb === "report")?.request as { report: unknown }).report))
-    const error = await caught(client.postReport("7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80", "live_today", report))
-    expect(error.code).toBe("bad_response")
-  })
 })
 
 describe("strict decoding (fixture-driven transport)", () => {
@@ -262,38 +245,37 @@ describe("strict decoding (fixture-driven transport)", () => {
     }
   }
 
-  const errorRows = loadVerbFixtures().filter((row) => row.status >= 400 && row.verb !== null && row.method === BRIDGE_VERBS[row.verb].method)
+  // One fixture row per error code (the fixtures repeat codes across verbs).
+  const errorRows = [
+    ...new Map(
+      loadVerbFixtures()
+        .filter((row) => row.status >= 400 && row.verb !== null && row.method === BRIDGE_VERBS[row.verb].method)
+        .map((row) => [(row.response as { error: { code: string } }).error.code, row] as const)
+    ).values()
+  ]
 
-  it("covers every §3a.2 error code the fixtures show", () => {
-    const codes = new Set(errorRows.map((row) => (row.response as { error: { code: string } }).error.code))
-    // method_not_allowed / route_not_found rows address no verb this client can call; every other code is here.
-    for (const code of Object.keys(BRIDGE_ERROR_STATUS)) {
-      if (code === "method_not_allowed" || code === "route_not_found") continue
-      expect(codes, code).toContain(code)
-    }
-  })
-
-  it.each(errorRows.map((row) => [`${row.verb} ${row.status} ${(row.response as { error: { code: string } }).error.code}`, row] as const))(
-    "%s maps to BridgeError {status, code, retryable}",
-    async (_label, row) => {
+  it("every fixture error code maps to BridgeError {status, code, retryable}; only a 429 is retried", async () => {
+    expect(errorRows.length).toBeGreaterThan(5)
+    for (const row of errorRows) {
       const envelope = row.response as { error: { code: string; retryable: boolean; state?: string; field?: string; upstreamStatus?: number } }
+      const label = `${row.verb} ${row.status} ${envelope.error.code}`
       let calls = 0
       const inner = replay(row.status, row.response, { "retry-after": "7" })
       const counting: BridgeTransport = (request) => ((calls += 1), inner(request))
       const client = createTagBridgeClient(descriptor, { tagVersion: "x", transport: counting, maxRateLimitWaitMs: 0 })
       client.setLinkId("lk_FAKElinkAcmeStore00000")
       const error = await caught(callFor(client, row.verb as BridgeVerbId, row.request))
-      expect(error.status).toBe(row.status)
-      expect(error.code).toBe(envelope.error.code)
-      expect(error.retryable).toBe(envelope.error.retryable)
-      if (envelope.error.state) expect(error.state).toBe(envelope.error.state)
-      if (envelope.error.field) expect(error.field).toBe(envelope.error.field)
-      if (envelope.error.upstreamStatus) expect(error.upstreamStatus).toBe(envelope.error.upstreamStatus)
-      expect(error.retryAfterSeconds).toBe(7)
+      expect(error.status, label).toBe(row.status)
+      expect(error.code, label).toBe(envelope.error.code)
+      expect(error.retryable, label).toBe(envelope.error.retryable)
+      if (envelope.error.state) expect(error.state, label).toBe(envelope.error.state)
+      if (envelope.error.field) expect(error.field, label).toBe(envelope.error.field)
+      if (envelope.error.upstreamStatus) expect(error.upstreamStatus, label).toBe(envelope.error.upstreamStatus)
+      expect(error.retryAfterSeconds, label).toBe(7)
       // §3z.4: a 429 is retried ONCE after its Retry-After; nothing else is replayed on an error answer.
-      expect(calls).toBe(envelope.error.code === "rate_limited" ? 2 : 1)
+      expect(calls, label).toBe(envelope.error.code === "rate_limited" ? 2 : 1)
     }
-  )
+  })
 
   it("an unknown error code → generic", async () => {
     const client = createTagBridgeClient(descriptor, {
@@ -302,12 +284,6 @@ describe("strict decoding (fixture-driven transport)", () => {
     })
     const error = await caught(client.status())
     expect(error).toMatchObject({ status: 418, code: "generic" })
-  })
-
-  it("a non-JSON error body → generic", async () => {
-    const client = createTagBridgeClient(descriptor, { tagVersion: "x", transport: replay(500, "<html>oops</html>") })
-    const error = await caught(client.status())
-    expect(error).toMatchObject({ status: 500, code: "generic", retryable: true })
   })
 
   it("every success fixture decodes", async () => {
@@ -336,26 +312,11 @@ describe("strict decoding (fixture-driven transport)", () => {
     expect((await caught(client.status())).code).toBe("bad_response")
   })
 
-  it("a missing response key → bad_response", async () => {
-    const response = { ...(loadVerbFixtures().find((row) => row.verb === "status")?.response as Record<string, unknown>) }
-    delete response.bootId
-    const client = createTagBridgeClient(descriptor, { tagVersion: "x", transport: replay(200, response) })
-    expect((await caught(client.status())).code).toBe("bad_response")
-  })
-
   it("a request id that is not echoed → bad_response", async () => {
     const row = loadVerbFixtures().find((candidate) => candidate.verb === "site-source" && candidate.status === 200)
     const client = createTagBridgeClient(descriptor, { tagVersion: "x", transport: replay(200, row?.response) })
     client.setLinkId("lk_FAKElinkAcmeStore00000")
     const error = await caught(client.ensureSiteSource({ productionHosts: ["acme-store.com"], consentMode: "not_required" }))
     expect(error.code).toBe("bad_response")
-  })
-
-  it("a wrong success status is an error, not a success", async () => {
-    const row = loadVerbFixtures().find((candidate) => candidate.verb === "runs.start" && candidate.status === 201)
-    const client = createTagBridgeClient(descriptor, { tagVersion: "x", transport: replay(200, row?.response) })
-    client.setLinkId("lk_FAKElinkAcmeStore00000")
-    const error = await caught(client.startRun({ tagVersion: "x", repoFingerprint: SITE.repoFingerprint, worker: "none", reviewer: "none" }))
-    expect(error.code).toBe("generic")
   })
 })

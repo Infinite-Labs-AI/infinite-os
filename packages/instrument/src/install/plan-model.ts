@@ -1,6 +1,14 @@
+import { planExclusions } from "./plan-exclusions.js"
+import { configRewriteJobs } from "./config-rewrite-jobs.js"
+import { sensitivePosthogOptions } from "./posthog-sensitive.js"
+import type { ManagedCapturePlan } from "./managed-capture.js"
+import { consentHandoff } from "./consent-handoff.js"
+import type { OwnerWiringPreview } from "../frameworks/owner-wiring-preview.js"
+import { scopeOwnerJob } from "../jobs/owner-scope.js"
+import { isRepositoryWork, isContinuedWork } from "./plan-permission.js"
 // §3d.3–§3d.4 and step 4 of the wizard: the ONE plan screen.
 //
-// The plan model ASKS ONLY FOUR THINGS — consent mode, conversion names, privacy text and the npm
+// The plan model ASKS ONLY THREE THINGS — consent mode, conversion names and the npm
 // line. Those four are the only `editable` lines. Everything else is a line the user approves or
 // declines (or an info / user-action line shown only). Rules it enforces (R2-10, R2-11, R2-21):
 //   • every agent job that touches an ADOPTED provider (jobs 3, 4, 5, 6, 7) is seeded only behind an
@@ -13,8 +21,17 @@
 //     Infinite does not list it, NO guard is emitted and a blocking line says why;
 //   • the server-lane line carries the probe disclosure (§3h.6);
 //   • nothing here is computed from agent output.
+import { buildHostGuardExpression } from "../host-guard.js"
+import { ownerGuardHandoff } from "../jobs/owner-boundary.js"
+import { frozenUnitAt } from "../jobs/consent-units.js"
+import { conversionWords } from "./conversion-words.js"
+export { conversionWords }
+import { expressionInitOf, expressionOptOutLines } from "./improve.js"
 import { automaticEventsPerVisitOf } from "../checks/grade-test-run.js"
-import { applyApprovalsTo, itemChecksFor, requiredLineKind } from "../jobs/registry.js"
+import { applyApprovalsTo, COMMERCE_EVENTS_TARGET, EVENT_WORDS, FUNNEL_EVENT_OF_TARGET, itemChecksFor, listWords, requiredLineKind } from "../jobs/registry.js"
+import { proposedConversionName } from "../jobs/plan-data.js"
+import { snapshotFromFiles } from "../jobs/repo-files.js"
+import { buildEventInventory, META_EVENT_NAME, type EventInventory, type FunnelEvent, type UnsavedFormRoute } from "../scan/event-inventory.js"
 import { createHash } from "node:crypto"
 
 import type { ImproveLine, ImproveLineKind, ProviderId } from "../types.js"
@@ -49,10 +66,14 @@ export type PlanApprovalsLike = AskAnswers["plan"]
 export interface WizardBeforeFacts extends BeforeFacts {
   baseline?: BaselineResponseFields | null
   baselineBuild?: BuildResult | null
+  localValidation?: "measured" | "not_measured"
 }
 
 /** The scan facts the plan reads (the installer's `WizardScanResult` carries them). */
 export interface PlanScanFacts {
+  managedCapture?: ManagedCapturePlan
+  ownerWiring?: OwnerWiringPreview
+  sources?: Readonly<Record<string, string>>
   framework: string
   /** Providers this install manages already (from the receipt). */
   managedProviders: ProviderId[]
@@ -82,9 +103,14 @@ export interface PlanScanFacts {
    * Review I1 P1-2: a Next app's own config (repo-relative) that lacks Infinite's collect rewrite. The installer
    * never edits it; the plan says the rewrite is an agent job (checked by the wizard) before anything is written.
    */
-  nextConfigRewrites?: { path: string } | null
+  nextConfigRewrites?: { path: string; snippet?: string } | null
   /** Review I1 P1-2: why the install cannot be applied as planned (a dry plan's blocker), or null. */
   installBlocked?: string | null
+  /**
+   * The event × tool inventory (`src/scan/event-inventory.ts`, the same one `JobScan.detections.eventInventory` holds).
+   * Absent = built here from `sources`; neither = the headline reads the candidates' own inventory entries.
+   */
+  eventInventory?: EventInventory | null
 }
 
 export interface PlanAgentSummary {
@@ -116,6 +142,11 @@ export interface PlanRunFacts {
   site?: SiteState | null
   /** The bridge advertises `tag.site-claim.v1` (the site-file proof path exists). */
   siteClaim: boolean
+  /**
+   * The bridge advertises `tag.meta-relay.v1` (Infinite can send this site's server conversions to Meta). Absent = not
+   * known (Meta counts as connected on its keys alone); false = the app cannot, so Meta is not connected in Infinite.
+   */
+  metaRelay?: boolean
 }
 
 /** The preview-guard decision for a wizard install (§3h.9). */
@@ -127,6 +158,10 @@ export type GuardDecision =
 
 /** The plan model plus what `apply` needs (never shown, never hashed separately). */
 export interface WizardPlanModel extends PlanModel {
+  bannerSignal?: PlanLine
+  scopedCandidates?: ChecklistItem[]
+  approvalMode?: "shown_and_continued"
+  ownerWiring?: OwnerWiringPreview
   guard: GuardDecision
   /** The tools this plan installs or updates (each behind its `install_provider` line). */
   installTools: ProviderId[]
@@ -190,7 +225,7 @@ export const RUNNABILITY_TEXT = {
   claimWording: (host: string) =>
     `Infinite confirms ${host} is yours after your merge, from a one-line file this pull request adds (/.well-known/infinite-site-verification.txt). Until then it records nothing.`,
   conversionsUnwired: (names: readonly string[]) =>
-    `Conversions (${names.join(", ") || "none named"}): wired once Infinite's tag or a connected tool is installed; this run installs neither.`
+    `Not wired this run: ${names.join(", ") || "no conversion"}. The server lane or the browser helpers they need cannot be set up yet. Other conversion jobs shown in this plan can still run.`
 } as const
 
 /** The source is verified: an existing site source (not a pending claim), or a Vercel connection serving the host. */
@@ -202,6 +237,27 @@ function verifiedPath(facts: LineFacts): boolean {
  * §3y.5 / DECISIONS §1.6: whether a line can be approvable. `{ok:false, line}` = emit it as `user_action` with that
  * text (an empty text = no line at all). A test enumerates every PlanLineKind against unrunnable facts.
  */
+/**
+ * P2-3: when the existing pixel's init sits inside the site's consent code, the installer cannot add the opt-out
+ * there, so the plan never shows it as something we do: one "For you" line with the exact two lines to add. Null when
+ * the installer can make the change (or this is not that line).
+ */
+function autoConfigOwnerText(entry: ImproveLine, appRoot: string | undefined, sources: ReadonlyMap<string, string> | null): string | null {
+  if (entry.kind !== "autoconfig_off_adopted" || entry.owner !== "code" || !entry.evidence || !sources) return null
+  const file = appRoot === undefined || appRoot === "." || appRoot === "" ? entry.evidence.file : `${appRoot.replace(/\/$/, "")}/${entry.evidence.file}`
+  const source = sources.get(entry.evidence.file) ?? sources.get(file)
+  if (source === undefined || frozenUnitAt(source, entry.evidence.line, file) === null) return null
+  const literal = /fbq\s*\(\s*["']init["']\s*,\s*["'](\d{15,16})["']/.exec(source)
+  const init = literal ? null : expressionInitOf(source)
+  const add = literal
+    ? [`fbq('set', 'autoConfig', false, '${literal[1]}');`, "fbq.disablePushState = true;"]
+    : init
+      ? expressionOptOutLines(init.receiver, init.idExpression, /\.[cm]?tsx?$/i.test(file))
+      : null
+  if (!add) return null
+  return `For you: turn off Meta's automatic events and its automatic page-change PageViews on your existing pixel at ${file}:${entry.evidence.line}, in the code that starts it after your cookie banner. Add these two lines right before its fbq('init'):\n${add.join("\n")}`
+}
+
 export function lineRunnable(kind: RunnableLineKey, facts: LineFacts): { ok: true } | { ok: false; line: string } {
   switch (kind) {
     case "install_provider:infinite": {
@@ -226,6 +282,28 @@ export function lineRunnable(kind: RunnableLineKey, facts: LineFacts): { ok: tru
       return { ok: true }
   }
 }
+
+/** The plan line that says the server code is written now and the owner adds its settings (the hand-off path). */
+export const SERVER_LANE_HANDOFF_LINE_ID = "info:server_lane_handoff"
+
+/**
+ * The hand-off path applies when the server lane can be written (a target, and Infinite's tag in this install) and the
+ * ONLY thing missing is Infinite's way to save its environment variables on the host.
+ */
+export function serverLaneHandoffApplies(rule: { ok: true } | { ok: false; line: string }, installable: boolean): boolean {
+  return installable && !rule.ok && (rule.line === RUNNABILITY_TEXT.serverLaneNoConnection || rule.line === RUNNABILITY_TEXT.serverLaneNoScope)
+}
+
+/** "We'll write the server code; you add the secret in Vercel (steps in the PR)." — named for the site's host. */
+export function serverLaneHandoffText(provider: string | null | undefined, targetLabel: string): string {
+  const host = provider === "vercel" || /vercel|next/i.test(targetLabel) ? "Vercel" : provider === "netlify" || /netlify/i.test(targetLabel) ? "Netlify" : provider === "cloudflare" || /cloudflare/i.test(targetLabel) ? "Cloudflare" : null
+  return `We'll write the server code; you add the secret in ${host ?? "your host's settings"} (steps in the PR).`
+}
+
+/** The plan line for the Meta pixel's browser match data (parity gap 5). */
+export const META_ADVANCED_MATCHING_LINE_ID = "meta_advanced_matching"
+export const META_ADVANCED_MATCHING_TEXT =
+  "Meta: when your page knows the visitor's email or account id, send it hashed with the browser events, only for visitors who allowed tracking, so Meta can match more of your ad clicks. Turn this off to leave it out."
 
 export const GUARD_NO_HOST_TEXT = "Infinite does not know your production domain yet, so no preview guard is added; tell the wizard your live domain (--production-host)."
 
@@ -262,13 +340,14 @@ export function seedItemsAfterApprovals(
   lines?: ReadonlyArray<{ id: string; approved: boolean | null }>
 ): ChecklistItem[] {
   const withheld = new Set((plan as Partial<WizardPlanModel>).withheld ?? [])
+  candidates = (plan as Partial<WizardPlanModel>).scopedCandidates ?? candidates
   const pool = [...candidates, ...seeds.filter((seed) => !candidates.some((item) => item.id === seed.id))].filter((item) => !withheld.has(item.id))
   const applied = applyApprovalsTo(pool, plan, approvals)
   const lineStates =
     lines ??
     plan.lines.map((planLine) => ({
       id: planLine.id,
-      approved: planLine.requires !== "approval" ? null : approvals.declined.includes(planLine.id) ? false : approvals.approved.includes(planLine.id) ? true : null
+      approved: approvals.declined.includes(planLine.id) ? false : isContinuedWork(planLine) ? true : planLine.requires !== "approval" ? null : approvals.approved.includes(planLine.id) ? true : null
     }))
   return gateSeededItems(plan, { lines: [...lineStates] }, applied)
 }
@@ -302,7 +381,7 @@ export const DECISION_LINE_IDS = {
 } as const
 
 /** The ONLY editable lines (the four user decisions). */
-export const EDITABLE_LINE_IDS: readonly string[] = Object.values(DECISION_LINE_IDS)
+export const EDITABLE_LINE_IDS: readonly string[] = Object.values(DECISION_LINE_IDS).filter(id => id !== "privacy_text")
 
 /** §3h.6 (R1-34): the server-lane probe disclosure, on the plan line and in the report. */
 export const SERVER_LANE_PROBE_DISCLOSURE =
@@ -358,12 +437,16 @@ export function lineKindForCandidate(item: ChecklistItem): PlanLineKind | null {
   return requiredLineKind(item)
 }
 
-/** Conversion names proposed from the detectors' candidates (jobs 8 and 10): the item target when it is a valid name. */
+/**
+ * Conversion names proposed from the detectors' candidates (jobs 8 and 10). Gap 2: each target's proposed name is one
+ * Infinite's Meta relay maps to a Meta standard event (`trial` → `start_trial`, `signup` → `sign_up`; plan-data's
+ * `PROPOSED_CONVERSION_NAME`), so a server report reaches Meta as that event.
+ */
 export function proposedConversionNames(candidates: readonly ChecklistItem[]): string[] {
   const names: string[] = []
   for (const item of candidates) {
     if (item.jobId !== "server_conversions" && item.jobId !== "conversions_to_tools") continue
-    const name = itemTarget(item)
+    const name = proposedConversionName(itemTarget(item))
     if (CONVERSION_NAME_PATTERN.test(name) && !names.includes(name)) names.push(name)
   }
   return names
@@ -456,8 +539,7 @@ export function guardDecision(input: {
 // ---------------------------------------------------------------------------------------------
 
 /**
- * The privacy draft: one plain sentence per NEWLY installed tool (job 14 inserts it verbatim after
- * the user approves it). The Infinite sentences say what the installed lanes send, from the same
+ * Optional copy-only disclosure wording for the site owner. Never a plan question or agent instruction. The Infinite sentences say what the installed lanes send, from the same
  * facts as the harness's disclosure notice.
  */
 export function draftPrivacyParagraph(tools: readonly ProviderId[], serverLane: boolean): string | null {
@@ -542,40 +624,54 @@ export function buildPlanModel(input: PlanModelInput): WizardPlanModel {
   const { keys, before, scan } = input
   const lines: PlanLine[] = []
   const facts = lineFactsFor(input)
-  const { tools, ids: toolIds, infiniteUnrunnable } = newTools(input, facts)
+  const { tools: proposedTools, ids: toolIds, infiniteUnrunnable } = newTools(input, facts)
+  const tools = scan.ownerWiring?.canWire === false ? [] : proposedTools
   const hosting = before.hosting
   const serverLaneRule = lineRunnable("server_lane", facts)
-  const serverLaneApprovable = serverLaneRule.ok && scan.serverLane !== null && tools.includes("infinite")
+  // Founder ruling (review P0-6): when the only thing missing is Infinite's way to set the lane's environment variables
+  // on the host (no Vercel connection serving the site, or no env-write permission), the agent still writes the server
+  // code in the pull request. It is inert until the variables exist; the owner hand-off (docs/infinite-server-events.md
+  // and the pull request's section) says how to add them.
+  const serverLaneHandoff = serverLaneHandoffApplies(serverLaneRule, scan.serverLane !== null && tools.includes("infinite"))
+  // The lane Infinite provisions itself (it saves the environment variables on Vercel).
+  const serverLaneProvisioned = serverLaneRule.ok && scan.serverLane !== null && tools.includes("infinite")
+  const serverLaneApprovable = serverLaneProvisioned || serverLaneHandoff
   // §3y.5 (P3-13): job 10 is seeded only when this install emits the conversion helpers (a new or managed tool).
   const helpersEmitted = tools.length > 0 || scan.managedProviders.length > 0
   const infiniteRecordable = tools.includes("infinite") || scan.managedProviders.includes("infinite") || keys.infinite.status === "ready"
-  // R2-6: job 8 reports through Infinite (`reportInfiniteOutcome`): with no helper emitted AND no Infinite to report
-  // to, it is withheld with job 10 (one user_action line), so the conversion decision governs nothing this run.
-  const withheldItems = helpersEmitted
-    ? []
-    : input.candidates.filter((item) => item.jobId === "conversions_to_tools" || (!infiniteRecordable && item.jobId === "server_conversions"))
+  // Server outcomes need the server lane's reportInfiniteOutcome export. Browser helpers alone do not provide it.
+  const withheldItems = input.candidates.filter((item) =>
+    (item.jobId === "server_conversions" && !serverLaneApprovable) ||
+    (item.jobId === "conversions_to_tools" && !helpersEmitted)
+  )
   const withheld = withheldItems.map((item) => item.id)
-  const candidates = input.candidates.filter((item) => !withheld.includes(item.id))
+  const sources = scan.sources ? new Map(Object.entries(scan.sources)) : null
+  const captureScope = (item: ChecklistItem): ChecklistItem => {
+    const capture = scan.managedCapture
+    if (!capture || item.jobId !== "meta_improve" || !/^meta_improve:capture(?::|$)/.test(item.id)) return item
+    if (!capture.canWire) {
+      const requirement = capture.requirements[0]
+      return { ...item, owner: "code", state: "left_for_you", blockedReason: undefined, checks: [], claim: undefined,
+        note: `For you: load the ad-click capture from your app entry, so the landing ad-click id is saved. ${requirement?.reason ?? ""}`.trim(),
+        ownerBoundary: { ...(requirement?.ownerBoundary ?? { kind: "unproven_wiring" as const }), wiring: capture.requirements.map(entry => `${entry.path}:\n${entry.snippet}`).join("\n\n") },
+        allow: { files: [], create: [] } }
+    }
+    return { ...item, owner: "code", state: "pending", blockedReason: undefined, ownerBoundary: undefined, claim: undefined, checks: itemChecksFor("meta_improve", "capture", scan.framework),
+      note: undefined, title: "Save Meta landing click ids in a managed module",
+      allow: { files: [...capture.editEntrypoints], create: [capture.module] },
+      trigger: { finding: `The installer adds ${capture.module} and wires it before the pixel from ${capture.entrypoints.join(", ")}. The pixel's own file is unchanged.`, evidence: capture.editEntrypoints.map(file => ({ file, line: 1 })) } }
+  }
+  const sensitiveNeeded = (file: string | undefined) => sensitivePosthogOptions(file ? scan.sources?.[file] : undefined, scan.sensitivePaths) !== null
+  let candidates = input.candidates.filter(item => item.id !== "posthog_improve:sensitive_pages" || sensitiveNeeded(item.allow.files[0])).filter((item) => !withheld.includes(item.id)).map(captureScope).map(item => sources ? scopeOwnerJob(item, sources, scan.appRoot) : item)
 
   // ---- the four decisions ----
   // R2-6 (live run 2): a decision is asked only when something it governs can be installed or recorded this run.
   // Consent governs Infinite's collection (an install, a managed tag, or a site source it is recorded on) and the
   // consent gate of the managed tags and the Meta click-id capture. Conversion names govern the conversion jobs, the
   // emitted helpers and Infinite's declared conversions. Neither is asked, or pre-checked, when none of that exists.
-  const consentProposed = input.consentFlag ?? keys.infinite.consentMode ?? null
-  const consentLine = line({
-      id: DECISION_LINE_IDS.consentMode,
-      kind: "consent_mode",
-      text:
-        consentProposed === "required"
-          ? "Consent: wait for your cookie banner's yes before Infinite collects (covers Infinite only)"
-          : consentProposed === "not_required"
-            ? "Consent: collect by default; Do-Not-Track and GPC visitors are still skipped (covers Infinite only)"
-            : "Consent: choose — collect by default, or wait for your cookie banner's yes (covers Infinite only)",
-      requires: "approval",
-      editable: true
-    })
-  lines.push(consentLine)
+  // The wizard never asks how the tag runs. It installs active, like the site's own pixels; an owner who wants
+  // consent gating adds it themselves. Only the classic `--consent-mode` flag can select the waiting mode.
+  const consentProposed = input.consentFlag ?? "not_required"
   // The names are the user's decision for Infinite whatever runs this time (a withheld job-10 type still names one).
   const conversionNames = proposedConversionNames(input.candidates)
   const conversionJobs = candidates.filter((item) => item.jobId === "server_conversions" || item.jobId === "conversions_to_tools").map((item) => item.id)
@@ -584,30 +680,37 @@ export function buildPlanModel(input: PlanModelInput): WizardPlanModel {
       line({
         id: DECISION_LINE_IDS.conversionNames,
         kind: "conversion_names",
-        text: conversionNames.length > 0 ? `Conversions: ${conversionNames.join(" · ")}` : "Conversions: none found — add names, or skip",
+        // P2-4: plain words on the screen ("checkout starts, purchases and leads"); the names themselves stay the data.
+        text: conversionNames.length > 0 ? `Conversions: ${conversionWords(conversionNames)}` : "Conversions: none found — add names, or skip",
         requires: "approval",
         editable: true,
         ...(conversionJobs.length > 0 ? { jobIds: conversionJobs } : {})
       })
     )
   }
-  const privacyText = draftPrivacyParagraph(tools, serverLaneApprovable)
-  if (privacyText) {
-    const privacyJobs = candidates.filter((item) => item.jobId === "privacy_paragraph").map((item) => item.id)
-    const where = candidates.find((item) => item.jobId === "privacy_paragraph")?.trigger.evidence.find((entry) => "file" in entry)
+  const metaEnvIds = [...new Map((before.census?.envSourcedIds ?? [])
+    .filter((entry) => entry.tool === "meta")
+    .map((entry) => [`${entry.envName}:${entry.file}:${entry.line}`, entry])).values()]
+  if (metaEnvIds.length > 0) {
+    const selected = keys.meta.status === "connected" && keys.meta.pixels.length === 1 ? keys.meta.pixels[0]!.pixelId : null
     lines.push(
       line({
-        id: DECISION_LINE_IDS.privacyText,
-        kind: "privacy_text",
-        text: `Privacy: ${privacyText.split("\n").length} drafted lines for ${where && "file" in where ? where.file : "your privacy page"}`,
-        requires: "approval",
-        editable: true,
-        ...(privacyJobs.length > 0 ? { jobIds: privacyJobs } : {})
+        id: "env_source:meta_pixel",
+        kind: "user_action",
+        requires: "info",
+        text: `Meta pixel id source: your existing pixel reads ${metaEnvIds.map((entry) => `${entry.envName} (${entry.file}:${entry.line})`).join(", ")} from host settings. ${selected ? `Infinite selected pixel ${selected}; confirm the env value matches it.` : "Pick one Meta pixel in Infinite, then compare it with that env value."}`
       })
     )
   }
+  for (const item of candidates) {
+    if (item.jobId !== "conversions_to_tools" || item.state !== "blocked" || item.blockedReason !== "needs_you" || item.allow.files.length > 0 || item.allow.create.length > 0) continue
+    item.note = `${item.title}: not wired. No successful completion handler was found in the browser code; add or identify that success handler before this conversion can be sent. A link or button click alone is not a completed outcome.`
+    lines.push(line({ id: `user_action:conversion_target:${item.id}`, kind: "user_action", requires: "user_action", text: item.note }))
+  }
+  const privacyText = null // Owner-only; suggested wording is copy-only report material.
   let npmInstall: string | null = null
-  if (scan.serverLane && scan.serverLane.installPackages.length > 0 && serverLaneApprovable && lineRunnable("npm_install", facts).ok) {
+  // The package the lane imports goes in with the lane (also on the hand-off path: the build needs it either way).
+  if (scan.serverLane && scan.serverLane.installPackages.length > 0 && serverLaneApprovable && (serverLaneHandoff || lineRunnable("npm_install", facts).ok)) {
     if (scan.npm && "commandLine" in scan.npm) {
       npmInstall = scan.npm.commandLine
       lines.push(
@@ -649,7 +752,7 @@ export function buildPlanModel(input: PlanModelInput): WizardPlanModel {
   }
   if (tools.includes("infinite") && !facts.infiniteReady && !facts.vercelServesHost && facts.productionHost) {
     // The claim path (§3y.2): said right under the Infinite line, before anything is approved.
-    lines.push(line({ id: "info:infinite_site_file", kind: "install_provider", text: RUNNABILITY_TEXT.claimWording(facts.productionHost), requires: "info" }))
+    lines.push(line({ id: "info:infinite_site_file", kind: "user_action", text: RUNNABILITY_TEXT.claimWording(facts.productionHost), requires: "info" }))
   }
   if (infiniteUnrunnable) {
     lines.push(line({ id: "user_action:infinite", kind: "user_action", text: infiniteUnrunnable, requires: "user_action" }))
@@ -671,9 +774,11 @@ export function buildPlanModel(input: PlanModelInput): WizardPlanModel {
     lines.push(
       line({
         id: "user_action:next_config_rewrites",
-        kind: "user_action",
+        kind: "improve_additive",
+        ownership: "managed",
+        jobIds: ["unusual_layout:next_config_rewrites"],
         text: `Your own ${scan.nextConfigRewrites.path} is never edited by the installer: Infinite's collect rewrite goes in it as an agent job the wizard checks (or you add it). Until it is there, Infinite's tag records nothing.`,
-        requires: "user_action"
+        requires: "info"
       })
     )
   }
@@ -682,11 +787,15 @@ export function buildPlanModel(input: PlanModelInput): WizardPlanModel {
       line({
         id: "server_lane",
         kind: "server_lane",
-        text: `Server lane (${scan.serverLane.targetLabel}): counts every page request on your server, even with ad blockers. ${SERVER_LANE_PROBE_DISCLOSURE}`,
+        text: `Server lane (${scan.serverLane.targetLabel}): counts every page request on your server, even with ad blockers, and carries the conversions your server reports to Infinite. ${SERVER_LANE_PROBE_DISCLOSURE}`,
         requires: "approval",
-        ownership: "managed"
+        ownership: "managed",
+        jobIds: candidates.filter((item) => item.jobId === "server_conversions").map((item) => item.id)
       })
     )
+    if (serverLaneHandoff) {
+      lines.push(line({ id: SERVER_LANE_HANDOFF_LINE_ID, kind: "user_action", requires: "info", text: serverLaneHandoffText(hosting.provider, scan.serverLane.targetLabel) }))
+    }
   } else if (scan.serverLane && (tools.includes("infinite") || infiniteUnrunnable) && !serverLaneRule.ok && serverLaneRule.line) {
     // §3y.5: never pre-checked when it cannot run; it says what is needed instead.
     lines.push(line({ id: "user_action:server_lane", kind: "user_action", text: serverLaneRule.line, requires: "user_action" }))
@@ -694,7 +803,8 @@ export function buildPlanModel(input: PlanModelInput): WizardPlanModel {
 
   // ---- the preview guard ----
   const guardedNew = tools.filter((tool): tool is "ga4" | "posthog" | "meta" => tool === "ga4" || tool === "posthog" || tool === "meta")
-  const adoptedGuardLines = scan.improve.filter((entry) => entry.kind === "preview_guard_adopted")
+  const consentObstructed = new Set(candidates.filter(item => item.jobId === "preview_guard" && item.state === "left_for_you").map(item => itemTarget(item)))
+  const adoptedGuardLines = scan.improve.filter((entry) => entry.kind === "preview_guard_adopted" && !consentObstructed.has(entry.provider))
   const guard = guardDecision({
     keys,
     hosting,
@@ -740,6 +850,7 @@ export function buildPlanModel(input: PlanModelInput): WizardPlanModel {
       line({
         id: "sensitive_pages:posthog:managed",
         kind: "sensitive_pages",
+        sensitivePaths: [...scan.sensitivePaths],
         text: `PostHog: no session replay and no autocapture on sensitive pages (${scan.sensitivePaths.join(", ")}).`,
         requires: "approval",
         ownership: "managed"
@@ -748,7 +859,7 @@ export function buildPlanModel(input: PlanModelInput): WizardPlanModel {
   }
 
   // ---- adopted providers: improve lines, linked to the candidates that need them ----
-  const improveLines = scan.improve.filter((entry) => entry.kind !== "preview_guard_adopted" || guard.emit)
+  const improveLines = scan.improve.filter(entry => entry.kind !== "sensitive_pages" || sensitiveNeeded(entry.evidence?.file)).filter((entry) => entry.kind !== "preview_guard_adopted" || (guard.emit && !consentObstructed.has(entry.provider)))
   /**
    * Lines a candidate links to, by EXACT identity (kind + provider + normalised target). There is no
    * "first line of the kind" fallback: a candidate that matches no line gets a line of its own, so
@@ -760,6 +871,7 @@ export function buildPlanModel(input: PlanModelInput): WizardPlanModel {
   const share = previewShare(before.baseline)
   const automatic = automaticMetaEventsPerVisit(before)
   for (const entry of improveLines) {
+    const ownerAutoConfig = autoConfigOwnerText(entry, scan.appRoot, sources)
     const measured =
       entry.kind === "preview_guard_adopted"
         ? share ?? undefined
@@ -775,10 +887,12 @@ export function buildPlanModel(input: PlanModelInput): WizardPlanModel {
         entry.kind === "preview_guard_adopted" && entry.provider === "meta"
           ? `${entry.text} Preview share: ${share ? share.value : "—"}.`
           : entry.kind === "autoconfig_off_adopted"
-            ? `${entry.text} Measured: ${automatic === null ? "—" : `${automatic} per visit`}.`
+            ? ownerAutoConfig ?? (automatic === null ? entry.text : `${entry.text} Measured: ${automatic} per visit.`)
             : entry.text,
-      requires: "approval",
+      // P2-3: the installer cannot add the opt-out inside the site's consent code, so the line is the owner's.
+      requires: ownerAutoConfig !== null ? "user_action" : "approval",
       ownership: "adopted",
+      ...(entry.kind === "sensitive_pages" ? { sensitivePaths: [...scan.sensitivePaths] } : {}),
       ...(measured ? { measured } : {})
     })
     lines.push(planLine)
@@ -796,6 +910,7 @@ export function buildPlanModel(input: PlanModelInput): WizardPlanModel {
   // left unlinked. A duplicate (job 6) is always its own line, one per candidate: the measured wording
   // comes from `before` when the same tool + id was found there.
   for (const item of candidates) {
+    if (item.state === "left_for_you" || item.jobId === "privacy_paragraph") continue
     const kind = lineKindForCandidate(item)
     // Plan-wide kinds are decided by their own one line (consent/names/privacy/server lane), never per candidate.
     if (kind === null || kind === "conversion_names" || kind === "privacy_text" || kind === "server_lane") continue
@@ -823,18 +938,24 @@ export function buildPlanModel(input: PlanModelInput): WizardPlanModel {
 
   // An improve line no candidate links, whose change is (partly) the agent's, gets its own item, so an
   // approved line always has a job or a code edit behind it (P2-14).
-  const seeds: ChecklistItem[] = []
+  let seeds: ChecklistItem[] = scan.nextConfigRewrites && tools.includes("infinite")
+    ? configRewriteJobs([{ path: scan.nextConfigRewrites.path, snippet: scan.nextConfigRewrites.snippet ?? "Add the Infinite collect rewrite named by the install plan." }], candidates) : []
   const takenIds = new Set(candidates.map((item) => item.id))
   for (const entry of improveLines) {
     const planLine = lines.find((candidateLine) => candidateLine.id === entry.id)
     if (!planLine || (planLine.jobIds?.length ?? 0) > 0) continue
-    const seed = seedForImproveLine(entry, scan.appRoot ?? ".", scan.framework)
-    if (!seed || takenIds.has(seed.id)) continue
+    const rawSeed = seedForImproveLine(entry.kind === "capture_beside_adopted_pixel" && scan.managedCapture ? { ...entry, owner: "agent" } : entry, scan.appRoot ?? ".", scan.framework)
+    const seed = rawSeed ? captureScope(rawSeed) : null
+    if (!seed) continue
+    // An already-scoped detector candidate still owns this line, even when the owner must do it.
+    planLine.jobIds = [seed.id]
+    if (takenIds.has(seed.id)) continue
     takenIds.add(seed.id)
     seeds.push(seed)
-    planLine.jobIds = [seed.id]
   }
 
+  const serverEvents = serverReportedEvents(candidates)
+  const serverEventWords = serverEvents.map((event) => EVENT_WORDS[event])
   // ---- Meta: the goal (D16) and the server-events relay (D11) ----
   const metaPresent = tools.includes("meta") || scan.adopted.some((entry) => entry.provider === "meta")
   const goal = metaPresent ? recommendMetaGoal(conversionNames) : null
@@ -847,19 +968,29 @@ export function buildPlanModel(input: PlanModelInput): WizardPlanModel {
           ? `Meta goal: ${goal} (${goal === "StartTrial" ? "a SaaS sign-up starts a trial" : "a shop sale"}); change it in Meta any time.`
           : "Meta goal: StartTrial if you sell subscriptions, Purchase if you sell products.",
         // With no recommendation there is nothing to approve: the line only informs (never an answer).
-        requires: goal ? "approval" : "info"
+        requires: "info"
       })
     )
   }
-  if (keys.meta.status === "connected" && keys.meta.pixels.length === 1) {
+  if (metaConnectedInInfinite(keys, input.run?.metaRelay) && keys.meta.pixels.length === 1) {
     lines.push(
       line({
         id: "meta_relay",
         kind: "meta_relay",
-        text: "Meta server events: send your server-side conversions to Meta through Infinite, with ONE shared event id so the browser and server never count twice.",
+        text: serverEventWords.length > 0
+          ? `Meta server events: Infinite sends the ${listWords(serverEventWords)} your server reports to Meta, so Meta counts each one once.`
+          : "Meta server events: Infinite sends the conversions your server reports to Meta, so Meta counts each one once.",
         requires: "approval"
       })
     )
+  }
+
+  // Parity gap 5: the managed Meta pixel's browser events carry hashed match data (email / account id the page knows),
+  // only while the tag says the visitor allowed tracking. On by default when Meta is connected; a plain line the owner
+  // can turn off (declining it sets `decisions.metaAdvancedMatching: false`).
+  const metaManaged = tools.includes("meta") || scan.managedProviders.includes("meta")
+  if (metaManaged && keys.meta.status === "connected") {
+    lines.push(line({ id: META_ADVANCED_MATCHING_LINE_ID, kind: "meta_advanced_matching", requires: "approval", ownership: "managed", text: META_ADVANCED_MATCHING_TEXT }))
   }
 
   // §3x.3 (F6): the site's own Meta pixel counted only the first page of the test load's visit. A change to the
@@ -876,6 +1007,41 @@ export function buildPlanModel(input: PlanModelInput): WizardPlanModel {
       })
     )
   }
+
+  if (sources) {
+    candidates = candidates.map(item => scopeOwnerJob(item, sources, scan.appRoot))
+    seeds = seeds.map(item => scopeOwnerJob(item, sources, scan.appRoot))
+  }
+  {
+    // Capture planning and the registry may already have scoped items without scan source text.
+    const left = new Map([...candidates, ...seeds].filter(item => item.state === "left_for_you").map(item => [item.id, item]))
+    for (const planLine of lines) {
+      if (!planLine.jobIds?.some(id => left.has(id))) continue
+      const runnable = planLine.jobIds.filter(id => !left.has(id))
+      if (runnable.length) planLine.jobIds = runnable
+      else { planLine.requires = "user_action"; planLine.editable = false; planLine.text = planLine.jobIds.map(id => left.get(id)?.note ?? "Left for the owner").join("\n"); planLine.jobIds = [...planLine.jobIds] }
+    }
+  }
+  if (scan.managedCapture?.canWire) {
+    for (const planLine of lines) if (planLine.kind === "capture_beside_adopted_pixel") planLine.text = `Meta: save landing ad-click ids in ${scan.managedCapture.module}, loaded first from ${scan.managedCapture.entrypoints.join(", ")}. The pixel's own file is unchanged.`
+  }
+  for (const item of [...candidates, ...seeds].filter(entry => entry.state === "left_for_you")) {
+    if (item.id === "posthog_improve:sensitive_pages" && item.ownerBoundary) {
+      const options = sensitivePosthogOptions(sources?.get(item.ownerBoundary.file ?? ""), scan.sensitivePaths)
+      item.note = `${item.note ? `${item.note} ` : ""}This addition keeps your existing exclusions and only turns collection off on the listed pages.`
+      if (options) item.ownerBoundary.wiring = `// Add last inside the existing posthog.init options object.\n${options}`
+    }
+    const handoff = item.jobId === "preview_guard" && item.ownerBoundary && guard.emit
+      ? ownerGuardHandoff(item.note ?? item.trigger.finding, item.ownerBoundary, buildHostGuardExpression({ mode: "deny", exempt: guard.exempt, deny: guard.deny }), sources?.get(item.ownerBoundary.file ?? "")) : null
+    if (handoff && item.ownerBoundary) item.ownerBoundary.guard = handoff.guard
+    const text = handoff?.text ?? [item.note ?? item.trigger.finding, item.ownerBoundary?.wiring ? `The lines to add:\n${item.ownerBoundary.wiring}` : null].filter(Boolean).join("\n\n")
+    const prior = lines.find(planLine => planLine.requires === "user_action" && planLine.id !== "user_action:owner_wiring" && (planLine.jobIds?.includes(item.id) || planLine.text === item.note))
+    if (prior) prior.text = text
+    else lines.push(line({ id: `owner_only:${item.id}`, kind: "user_action", text, requires: "user_action" }))
+  }
+
+  if (keys.ga4.status === "connected") lines.push(line({ id: "account_settings:ga4", kind: "account_settings", requires: "approval", text: "Allow Infinite to mark the selected, click-tested conversions as key events in your connected GA4 property." }))
+  if (serverLaneProvisioned) lines.push(line({ id: "account_settings:hosting", kind: "account_settings", requires: "approval", text: "Allow Infinite to save server-lane environment settings in your connected hosting project." }))
 
   // ---- things only the user can do ----
   if (scan.adopted.some((entry) => entry.via === "gtm")) {
@@ -904,7 +1070,7 @@ export function buildPlanModel(input: PlanModelInput): WizardPlanModel {
         line({
           id: `user_action:connect_${tool}`,
           kind: "user_action",
-          text: `${TOOL_NAME[tool]} (${adopted.key ? `${maskPublicId(adopted.key)} in your code` : "in your code"}): connect it in Infinite so the wizard can check that ID is yours; nothing is changed until then.`,
+          text: `${TOOL_NAME[tool]} (${adopted.key ? `${maskPublicId(adopted.key)} in your code` : "in your code"}): connect it in Infinite so the wizard can check that ID is yours. The repository changes shown in this plan can still run.`,
           requires: "user_action"
         })
       )
@@ -926,9 +1092,17 @@ export function buildPlanModel(input: PlanModelInput): WizardPlanModel {
     lines.push(line({ id: "user_action:conversions_unwired", kind: "user_action", text: RUNNABILITY_TEXT.conversionsUnwired(proposedConversionNames(withheldItems)), requires: "user_action" }))
   }
 
-  // R2-6: the consent line stays only when it governs something on THIS plan (see above).
   const consentGoverns = infiniteRecordable || helpersEmitted || lines.some((entry) => entry.kind === "capture_beside_adopted_pixel")
-  if (!consentGoverns) lines.splice(lines.indexOf(consentLine), 1)
+  let bannerSignal: PlanLine | undefined
+  if (consentGoverns && consentProposed === "required") {
+    const handoff = consentHandoff({ mode: "required", infinite: tools.includes("infinite") || scan.managedProviders.includes("infinite"), capture: scan.managedCapture?.canWire === true || tools.includes("meta") })
+    // Keep the handoff visible when the decision is edited interactively after this plan was built.
+    if (handoff) {
+      bannerSignal = line({ id: "user_action:banner_signal", kind: "user_action", requires: "user_action", text: handoff })
+      const firstOwner = lines.findIndex(entry => entry.requires === "user_action")
+      lines.splice(firstOwner < 0 ? lines.length : firstOwner, 0, bannerSignal)
+    }
+  }
 
   // ---- B28: the 7-day check-in (on by default, BUILD-PLAN §1.4; the plan says so, nothing to answer) ----
   lines.push(
@@ -940,10 +1114,20 @@ export function buildPlanModel(input: PlanModelInput): WizardPlanModel {
     })
   )
 
+  if (scan.ownerWiring?.canWire === false) {
+    const why = scan.ownerWiring.requirements.some(item => item.ownerBoundary?.kind === "frozen_unit") ? "We could not install here without editing a file that holds your consent code" : "We could not safely wire the tag from this app entry"
+    lines.unshift(line({ id: "user_action:owner_wiring", kind: "user_action", requires: "user_action", text: `Infinite's tag is NOT installed by this run. ${why} (${scan.ownerWiring.requirements.map(item => item.path).join(", ")}). Add these lines yourself, then run npx infinite-tag again:\n${scan.ownerWiring.requirements.map(item => `${item.path}:\n${item.snippet}`).join("\n\n")}` }))
+  }
+  for (const requirement of scan.ownerWiring?.requirements ?? []) {
+    if (scan.ownerWiring?.canWire === false) continue
+    lines.push(line({ id: `owner_wiring:${requirement.path}`, kind: "user_action", requires: "user_action", text: `${requirement.reason}\n${requirement.path}:\n${requirement.snippet}` }))
+  }
+
   // ---- the agent's budget (the cost line in the go-ahead) ----
   // §3y.5: "up to N" = the agent jobs that run when every approvable line is approved (the one count function).
+  for (const planLine of lines) if (planLine.requires === "approval" && isRepositoryWork(planLine)) planLine.requires = "info"
   const provisionalDecisions: PlanModel["decisions"] = { consentMode: consentProposed, conversionNames, privacyText, npmInstall }
-  const provisional = { hash: "", lines, decisions: provisionalDecisions, installTools: tools, managedTools: [...scan.managedProviders], serverLaneOffered: serverLaneApprovable, withheld } as unknown as PlanModel
+  const provisional = { hash: "", lines, decisions: provisionalDecisions, installTools: tools, managedTools: [...scan.managedProviders], serverLaneOffered: serverLaneApprovable, withheld, scopedCandidates: candidates } as unknown as PlanModel
   const agentJobs = agentJobsUpTo(candidates, seeds, provisional, input.consentFlag)
   if (agentJobs > 0) {
     const name = input.agent?.worker === "claude_code" ? "Claude Code" : input.agent?.worker === "codex" ? "Codex" : null
@@ -954,10 +1138,31 @@ export function buildPlanModel(input: PlanModelInput): WizardPlanModel {
         text: name
           ? `${name}: up to ${agentJobs} job${agentJobs === 1 ? "" : "s"} · ${AGENT_MODELS[input.agent!.worker!].label} at ${AGENT_MODELS[input.agent!.worker!].effort} effort · up to ${AGENT_LIMITS.jobs.maxTurns} turns or ${Math.round(AGENT_LIMITS.jobs.wallMs / 60_000)} min · ${input.agent?.whoPays?.label ?? "who pays: unknown"}`
           : `No agent found: the ${agentJobs} agent job${agentJobs === 1 ? "" : "s"} are listed for you to do by hand.`,
-        requires: name ? "approval" : "info"
+        requires: name && input.agent?.whoPays?.payer !== "plan" ? "approval" : "info"
       })
     )
   }
+
+  // ---- P1-8: the per-tool headline, built from the inventory, is the first thing the plan says ----
+  const inventory = scan.eventInventory ?? (scan.sources ? buildEventInventory(snapshotFromFiles(scan.sources, { appRoot: scan.appRoot ?? "." })) : inventoryFromCandidates(input.candidates))
+  // Only a blocker that stops the whole install ("Infinite's tag is NOT installed by this run") reads before it.
+  const blockerFirst = lines[0]?.id === "user_action:owner_wiring" ? 1 : 0
+  lines.splice(
+    blockerFirst,
+    0,
+    ...toolHeadlines({
+      inventory,
+      candidates,
+      withheld: withheldItems,
+      installTools: tools,
+      adopted: scan.adopted.map((entry) => entry.provider),
+      keys,
+      metaRelay: input.run?.metaRelay,
+      serverLaneBlocked: serverLaneRule.ok || serverLaneHandoff ? null : serverLaneRule.line || null
+    }),
+    // Live run 3: right after the headlines, why a sign-up form gets no lead (its route saves nothing yet).
+    ...(inventory.unsavedFormRoutes ?? []).map((route) => line({ id: `user_action:unsaved_form_route:${route.file}`, kind: "user_action", requires: "user_action", text: unsavedFormRouteText(route) }))
+  )
 
   const decisions: PlanModel["decisions"] = {
     consentMode: consentProposed,
@@ -966,6 +1171,10 @@ export function buildPlanModel(input: PlanModelInput): WizardPlanModel {
     npmInstall
   }
   return {
+    bannerSignal,
+    approvalMode: "shown_and_continued",
+    ownerWiring: scan.ownerWiring,
+    scopedCandidates: candidates,
     hash: planHash(lines, decisions),
     lines,
     decisions,
@@ -977,6 +1186,141 @@ export function buildPlanModel(input: PlanModelInput): WizardPlanModel {
     serverLaneOffered: serverLaneApprovable,
     withheld
   }
+}
+
+
+// ---------------------------------------------------------------------------------------------
+// P1-8: the per-tool headline
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * Live run 3: the owner's line for a sign-up route that saves nothing yet. Reporting a lead there would count sign-ups
+ * that were never created, so the wizard seeds no lead job and says what would change that.
+ */
+export function unsavedFormRouteText(route: Pick<UnsavedFormRoute, "event" | "file">): string {
+  return route.event === "sign_up"
+    ? `Your sign-up route (${route.file}) doesn't create the account yet, so there is no sign-up to report. Once it does, run the wizard again.`
+    : `Your sign-up route (${route.file}) doesn't save or subscribe the email yet, so there is no lead to report. Once it does, run the wizard again.`
+}
+
+/** The funnel events the server jobs (job 8) of these candidates report, in funnel order. */
+function serverReportedEvents(candidates: readonly ChecklistItem[]): FunnelEvent[] {
+  const events = new Set<FunnelEvent>()
+  for (const item of candidates) {
+    if (item.jobId !== "server_conversions") continue
+    const event = FUNNEL_EVENT_OF_TARGET[itemTarget(item)]
+    if (event) events.add(event)
+  }
+  return FUNNEL_ORDER.filter((event) => events.has(event))
+}
+
+const FUNNEL_ORDER: readonly FunnelEvent[] = ["view_item", "add_to_cart", "begin_checkout", "purchase", "lead", "sign_up", "start_trial"]
+
+/** The inventory as far as the candidates carry it (a plan built without the scan's inventory or sources). */
+function inventoryFromCandidates(candidates: readonly ChecklistItem[]): EventInventory {
+  const events = new Map<FunnelEvent, NonNullable<ChecklistItem["inventory"]>[number]>()
+  for (const item of candidates) for (const entry of item.inventory ?? []) if (!events.has(entry.event)) events.set(entry.event, entry)
+  return { events: FUNNEL_ORDER.filter((event) => events.has(event)).map((event) => events.get(event)!), checkoutCreates: [], paymentWebhook: null, pixelRestrictedRoutes: [], siteCurrency: null }
+}
+
+export interface ToolHeadlineInput {
+  inventory: EventInventory
+  /** The candidates this plan can run (withheld ones removed). */
+  candidates: readonly ChecklistItem[]
+  /** The candidates this plan withholds (nothing would run them). */
+  withheld: readonly ChecklistItem[]
+  /** The tools this plan installs new. */
+  installTools: readonly ProviderId[]
+  /** The tools already in the site's code. */
+  adopted: readonly ProviderId[]
+  keys: TagKeys
+  /** The bridge's `tag.meta-relay.v1` capability (absent = not known). */
+  metaRelay?: boolean
+  /** Why the server lane cannot be set up this run (null = it can). */
+  serverLaneBlocked: string | null
+}
+
+/**
+ * Meta is connected IN INFINITE: a connected Meta pixel in the keys (what the relay binds) and an Infinite app that can
+ * send server events to Meta. A pixel in the site's code is not a connection.
+ */
+export function metaConnectedInInfinite(keys: TagKeys, metaRelay?: boolean): boolean {
+  return keys.meta.status === "connected" && keys.meta.pixels.length > 0 && metaRelay !== false
+}
+
+const metaNames = (events: readonly FunnelEvent[]) => listWords(events.map((event) => META_EVENT_NAME[event]))
+const words = (events: readonly FunnelEvent[]) => listWords(events.map((event) => EVENT_WORDS[event]))
+const capitalized = (text: string) => text.charAt(0).toUpperCase() + text.slice(1)
+
+/**
+ * P1-8: one plain line per tool, first in the plan: what the tool gets today (from the site's own code) and what this
+ * run adds, from the inventory and the jobs this plan really seeds. Only events the scan found a place for are named.
+ * Meta's server events are promised only when Meta is connected in Infinite; otherwise one line says when they start.
+ */
+export function toolHeadlines(input: ToolHeadlineInput): PlanLine[] {
+  const { inventory, candidates, withheld } = input
+  const found = FUNNEL_ORDER.filter((event) => inventory.events.some((entry) => entry.event === event))
+  const gets = (tool: "ga4" | "posthog" | "meta_browser" | "meta_server" | "infinite") =>
+    found.filter((event) => (inventory.events.find((entry) => entry.event === event)?.tools[tool]?.length ?? 0) > 0)
+  const commerceItem = (jobId: string) => candidates.find((item) => item.id === `${jobId}:${COMMERCE_EVENTS_TARGET}`)
+  const itemEvents = (item: ChecklistItem | undefined) => FUNNEL_ORDER.filter((event) => (item?.inventory ?? []).some((entry) => entry.event === event))
+  const conversionTools = (tool: "ga4" | "posthog") =>
+    FUNNEL_ORDER.filter((event) =>
+      candidates.some((item) => item.jobId === "conversions_to_tools" && (item.inventory ?? []).some((entry) => entry.event === event && entry.missing.includes(tool)))
+    )
+  const serverAdds = serverReportedEvents(candidates).filter((event) => found.includes(event))
+  const serverWithheld = serverReportedEvents(withheld).filter((event) => found.includes(event))
+  const present = (tool: ProviderId, sends: readonly FunnelEvent[]) => input.installTools.includes(tool) || input.adopted.includes(tool) || sends.length > 0
+  const lines: PlanLine[] = []
+  const headline = (id: string, text: string) => lines.push(line({ id: `headline:${id}`, kind: "user_action", requires: "info", text }))
+  const blockedReason = input.serverLaneBlocked ? ` ${input.serverLaneBlocked}` : ""
+  const todayWithoutEvents = (tool: ProviderId, what: string) =>
+    input.adopted.includes(tool) ? "gets page views only today" : input.installTools.includes(tool) ? `gets nothing today; this run installs ${what} for page views` : "gets nothing today"
+
+  // Meta first: the founder's ads run on it.
+  const metaToday = [...new Set([...gets("meta_browser"), ...gets("meta_server")])]
+  const metaPresent = present("meta", metaToday)
+  const connected = metaConnectedInInfinite(input.keys, input.metaRelay)
+  const metaBrowserAdds = itemEvents(commerceItem("meta_improve"))
+  const metaServerAdds = serverAdds.filter((event) => !gets("meta_server").includes(event))
+  if (!metaPresent && !connected) {
+    headline("meta", "Meta: there is no Meta pixel on this site and Meta is not connected in Infinite, so Meta gets nothing from this run. Connect Meta in Infinite (Connections › Meta), then run npx infinite-tag again.")
+  } else {
+    const today = metaToday.length > 0 ? `gets ${metaNames(metaToday)} today` : todayWithoutEvents("meta", "the pixel")
+    const adds: string[] = []
+    if (metaBrowserAdds.length > 0) adds.push(`add ${metaNames(metaBrowserAdds)} in the browser, where your site already tracks ${words(metaBrowserAdds)}`)
+    if (metaServerAdds.length > 0 && connected) adds.push(`send ${metaNames(metaServerAdds)} from your server`)
+    headline("meta", `Meta: ${today}. ${adds.length > 0 ? `We'll ${adds.join(", and ")}.` : metaServerAdds.length > 0 || serverWithheld.length > 0 ? "" : "Nothing to add."}`.trim())
+    if (metaServerAdds.length > 0 && !connected) {
+      headline("meta_server", `Meta gets ${metaNames(metaServerAdds)} from your server once Meta is connected in Infinite (Connections › Meta).`)
+    }
+  }
+  const metaWithheld = serverWithheld.filter((event) => !gets("meta_server").includes(event))
+  if (metaWithheld.length > 0) headline("meta_server_lane", `Meta: ${metaNames(metaWithheld)} can't be sent from your server yet.${blockedReason}`)
+
+  // GA4 and PostHog: every step they miss, only where the site runs them.
+  for (const [tool, name] of [["ga4", "GA4"], ["posthog", "PostHog"]] as const) {
+    const today = gets(tool)
+    if (!present(tool, today)) {
+      if (input.keys[tool].status !== "connected") headline(tool, `${name}: not on this site and not connected in Infinite, so it gets nothing from this run.`)
+      continue
+    }
+    const adds = FUNNEL_ORDER.filter((event) => itemEvents(commerceItem(`${tool}_improve`)).includes(event) || conversionTools(tool).includes(event))
+    const todayText = today.length > 0 ? `gets ${words(today)} today` : todayWithoutEvents(tool, "it")
+    headline(tool, `${name}: ${todayText}. ${adds.length > 0 ? `We'll add ${words(adds)}.` : "Nothing to add."}`)
+  }
+
+  // Infinite: page views from its tag; conversions from the site's server.
+  const infiniteToday = gets("infinite")
+  const infiniteAdds = serverAdds.filter((event) => !infiniteToday.includes(event))
+  const infiniteWithheld = serverWithheld.filter((event) => !infiniteToday.includes(event))
+  const infiniteParts = [
+    infiniteToday.length > 0 ? `Infinite: gets ${words(infiniteToday)} today.` : "Infinite: records page views once its tag is live.",
+    infiniteAdds.length > 0 ? `We'll record ${words(infiniteAdds)} from your server.` : "",
+    infiniteWithheld.length > 0 ? `${capitalized(words(infiniteWithheld))} can't be recorded from your server yet.${blockedReason}` : ""
+  ]
+  headline("infinite", infiniteParts.filter(Boolean).join(" "))
+  return lines
 }
 
 /** The target a candidate links by: job 7's line is per provider (`init`); job 5's capture is `capture`. */
@@ -1171,6 +1515,8 @@ export interface ResolvedPlanAnswers {
   privacyText: string | null
   npmInstall: boolean | null
   metaGoal: string | null
+  /** The managed Meta pixel's browser match data: on unless its plan line was declined (`decisions.metaAdvancedMatching`). */
+  metaAdvancedMatching: boolean
   /** Per line: true approved, false declined, null unanswered (info / user-action lines are always null). */
   lines: Array<{ id: string; approved: boolean | null }>
   /** The answer normalised for `JobRegistry.applyApprovals` (consent flag folded in, unknown ids dropped). */
@@ -1200,7 +1546,7 @@ export function resolvePlanAnswers(
   options: { consentFlag: "required" | "not_required" | null }
 ): ResolvedPlanAnswers {
   const known = new Map(plan.lines.map((planLine) => [planLine.id, planLine]))
-  const declined = new Set((answer?.declined ?? []).filter((id) => known.has(id)))
+  const declined = new Set([...planExclusions(plan, answer?.declined ?? []).lineIds].filter(id => known.has(id)))
   const edits: Record<string, string> = {}
   for (const [id, value] of Object.entries(answer?.edits ?? {})) {
     const planLine = known.get(id)
@@ -1213,8 +1559,9 @@ export function resolvePlanAnswers(
       .filter((id) => known.get(id)!.requires === "approval")
   )
 
+  for (const planLine of plan.lines) if (isContinuedWork(planLine) && !declined.has(planLine.id)) approved.add(planLine.id)
   let consentMode: ResolvedPlanAnswers["consentMode"] = null
-  if (options.consentFlag) {
+  if (options.consentFlag && !declined.has(DECISION_LINE_IDS.consentMode)) {
     consentMode = options.consentFlag
     approved.add(DECISION_LINE_IDS.consentMode)
     declined.delete(DECISION_LINE_IDS.consentMode)
@@ -1223,6 +1570,8 @@ export function resolvePlanAnswers(
     if (edited !== undefined) consentMode = CONSENT_VALUES.has(edited) ? (edited as "required" | "not_required") : null
     else consentMode = plan.decisions.consentMode
     if (consentMode === null) approved.delete(DECISION_LINE_IDS.consentMode)
+  } else if (!plan.lines.some((planLine) => planLine.kind === "consent_mode")) {
+    consentMode = plan.decisions.consentMode
   }
 
   let conversions: string[] = []
@@ -1233,30 +1582,16 @@ export function resolvePlanAnswers(
     else conversions = names
   }
 
-  const privacyAsked = known.has(DECISION_LINE_IDS.privacyText)
-  let privacyText = plan.decisions.privacyText
-  if (approved.has(DECISION_LINE_IDS.privacyText) && edits[DECISION_LINE_IDS.privacyText] !== undefined) {
-    const edited = edits[DECISION_LINE_IDS.privacyText]!.trim()
-    if (edited === "") approved.delete(DECISION_LINE_IDS.privacyText)
-    else privacyText = edited
-  }
+  // Ignore even legacy approvals: the wizard never sends policy copy to an agent.
+  approved.delete(DECISION_LINE_IDS.privacyText)
+  const privacyAsked = false
+  const privacyText = null
 
-  // The privacy draft follows the approved lines (P3-24): a declined tool or a declined server lane is
-  // not described. An edited paragraph is the user's own words and is kept as written.
   const wizardPlan = plan as Partial<WizardPlanModel>
-  if (approved.has(DECISION_LINE_IDS.privacyText) && edits[DECISION_LINE_IDS.privacyText] === undefined && wizardPlan.installTools) {
-    const kept = wizardPlan.installTools.filter((tool) => {
-      const installLine = plan.lines.find((entry) => entry.kind === "install_provider" && (entry.id === `install_provider:${tool}` || entry.id.startsWith(`install_provider:${tool}:`)))
-      return (installLine !== undefined && approved.has(installLine.id)) || (wizardPlan.managedTools ?? []).includes(tool)
-    })
-    privacyText = draftPrivacyParagraph(kept, Boolean(wizardPlan.serverLaneOffered) && kept.includes("infinite") && approved.has("server_lane"))
-    if (privacyText === null) approved.delete(DECISION_LINE_IDS.privacyText)
-  }
-
   const npmAsked = known.has(DECISION_LINE_IDS.npmInstall)
   const lines = plan.lines.map((planLine) => ({
     id: planLine.id,
-    approved: planLine.requires !== "approval" ? null : approved.has(planLine.id) ? true : declined.has(planLine.id) ? false : null
+    approved: declined.has(planLine.id) ? false : isContinuedWork(planLine) ? true : planLine.requires !== "approval" ? null : approved.has(planLine.id) ? true : null
   }))
   return {
     consentMode,
@@ -1265,7 +1600,8 @@ export function resolvePlanAnswers(
     privacyText: approved.has(DECISION_LINE_IDS.privacyText) ? privacyText : null,
     npmInstall: !npmAsked ? null : approved.has(DECISION_LINE_IDS.npmInstall) ? true : declined.has(DECISION_LINE_IDS.npmInstall) ? false : null,
     // The recommendation is data on the plan, never parsed back out of its copy (P2-10).
-    metaGoal: approved.has("meta_goal") ? (wizardPlan.metaGoal ?? null) : null,
+    metaGoal: wizardPlan.metaGoal ?? null,
+    metaAdvancedMatching: plan.decisions.metaAdvancedMatching !== false && !declined.has(META_ADVANCED_MATCHING_LINE_ID),
     lines,
     approvals: {
       approved: [...approved],
@@ -1291,13 +1627,15 @@ export function resolvePlanAnswers(
  */
 export function gateSeededItems(plan: PlanModel, answers: Pick<ResolvedPlanAnswers, "lines">, items: readonly ChecklistItem[]): ChecklistItem[] {
   const approval = new Map(answers.lines.map((entry) => [entry.id, entry.approved]))
+  const exclusions = planExclusions(plan, answers.lines.filter(entry => entry.approved === false).map(entry => entry.id))
+  for (const id of exclusions.lineIds) approval.set(id, false)
   // §3y.5: an item the plan withheld (nothing would run it) is never seeded, whatever the lines say.
   const withheld = new Set((plan as Partial<WizardPlanModel>).withheld ?? [])
-  const gated = gateByLines(plan, approval, items.filter((item) => !withheld.has(item.id)))
+  const gated = gateByLines(plan, approval, items.filter((item) => !withheld.has(item.id) && !exclusions.blocksJob(item)))
   // The go-ahead cost line (P2-18): unless it is approved, no agent job runs — each waits for the user.
   const budget = plan.lines.find((planLine) => planLine.id === "agent_budget" && planLine.requires === "approval")
   if (!budget || approval.get(budget.id) === true) return gated
-  return gated.map((item) => (item.owner === "agent" && item.state !== "blocked" ? { ...item, state: "blocked" as const, blockedReason: "needs_you" as const } : item))
+  return gated.map((item) => (item.owner === "agent" && item.state !== "blocked" && item.state !== "left_for_you" ? { ...item, state: "blocked" as const, blockedReason: "needs_you" as const } : item))
 }
 
 function gateByLines(plan: PlanModel, approval: Map<string, boolean | null>, items: readonly ChecklistItem[]): ChecklistItem[] {
@@ -1305,6 +1643,7 @@ function gateByLines(plan: PlanModel, approval: Map<string, boolean | null>, ite
   for (const planLine of plan.lines) for (const jobId of planLine.jobIds ?? []) lineOf.set(jobId, planLine)
   const out: ChecklistItem[] = []
   for (const item of items) {
+    if (item.state === "left_for_you" && item.ownerBoundary) { out.push(item); continue }
     const planLine = lineOf.get(item.id)
     if (!planLine) {
       if (ADOPTED_PROVIDER_JOBS.includes(item.jobId as JobId)) continue
@@ -1338,8 +1677,9 @@ export function withGuardHosts(items: readonly ChecklistItem[], guard: GuardDeci
 }
 
 /** `Installer.planAsk`: exactly the §3d.3 `plan` payload (strict PlanLine keys, no internals). */
-export function planAskPayload(plan: PlanModel): { lines: PlanLine[]; decisions: PlanModel["decisions"] } {
+export function planAskPayload(plan: PlanModel): { lines: PlanLine[]; decisions: PlanModel["decisions"]; bannerSignal?: PlanLine } {
   return {
+    bannerSignal: (plan as Partial<WizardPlanModel>).bannerSignal,
     lines: plan.lines.map((planLine) => ({
       id: planLine.id,
       kind: planLine.kind,

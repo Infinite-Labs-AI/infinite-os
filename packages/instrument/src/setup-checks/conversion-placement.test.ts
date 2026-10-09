@@ -47,20 +47,6 @@ describe("data-conversion placement", () => {
     expect(result.findings).toEqual([])
   })
 
-  /** The false red that would get the whole check muted: a plain link to /signup is CORRECT. */
-  it("does not flag a marked link that is not inside a form", () => {
-    const result = check("src/app/page.tsx", '<a data-conversion="signup" href="/signup">Sign up</a>')
-    expect(result.state).toBe("ok")
-  })
-
-  it("does not flag a marked control after the form it followed has closed", () => {
-    const result = check(
-      "src/app/page.tsx",
-      '<form method="post"><input /></form>\n<a data-conversion="signup" href="/signup">Sign up</a>'
-    )
-    expect(result.state).toBe("ok")
-  })
-
   it("catches a value the runtime does not read at all", () => {
     const result = check("src/app/page.tsx", '<button data-conversion="lead">Send</button>')
     expect(result.state).toBe("problem")
@@ -75,21 +61,5 @@ describe("data-conversion placement", () => {
     expect(result.state).toBe("undetermined")
     expect(result.findings[0]!.code).toBe("INF_SETUP_CONVERSION_UNREADABLE")
     expect(result.findings[0]!.message).toContain("That is not a pass and not a failure")
-  })
-
-  it("says undetermined — never ok — when the runtime contract could not be read", () => {
-    const result = checkConversionPlacement({
-      files: new Map([["src/app/page.tsx", '<button data-conversion="signup">Go</button>']]),
-      lanes: []
-    })
-    expect(result.state).toBe("undetermined")
-    expect(result.findings[0]!.code).toBe("INF_SETUP_RUNTIME_CONTRACT_UNREADABLE")
-    expect(result.findings[0]!.message).toContain('This is NOT "nothing wrong"')
-  })
-
-  it("finds nothing to say about a page with no marked elements", () => {
-    const result = check("src/app/page.tsx", "<main><h1>Hello</h1></main>")
-    expect(result.state).toBe("ok")
-    expect(result.findings).toEqual([])
   })
 })

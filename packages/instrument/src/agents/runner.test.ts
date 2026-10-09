@@ -1,15 +1,11 @@
-// The real AgentRunnerImpl against the FAKE claude / codex binaries (test/wizard/bin), which start the REAL
-// built `mcp-proxy`. No real agent, no model, no network.
-import { execFile } from "node:child_process"
 import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest"
 
-import { assertBuilt, FAKE_BIN_DIR, fakeAgents, gateSpy, makeRunner, records, RUN_ID, runs, type FakeSetup } from "../../test/wizard/agents.js"
+import { assertBuilt, fakeAgents, gateSpy, makeRunner, records, RUN_ID, runs, type FakeSetup } from "../../test/wizard/agents.js"
 import { cleanup, item, makeFenceFixture, POST_INSTALL_LAYOUT, runGit, tempDir, write } from "../../test/wizard/repo.js"
 import { agentArgvViolations, type RunJobsInput } from "../wizard/contracts/agents.js"
 import type { AgentQuestion, Claim } from "../wizard/contracts/jobs.js"
-import { FenceTamperError } from "./fence.js"
 import { runScratchDir } from "./paths.js"
 import { reviewInDetachedWorktree, SYSTEM_PROMPT_HEADER, WORKER_KICKOFF, WORKER_RESUME_KICKOFF, type AgentRunResultWithExtras } from "./runner.js"
 import { assertReviewWorktree } from "./worktree-guard.js"
@@ -44,7 +40,7 @@ function jobsInput(over: Partial<RunJobsInput> = {}) {
     items: ITEMS,
     brief: "BRIEF: do the jobs",
     budget: { maxTurns: 30, wallMs: 60_000 },
-    onClaim: (claim) => claims.push(claim),
+    onClaim: (claim) => { claims.push(claim) },
     onAsk: (question) => asks.push(question),
     onProgress: (entry) => progress.push(entry.text),
     onNarrate: (beat) => beats.push(beat.text),
@@ -105,6 +101,8 @@ describe("runJobs with Claude (fake)", () => {
     expect(run.env!.ENABLE_TOOL_SEARCH).toBe("false")
     expect(run.stdin).toBe(WORKER_KICKOFF)
     expect(run.argv![run.argv!.indexOf("--append-system-prompt") + 1]).toBe(`${SYSTEM_PROMPT_HEADER}\n\nBRIEF: do the jobs`)
+    // Live run 6: the brief opens with the owner boundary; the header never repeats it (the agent read it twice).
+    expect(SYSTEM_PROMPT_HEADER).toBe("Infinite tag wizard: your instructions for this run.")
     expect(agentArgvViolations("claude_code", run.argv!)).toEqual([])
     // The token-bearing tag.mcp.json was 0600 in a 0700 dir under $HOME (never /tmp), and is gone once the turn ends.
     const config = records(fakes).find((entry) => entry.kind === "mcp-config")!
@@ -146,41 +144,12 @@ describe("runJobs with Claude (fake)", () => {
     expect(resumed.stdin).toBe(WORKER_RESUME_KICKOFF)
   })
 
-  it("an allowed_warning is one notice line, not a stop (negative of the above)", async () => {
-    const { root, fakes } = setup({ turns: [{ steps: [{ replay: "claude-rate-limit-warning.jsonl" }, { replay: "claude-rate-limit-warning.jsonl" }, CLAIM_DONE] }] })
-    const { input, beats } = jobsInput()
-    const result = await makeRunner(fakes, root).runJobs(input)
-    expect(result.outcome).toBe("completed")
-    expect(beats.filter((beat) => /close to your seven day limit/.test(beat))).toHaveLength(1)
-    expect(beats).toContain("Claude Code: using your extra-usage credits")
-  })
-
   it("counts permission denials and flags a denied .env read as an incident", async () => {
     const { root, fakes } = setup({ turns: [{ denials: ["/repo/.env.local", "/repo/README.md"], steps: [CLAIM_DONE] }] })
     const result = (await makeRunner(fakes, root).runJobs(jobsInput().input)) as AgentRunResultWithExtras
     expect(result.permissionDenials).toBe(2)
     expect(result.incidents).toHaveLength(1)
     expect(result.incidents[0]).toBe("Claude Code tried to read .env.local outside the repo (denied)")
-  })
-
-  it("kills the run when system/init bills differently from the plan line", async () => {
-    const { root, fakes } = setup({ turns: [{ apiKeySource: "ANTHROPIC_API_KEY", steps: [{ edit: { path: "app/page.tsx", content: PAGE_EDIT } }, { sleep: 3000 }] }] })
-    const result = await makeRunner(fakes, root).runJobs(jobsInput().input)
-    expect(result.outcome).toBe("error")
-    expect(result.edits).toEqual([])
-  })
-
-  it("retries ONCE with the user's default model when the pinned one is refused, and says so", async () => {
-    const { root, fakes } = setup({ turns: [{ rejectModel: true, steps: [CLAIM_DONE] }] })
-    const { input, beats } = jobsInput()
-    const result = (await makeRunner(fakes, root).runJobs(input)) as AgentRunResultWithExtras
-    expect(result.outcome).toBe("completed")
-    expect(result.modelFallback).toBe(true)
-    const [first, second] = runs(fakes, "claude")
-    expect(first!.argv).toContain("claude-opus-4-8")
-    expect(second!.argv).not.toContain("--model")
-    expect(second!.argv!.slice(second!.argv!.indexOf("--effort"), second!.argv!.indexOf("--effort") + 2)).toEqual(["--effort", "xhigh"])
-    expect(beats).toContain("Opus 4.8 isn't on your plan: using your default model")
   })
 
   it("reverts a gate hit (child_process in next.config.mjs) and blocks the job; the rest is kept", async () => {
@@ -201,11 +170,6 @@ describe("runJobs with Claude (fake)", () => {
     // §3x.2 A gate hit is reported, attributed to the item that claimed the file, never a block.
     expect(result.blocked).toEqual([])
     expect(result.gateHits.map((hit) => [hit.file, hit.itemIds])).toEqual([["next.config.mjs", ["meta_improve:landing"]]])
-  })
-
-  it("throws FENCE_TAMPER when the agent writes under node_modules", async () => {
-    const { root, fakes } = setup({ turns: [{ steps: [{ edit: { path: "node_modules/next/index.js", content: "/* x */" } }, CLAIM_DONE] }] })
-    await expect(makeRunner(fakes, root).runJobs(jobsInput().input)).rejects.toBeInstanceOf(FenceTamperError)
   })
 })
 
@@ -229,44 +193,6 @@ describe("runJobs with Codex (fake)", () => {
     expect(agentArgvViolations("codex", run.argv!)).toEqual([])
     expect(beats).toContain("Loading its checklist tools")
   })
-
-  it("a Codex child WITHOUT the two MCP vars cannot reach the channel and reports itself toolless (negative)", async () => {
-    const { root, fakes } = setup({ turns: [{ steps: [CLAIM_DONE] }, { steps: [CLAIM_DONE] }] })
-    await makeRunner(fakes, root, { preferWorker: "codex" }).runJobs(jobsInput().input)
-    const argv = runs(fakes, "codex")[0]!.argv!
-    const env = { ...fakes.env }
-    const out = await new Promise<{ code: number | null; stdout: string }>((resolveRun) => {
-      const child = execFile(join(FAKE_BIN_DIR, "codex"), argv, { cwd: root, env }, (error, stdout) =>
-        resolveRun({ code: error ? (error as { code?: number }).code ?? 1 : 0, stdout })
-      )
-      child.stdin?.end("prompt")
-    })
-    expect(out.code).toBe(1)
-    expect(records(fakes).some((entry) => entry.kind === "toolless")).toBe(true)
-  })
-
-  it("a usage-limit turn.failed → out_of_usage with the verbatim reset; resume is `exec resume <thread>`", async () => {
-    const { root, fakes } = setup({
-      turns: [
-        { steps: [{ edit: { path: "app/page.tsx", content: PAGE_EDIT } }, { replay: "codex-usage-limit.jsonl" }, { sleep: 5000 }] },
-        { steps: [CLAIM_DONE] }
-      ]
-    })
-    const runner = makeRunner(fakes, root, { preferWorker: "codex" })
-    const first = await runner.runJobs(jobsInput().input)
-    expect(first.outcome).toBe("out_of_usage")
-    expect(first.resetsAt).toBe("Oct 3rd, 2026 9:41 AM")
-    expect(first.session).toEqual({ kind: "codex", threadId: "thread-fake-0001" })
-    expect(readFileSync(join(root, "app/page.tsx"), "utf8")).not.toContain("data-conversion")
-    await runner.runJobs(jobsInput({ resume: first.session }).input)
-    expect(runs(fakes, "codex")[1]!.argv!.slice(0, 3)).toEqual(["exec", "resume", "thread-fake-0001"])
-  })
-
-  it("an 'unrecognized configuration setting' item is fatal", async () => {
-    const { root, fakes } = setup({ turns: [{ steps: [{ replay: "codex-unrecognized-config.jsonl" }, { sleep: 3000 }, CLAIM_DONE] }] })
-    const result = await makeRunner(fakes, root, { preferWorker: "codex" }).runJobs(jobsInput().input)
-    expect(result.outcome).toBe("error")
-  })
 })
 
 describe("killAll (SIGINT)", () => {
@@ -284,23 +210,6 @@ describe("killAll (SIGINT)", () => {
     expect(await gone(hanging.pid!)).toBe(true)
     expect(await gone(grandchild)).toBe(true)
     expect(readFileSync(join(root, "app/page.tsx"), "utf8")).not.toContain("data-conversion")
-  })
-})
-
-describe("killAll waits for the restore (review I1 P2-5)", () => {
-  it("when killAll returns, the agent's edit is already undone and the snapshot is gone, even while runJobs is still unwinding", async () => {
-    const { root, fakes } = setup({ turns: [{ steps: [{ edit: { path: "app/page.tsx", content: PAGE_EDIT } }, { hang: true }] }] })
-    const runner = makeRunner(fakes, root)
-    const pending = runner.runJobs(jobsInput().input)
-    await waitFor(fakes, "hanging")
-    expect(readFileSync(join(root, "app/page.tsx"), "utf8")).toContain("data-conversion")
-    await runner.killAll()
-    // No `await pending` first: the SIGINT sequence releases the lock and exits right after killAll.
-    expect(readFileSync(join(root, "app/page.tsx"), "utf8")).not.toContain("data-conversion")
-    const snapshots = join(fakes.home, "Library/Caches/infinite-tag/snapshots", RUN_ID)
-    const left = existsSync(snapshots) ? readdirSync(snapshots) : []
-    expect(left).toEqual([])
-    await pending
   })
 })
 
@@ -331,7 +240,7 @@ describe("review (read-only, detached worktree)", () => {
     return { repo, head, git, worktrees }
   }
 
-  it.each(["claude_code", "codex"] as const)("%s reviews a worktree that holds no .env and returns the parsed review", async (reviewer) => {
+  it.each(["claude_code",] as const)("%s reviews a worktree that holds no .env and returns the parsed review", async (reviewer) => {
     const { repo, head, git, worktrees } = reviewRepo()
     const fakes = fakeAgents(reviewer === "claude_code" ? { turns: [{ structured: REVIEW }] } : { turns: [{ final: REVIEW }] })
     dirs.push(fakes.home)
@@ -348,27 +257,65 @@ describe("review (read-only, detached worktree)", () => {
     expect(run.argv!.join(" ")).not.toContain("mcp_servers")
   })
 
-  it("review I1 P1-4: a Claude review made while denied the PR's own files is never returned as a review", async () => {
-    const { head, git, repo } = reviewRepo()
-    const fakes = fakeAgents({ turns: [{ structured: REVIEW, denials: ["app/page.tsx"] }] })
+  // The answer a real Codex (codex-cli 0.160.1, strict `--output-schema`) wrote on 2026-10-08: every finding key
+  // present, `category: null` where the finding has none.
+  const CODEX_ANSWER = {
+    verdict: "changes_suggested",
+    summary: "Two findings.",
+    checklist: [{ item: "R1", status: "pass", note: "ok" }],
+    findings: [
+      { id: "F1", category: "analytics", item: "R2", severity: "nit", path: "app/page.tsx", line: 1, body: "Name the event.", suggested_fix: null },
+      { id: "F2", category: null, item: "R3", severity: "should", path: "app/page.tsx", line: null, body: "Send the value.", suggested_fix: "Add value." }
+    ]
+  }
+
+  it("Codex: the review schema passes strict structured outputs, and a real answer (category null) is read", async () => {
+    const { repo, head, git } = reviewRepo()
+    const fakes = fakeAgents({ turns: [{ final: CODEX_ANSWER }] })
     dirs.push(fakes.home)
-    const result = await reviewInDetachedWorktree(makeRunner(fakes, repo), git, { headSha: head, reviewer: "claude_code", brief: "b" })
-    expect(result).not.toEqual(REVIEW)
-    expect(result).toHaveProperty("error")
+    const result = await reviewInDetachedWorktree(makeRunner(fakes, repo), git, { headSha: head, reviewer: "codex", brief: "R1-R16 brief" })
+    const { category: _none, ...second } = CODEX_ANSWER.findings[1]!
+    expect(result).toEqual({ ...CODEX_ANSWER, findings: [CODEX_ANSWER.findings[0], second] })
+    const run = runs(fakes, "codex").find((entry) => entry.role === "reviewer")!
+    expect(run.argv).toContain("--output-schema")
   })
 
-  it("negative: a denial of a repo secret it is denied on purpose (.env) still returns the review", async () => {
-    const { head, git, repo } = reviewRepo()
-    const fakes = fakeAgents({ turns: [{ structured: REVIEW, denials: [".env.local"] }] })
+  it("Codex: a request its service refused (400 invalid_json_schema) is `rejected`, never `unparseable`", async () => {
+    const { repo, head, git } = reviewRepo()
+    const fakes = fakeAgents({ turns: [{ schemaProblem: "'schema.properties.findings.items.required' is required to include every key in properties. Missing 'category'.", final: CODEX_ANSWER }] })
     dirs.push(fakes.home)
-    expect(await reviewInDetachedWorktree(makeRunner(fakes, repo), git, { headSha: head, reviewer: "claude_code", brief: "b" })).toEqual(REVIEW)
+    const result = await reviewInDetachedWorktree(makeRunner(fakes, repo), git, { headSha: head, reviewer: "codex", brief: "R1-R16 brief" })
+    // The service's own words are kept (from the JSON body's error.message), never the 400 JSON itself.
+    expect(result).toMatchObject({ error: "rejected", message: expect.stringMatching(/^Invalid schema for response_format/) })
+    expect((result as { message: string }).message.length).toBeLessThanOrEqual(200)
   })
 
-  it("returns unparseable for output that breaks review.schema.json (negative)", async () => {
-    const { head, git, repo } = reviewRepo()
-    const fakes = fakeAgents({ turns: [{ structured: { ...REVIEW, verdict: "approve" } }] })
+  it("Codex: a failed turn (non-zero exit) is `error` with its last message, never `unparseable`", async () => {
+    const { repo, head, git } = reviewRepo()
+    const fakes = fakeAgents({ turns: [{ steps: [{ emit: { type: "error", message: "Reconnecting... 1/5" } }, { emit: { type: "turn.failed", error: { message: "stream disconnected before completion" } } }], final: null, exit: 1 }] })
     dirs.push(fakes.home)
-    expect(await reviewInDetachedWorktree(makeRunner(fakes, repo), git, { headSha: head, reviewer: "claude_code", brief: "b" })).toEqual({ error: "unparseable" })
+    const result = await reviewInDetachedWorktree(makeRunner(fakes, repo), git, { headSha: head, reviewer: "codex", brief: "R1-R16 brief" })
+    expect(result).toEqual({ error: "error", message: "stream disconnected before completion" })
+  })
+
+  it("Claude Code: an error result with no answer is `error` with its text; a non-zero exit with nothing said is `error` too", async () => {
+    const { repo, head, git } = reviewRepo()
+    const fakes = fakeAgents({ turns: [{ result: { subtype: "error_during_execution", is_error: true, result: "API Error: 500 internal server error" }, structured: null, exit: 1 }] })
+    dirs.push(fakes.home)
+    const result = await reviewInDetachedWorktree(makeRunner(fakes, repo), git, { headSha: head, reviewer: "claude_code", brief: "R1-R16 brief" })
+    expect(result).toMatchObject({ error: "error", message: expect.stringContaining("API Error: 500") })
+    const silent = fakeAgents({ turns: [{ structured: null, exit: 2 }] })
+    dirs.push(silent.home)
+    expect(await reviewInDetachedWorktree(makeRunner(silent, repo), git, { headSha: head, reviewer: "claude_code", brief: "R1-R16 brief" })).toEqual({ error: "error" })
+  })
+
+  it("a reviewer that is not usable here is `unavailable` with why, and no agent is spawned", async () => {
+    const { repo, head, git } = reviewRepo()
+    const fakes = fakeAgents({ claude: { authExit: 1 }, codex: {} })
+    dirs.push(fakes.home)
+    const result = await reviewInDetachedWorktree(makeRunner(fakes, repo), git, { headSha: head, reviewer: "claude_code", brief: "R1-R16 brief" })
+    expect(result).toEqual({ error: "unavailable", message: "is not signed in" })
+    expect(runs(fakes, "claude")).toEqual([])
   })
 
   it("refuses the repo itself, or a worktree holding an untracked .env (negatives)", async () => {

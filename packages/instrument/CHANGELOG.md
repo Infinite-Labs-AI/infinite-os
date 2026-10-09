@@ -3,6 +3,53 @@
 All notable changes to the `infinite-tag` npm package (`packages/instrument`). Versions before
 0.5.0 are recorded in git history only (`git log -- packages/instrument`).
 
+## Unreleased
+
+### One outcome helper on every host, with Stripe and lead reports built in
+
+- Next.js sites (Pages and App Router), and sites with no known host, now get the same `lib/infinite-outcome` helper
+  as Vercel, Netlify, Cloudflare Pages and Node. The Next module no longer exports its own `sendInfiniteServerEvent`,
+  and the Node target no longer ships a separate twin: one API everywhere. The `.ts` helper passes `tsc --strict`
+  (with `noUncheckedIndexedAccess` too) and the lint presets a Next site runs.
+- `reportInfiniteOutcome(outcome)` resolves Infinite's HTTP status, or `null` when nothing reached Infinite; it
+  never throws (an outcome with no `type` or `eventId` resolves `400` without a send). `reportInfiniteOutcomeForMirror`
+  resolves the full answer (`metaEventId`, `metaEventName`) for a page that mirrors. `postInfiniteOutcome` is gone.
+- New: `reportStripeCheckoutStarted`, `reportStripeCheckoutPurchase` (the webhook's answer: 500 only when a retry
+  can deliver the report; test-mode events, other integrations' sessions and anything before setup answer 200),
+  `reportInfiniteLead`, `reportInfiniteOutcomeInBackground` (the site's own `waitUntil` or Next `after()`, else a
+  bounded 800 ms wait; no dependency is ever added), `buyerContext` / `contextMetadata` / `contextFromMetadata`
+  (the buyer's device data carried from checkout to the webhook on the session's metadata, one field per value),
+  `personMatch`, `stripeCheckoutPayer`, `stripeAmountToMajor`, `infiniteContentIds`, `infiniteLeadId`.
+- `ln` is every word after the first, joined, as Infinite's own sender splits a name. A Stripe buyer's address is
+  the payer's, taken whole from one place: the shipping address only when billing has no city and it is addressed
+  to the payer by name. Zero-decimal currencies are no longer divided by 100. `content_ids` is capped to Infinite's
+  120-character value limit by dropping whole ids; any other value Infinite would refuse drops itself instead of
+  losing the outcome. `path` is optional for recording (only Meta needs it), a query string is cut.
+- Infinite's relay is the Meta path for server conversions with or without PostHog; turn PostHog's own Meta
+  destination off for those events.
+- The wizard writes the site owner's steps for server conversions into the pull request
+  (`docs/infinite-server-events.md` and a section of the description).
+
+### Store events reach the right tools exactly once
+
+- `infiniteTrack` and `infiniteTrackThenNavigate` take `destinations` as a list (`["meta"]` = Meta only), so a call
+  site adds only the tools that miss an event. `infiniteTrackThenNavigate` takes the same options, waits for a
+  browser-only Meta event's request (at most 400 ms) even when GA4 is left out, ignores a second click while it is
+  leaving, and frees the button again on Back.
+- Meta ViewContent and AddToCart carry only Meta's content keys (`content_ids`, `content_name`, `content_type`,
+  `contents`, `value`, `currency`). A value never goes without a currency: the caller's, else the site's.
+- Events recorded to Infinite from the page carry only the event name, which Infinite's browser ingest accepts; product
+  keys made it reject the whole event before.
+- New `infiniteAdMatchAllowed()`: the tag's "visitor allowed tracking" signal, for pages to pass to their own API routes.
+- The wizard turns browser match data on by default when Meta is connected (`infiniteMetaMirror` with `identity`), on
+  the site's own pixel too.
+- The tag no longer hides PostHog's sensitive pages from Infinite. In follow mode, on the routes where the site keeps
+  its pixels off (a cart, a success page), the tag records the visit when the site's pixels ran for that visitor
+  earlier in the same tab, and nothing otherwise.
+- The pixel infinite-tag installs sends one Meta PageView per client-side route change, unless the site's code already
+  sends its own. An existing pixel whose id comes from an environment variable also gets Meta's automatic events and
+  history PageViews turned off.
+
 ## 0.12.2 — 2026-10-05
 
 ### Page views carry the Meta ad they came from

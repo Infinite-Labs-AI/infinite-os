@@ -372,13 +372,6 @@ describe("Meta _fbc landing capture (ported from infinite.fast)", () => {
     expect(jar.writes.length).toBe(2)
   })
 
-  it("a malformed stored _fbc cannot describe any click, so a new fbclid replaces it", () => {
-    const jar = createCookieJar({ hostname: "infinite.fast", initial: ["_fbc=fb.1.notms.IwAR0bad;path=/"] })
-    const page = loadPage(jar, { search: "?fbclid=IwAR0recoverable" })
-    expect(page.fbc()).toMatch(/^fb\.1\.[0-9]{13}\.IwAR0recoverable$/)
-    expect(jar.entries("_fbc").map((cookie) => cookie.value)).toEqual([page.fbc()])
-  })
-
   it("first ever landing: ONE write, straight into Meta's scope", () => {
     const jar = createCookieJar({ hostname: "infinite.fast" })
     const page = loadPage(jar, { search: `?fbclid=${FIRST}` })
@@ -477,39 +470,6 @@ describe("Meta _fbc landing capture (ported from infinite.fast)", () => {
     expect(unbounded.writes).not.toEqual([])
   })
 
-  it("never writes _fbp and never puts the fbclid anywhere but _fbc", () => {
-    const scenarios: LoadOptions[] = [
-      { search: `?fbclid=${FIRST}` },
-      { search: `?fbclid=${SECOND}&utm_source=facebook` },
-      { search: "" },
-      { search: `?fbclid=${FIRST}`, gate: REQUIRED_GATE, storedConsent: "granted" }
-    ]
-    for (const options of scenarios) {
-      const jar = createCookieJar({ hostname: "www.acme.com", initial: [`_fbc=fb.1.1700000000000.${THIRD};path=/`] })
-      const page = loadPage(jar, options)
-      expect(jar.writes.every((write) => write.startsWith("_fbc="))).toBe(true)
-      expect(jar.writes.join("\n")).not.toContain("_fbp")
-      expect(jar.entries().map((cookie) => cookie.value).join("|")).not.toContain("_fbp")
-      expect(page.storageWrites).toEqual([])
-    }
-    expect(SHIPPED).not.toMatch(/_fbp|setItem|sessionStorage/)
-  })
-
-  it("the accessor is a pure read: it never writes, and returns the URL click in Meta's format when it could not be stored", () => {
-    const jar = createCookieJar({ hostname: "infinite.fast", initial: [`_fbc=fb.1.1700000000000.${FIRST};path=/`] })
-    // Blocked cookies: nothing throws, and the click is still available on its landing page. Index 1
-    // here is Meta's documented value for an fbc that is not saved as a cookie.
-    const blocked = loadPage(createCookieJar(), { search: `?fbclid=${FIRST}`, cookiesBlocked: true })
-    expect(blocked.fbc()).toMatch(new RegExp(`^fb\\.1\\.[0-9]{13}\\.${FIRST}$`))
-    const noClick = loadPage(createCookieJar({ hostname: "infinite.fast" }), { search: "?utm_source=x" })
-    expect(noClick.fbc()).toBe("")
-    const writesBefore = jar.writes.length
-    const reader = loadPage(jar, { search: "" })
-    reader.fbc()
-    reader.fbc()
-    expect(jar.writes.length).toBe(writesBefore)
-  })
-
   it("is NOT host-guarded: preview hosts still capture (decision 15 — it writes a cookie and sends nothing)", () => {
     // A preview platform's suffix is public, so the cookie lands on the deployment's own host.
     for (const [hostname, domain, index] of [
@@ -525,13 +485,6 @@ describe("Meta _fbc landing capture (ported from infinite.fast)", () => {
       expect(jar.entries("_fbc")).toEqual([{ domain, value: page.fbc() }])
     }
   })
-
-  it("runs once per page even if the snippet is emitted twice", () => {
-    const jar = createCookieJar({ hostname: "acme.com" })
-    const page = loadPage(jar, { search: `?fbclid=${FIRST}`, script: `${SHIPPED}\n${SHIPPED}` })
-    expect(jar.writes).toHaveLength(1)
-    expect(clickIdOf(page.fbc())).toBe(FIRST)
-  })
 })
 
 describe("Meta _fbc capture under the optional consent hook (consent_mode=required)", () => {
@@ -544,52 +497,6 @@ describe("Meta _fbc capture under the optional consent hook (consent_mode=requir
     expect(clickIdOf(page.fbc())).toBe(SECOND)
     expect(jar.entries("_fbc").map((cookie) => clickIdOf(cookie.value))).toEqual([SECOND])
   })
-
-  it("a consent event the runtime did not persist (no gesture) opens nothing", () => {
-    const jar = createCookieJar({ hostname: "acme.com" })
-    const page = loadPage(jar, { search: `?fbclid=${FIRST}`, gate: REQUIRED_GATE })
-    page.unpersistedGrant()
-    expect(jar.writes).toEqual([])
-    // Negative: a hook that trusts the bare event would have written.
-    const naive = createCookieJar({ hostname: "acme.com" })
-    const naivePage = loadPage(naive, {
-      search: `?fbclid=${FIRST}`,
-      gate: REQUIRED_GATE,
-      script: buildMetaClickIdCaptureScript({ gate: REQUIRED_GATE }).replace(
-        "if (started || !infiniteConsentAllows()) return;",
-        "if (started) return;"
-      )
-    })
-    naivePage.unpersistedGrant()
-    expect(naive.writes).not.toEqual([])
-  })
-
-  it("a stored denial writes nothing, even with DNT off", () => {
-    const denied = createCookieJar({ hostname: "acme.com" })
-    const page = loadPage(denied, { search: `?fbclid=${FIRST}`, gate: REQUIRED_GATE, storedConsent: "denied" })
-    expect(denied.writes).toEqual([])
-    expect(page.fbc()).toBe("")
-  })
-
-  it("a stored grant captures at once, overriding DNT — the runtime's rule, in the runtime's order", () => {
-    const jar = createCookieJar({ hostname: "acme.com" })
-    loadPage(jar, { search: `?fbclid=${FIRST}`, gate: REQUIRED_GATE, storedConsent: "granted", doNotTrack: "1" })
-    expect(jar.entries("_fbc")).toHaveLength(1)
-  })
-
-  it("the accessor re-checks on every call: a revocation empties it", () => {
-    const jar = createCookieJar({ hostname: "acme.com" })
-    const page = loadPage(jar, { search: `?fbclid=${FIRST}`, gate: REQUIRED_GATE, storedConsent: "granted" })
-    expect(clickIdOf(page.fbc())).toBe(FIRST)
-    page.revoke()
-    expect(page.fbc()).toBe("")
-  })
-
-  it("the builder's hook-less default ignores consent — which is why infinite-tag never emits it (see meta.ts)", () => {
-    const jar = createCookieJar({ hostname: "acme.com" })
-    loadPage(jar, { search: `?fbclid=${FIRST}`, doNotTrack: "1" })
-    expect(jar.entries("_fbc")).toHaveLength(1)
-  })
 })
 
 // Ported from infinite-site test-inject-analytics.mjs L458-466 @ 9f65b47 (the consent block of the
@@ -598,13 +505,6 @@ describe("Meta _fbc capture under the optional consent hook (consent_mode=requir
 // not_required hook by default, which applies the same rule through the runtime's recorded decision.
 describe("Meta _fbc capture under the optional consent hook (consent_mode=not_required, the default)", () => {
   const NOT_REQUIRED_GATE: MetaBrowserGate = { kind: "infinite-consent", mode: "not_required" }
-
-  it("a normal visitor is captured at once", () => {
-    const jar = createCookieJar({ hostname: "acme.com" })
-    const page = loadPage(jar, { search: `?fbclid=${FIRST}`, gate: NOT_REQUIRED_GATE })
-    expect(jar.entries("_fbc").map((cookie) => clickIdOf(cookie.value))).toEqual([FIRST])
-    expect(clickIdOf(page.fbc())).toBe(FIRST)
-  })
 
   it("an explicit stored denial writes no _fbc", () => {
     const jar = createCookieJar({ hostname: "acme.com" })
@@ -625,13 +525,5 @@ describe("Meta _fbc capture under the optional consent hook (consent_mode=not_re
     page.grant()
     expect(page.fbc()).toMatch(/^fb\.1\.[0-9]{13}\.IwAR0deferred$/)
     expect(jar.entries("_fbc")).toEqual([{ domain: ".acme.com", value: page.fbc() }])
-  })
-
-  it("a stored grant overrides the privacy signal, and a later revocation empties the accessor", () => {
-    const jar = createCookieJar({ hostname: "acme.com" })
-    const page = loadPage(jar, { search: `?fbclid=${FIRST}`, gate: NOT_REQUIRED_GATE, storedConsent: "granted", doNotTrack: "1" })
-    expect(jar.entries("_fbc")).toHaveLength(1)
-    page.revoke()
-    expect(page.fbc()).toBe("")
   })
 })

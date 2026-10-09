@@ -1,3 +1,4 @@
+import { ownerInformationOnly, protectedFinding, OWNER_INFORMATION_HEADING } from "./integrity.js"
 // Triage of trusted review items (lane O4, §3g.4 step 4). Precedence: standing RULINGS > the wizard's
 // DETERMINISTIC checks > the checklist > reviewer opinion. Each item becomes:
 // - FIX: in scope and inside the run's allowlist → job 16 through the worker;
@@ -5,6 +6,7 @@
 // - ANSWER: a question, answered from this run's checks and receipts;
 // - ASK: the user decides (conversion names, privacy text, widening the allowlist, two reviewers in
 //   conflict, an item raised again after a DECLINE, a finding with no file). Never a loop.
+import { isPolicyPath } from "../jobs/owner-boundary.js"
 import type { ReviewChecklistItemId } from "../wizard/contracts/agents.js"
 import { allowEntryMatches } from "../git/commit.js"
 import { escapeRegExp } from "../text-escape.js"
@@ -13,10 +15,11 @@ import { escapeRegExp } from "../text-escape.js"
  * `INFINITE` (§3x.3): a finding on Infinite's own managed code or on the wizard's own change. It is never FIX (the
  * customer's agent never edits Infinite's runtime); it is replied to honestly and recorded for Infinite to fix.
  */
-export type TriageAction = "FIX" | "DECLINE" | "ANSWER" | "ASK" | "INFINITE"
+export type TriageAction = "FIX" | "DECLINE" | "ANSWER" | "ASK" | "INFINITE" | "SKIP" | "OWNER_INFO"
 export type AskReason =
   | "conversion_names"
   | "privacy_text"
+  | "owner_file"
   | "allowlist_widening"
   | "reviewer_conflict"
   | "raised_after_decline"
@@ -26,6 +29,7 @@ export type AskReason =
   | "infinite_design"
 
 export interface TriageItem {
+  category?: "analytics" | "security" | "owner_consent_privacy" | "request_ga4_proxy" | "request_meta_unsupported" | "request_meta_deletion"
   source: "reviewer" | "teammate"
   threadId: string | null
   findingId: string | null
@@ -70,7 +74,6 @@ interface Ruling {
    * decides; a worker never edits consent, a GA4 proxy or the Meta never-list), never a FIX.
    */
   violationItem: ReviewChecklistItemId | null
-  pattern: RegExp
   reply: string
 }
 
@@ -79,37 +82,40 @@ export const RULINGS: readonly Ruling[] = [
   {
     id: "banner_consent",
     violationItem: "R6",
-    pattern: /cookie[\s-]*banner|consent[\s-]*(manager|banner|mode|gat(e|ing)|check|wall|pop-?up|platform|prompt|dialog)|\bCMP\b|onetrust|cookiebot|usercentrics|gtag\(\s*['"]consent/i,
     reply: "Not changed: Infinite never adds, changes or checks a cookie banner or consent code. The consent mode is only recorded (standing ruling)."
   },
   {
     id: "ga4_proxy",
     violationItem: "R11",
-    pattern: /(proxy|first[\s-]party|reverse)[^.\n]{0,40}(ga4|gtag|google analytics|googletagmanager)|(ga4|gtag|google analytics)[^.\n]{0,40}proxy/i,
     reply: "Not changed: there is no GA4 proxy (standing ruling); only PostHog goes through /ingest."
   },
   {
     id: "meta_never_list",
     violationItem: "R8",
-    pattern: /\bph\b[^.\n]{0,30}(fbq|advanced matching|meta|pixel)|phone[^.\n]{0,30}(meta|pixel|capi|advanced matching)|autoconfig[^.\n]{0,20}(true|on|enable)|enable[^.\n]{0,20}autoconfig|test_event_code|synthesi[sz]e[^.\n]{0,20}_fbp|fbq\(\s*['"]track['"][^.\n]{0,60}(click|onclick)|event[\s_]?id[^.\n]{0,30}(in the page|client[\s-]side|generate)/i,
     reply: "Not changed: this is on Meta's never-list (no phone numbers, no autoConfig, no test event codes, no page-built event IDs, no click-fired standard events, no synthesised _fbp)."
   },
   {
     id: "no_deletion",
     violationItem: null,
-    pattern: /\bdelete\b[^.\n]{0,40}(pixel|dataset|campaign|ad set|ad account|meta)/i,
     reply: "Not changed: Infinite never deletes anything on Meta (standing ruling)."
   }
 ]
 
+/** Only explicit requests can invoke a standing ruling; finding prose never grants that authority. */
+export function rulingForCategory(category: TriageItem["category"]): Ruling | undefined {
+  const id = category === "request_ga4_proxy" ? "ga4_proxy"
+    : category === "request_meta_unsupported" ? "meta_never_list"
+      : category === "request_meta_deletion" ? "no_deletion" : null
+  return RULINGS.find(ruling => ruling.id === id)
+}
+
 const CONVERSION_NAMES = /conversion[\s_-]*name|rename[^.\n]{0,30}(conversion|event)|event name|name (the|this) (conversion|event)/i
-const PRIVACY_TEXT = /privacy[\s-]*(policy|text|paragraph|page|notice)/i
 
 /** Which passing wizard checks contradict a reviewer's opinion on an item (deterministic > opinion). */
 export const DETERMINISTIC_CHECKS_BY_ITEM: Partial<Record<ReviewChecklistItemId, readonly string[]>> = {
   R2: ["census_one_per_tool", "census_posthog_init_once", "census_ga4_config_once", "census_meta_init_once", "one_beacon_per_tool"],
   R4: ["ga4_loader_id", "meta_pixel_once", "ids_match_connections"],
-  R5: ["host_matrix", "preview_self_silent", "adopted_init_guarded", "meta_host_matrix"],
+  R5: ["host_matrix", "preview_self_silent", "meta_host_matrix"],
   // R4-5: per tool, the rehearsal's own page-change counts (`spaChecksNamed` keeps the ones the finding is about).
   R9: ["ga4_spa_page_view", "meta_spa_page_view"],
   R11: ["posthog_via_proxy_once", "next_rewrites_exact"],
@@ -218,14 +224,14 @@ function onPageHelperCall(item: TriageItem, text: string, role: FileRole | null,
 
 /**
  * LF4 close round 2 (P1-3): the ASK for a finding on the page helper's call that says the conversion never reaches
- * Infinite. It explains Infinite's server-only conversion rule (and this run's server lane) and leaves the rest to the
+ * Infinite. It explains Infinite's server-twin conversion rule (and this run's server lane) and leaves the rest to the
  * user: the finding may also name a real bug in the page (a page view, a navigation, a GA4 or PostHog effect).
  */
 export function infiniteDesignAsk(serverLaneInstalled: boolean | null | undefined): string {
   return `${infiniteConversionRule(serverLaneInstalled)} If the finding is also about something your page does (a page view, a navigation, GA4 or PostHog), that part may be a real bug: you decide whether the agent fixes it.`
 }
 
-/** Infinite's server-only conversion rule, with this run's server lane said as it is. */
+/** Infinite's server-twin conversion rule, with this run's server lane said as it is. */
 function infiniteConversionRule(serverLaneInstalled: boolean | null | undefined): string {
   const lane =
     serverLaneInstalled === true
@@ -233,7 +239,7 @@ function infiniteConversionRule(serverLaneInstalled: boolean | null | undefined)
       : serverLaneInstalled === false
         ? " This run did not install the server lane, so Infinite has no conversion from this site yet: connect your Vercel project in Infinite and run npx infinite-tag again."
         : ""
-  return `Infinite counts a conversion from your server (the server lane's reportInfiniteOutcome), never from the page; the page helpers send it to GA4 and PostHog only, by design.${lane}`
+  return `Infinite counts server-twin conversions from your server (the server lane's reportInfiniteOutcome); the page helpers send browser events to GA4, PostHog, Infinite's browser ledger and safe browser-only Meta events without building Meta event ids.${lane}`
 }
 
 /** The reply to "the page never sends the conversion to Infinite", with this run's server lane said as it is. */
@@ -256,6 +262,9 @@ export function triageKey(item: Pick<TriageItem, "path" | "item">): string {
 }
 
 export interface TriageContext {
+  /** Repo-relative root for the direct policy-page path check. */
+  appRoot?: string
+  writtenByRun?: (path: string, line: number | null) => boolean
   /** The run's allowlist union (job `allow.files` ∪ `allow.create`). §3x.3: never the managed files. */
   allowlist: readonly string[]
   /**
@@ -266,6 +275,7 @@ export interface TriageContext {
   /** Keys declined in an earlier round (from the review ledger). */
   declinedKeys: ReadonlySet<string>
   /** Check ids that PASSED on the current head (rehearsal, census, static, build). */
+  /** The wizard's own checks that passed on this commit (for ANSWER items; a passing check never declines a finding). */
   passingChecks: ReadonlySet<string>
   /** Answers for ANSWER items, from receipts and check states; null when nothing measured answers it. */
   answerFor(item: TriageItem): string | null
@@ -310,11 +320,21 @@ export function triage(items: readonly TriageItem[], ctx: TriageContext): Triage
     }
   }
   return items.map((item): TriageDecision => {
+    if (ownerInformationOnly(item)) return { item, action: "OWNER_INFO", reason: OWNER_INFORMATION_HEADING }
+    const located = item.path !== null && isRepoRelativePath(item.path) ? item.path : null
+    // LF4-P1-3 (round 1): OWNERSHIP FIRST. §3x.3 Infinite's own code and the wizard's own change are never handed to the
+    // customer's agent, whatever the finding says.
+    const owner = located !== null ? (ctx.ownership?.(located, item.line) ?? null) : null
+    if (owner !== null) {
+      return { item, action: "INFINITE", label: owner, reason: `This is ${owner} (${item.path}): recorded for Infinite to fix.` }
+    }
+    if (item.category === "owner_consent_privacy" && protectedFinding(item)) return { item, action: "ASK", askReason: "owner_file", reason: "The reviewer marked this finding as a blocker. It stays open for you; the wizard does not edit owner consent or policy code." }
     const text = `${item.body}\n${item.suggestedFix ?? ""}`
     const declinedBefore = ctx.declinedKeys.has(triageKey(item))
-    // Rulings first, whatever the item label: a ruling match is never a FIX (and never offered as one).
-    const ruling = RULINGS.find((candidate) => candidate.pattern.test(text))
+    // An explicit out-of-scope request is never offered as a worker FIX.
+    const ruling = rulingForCategory(item.category)
     if (ruling) {
+      if (protectedFinding(item)) return { item, action: "ASK", askReason: "ruling_violation", ruling: ruling.id, reason: "A blocker remains open for review; the wizard does not automatically dismiss it or perform the requested out-of-scope action." }
       if (declinedBefore) {
         return {
           item,
@@ -324,24 +344,12 @@ export function triage(items: readonly TriageItem[], ctx: TriageContext): Triage
           reason: `${ruling.reply} It was raised again after the wizard declined it: you decide, outside the wizard.`
         }
       }
-      if (ruling.violationItem !== null && item.item === ruling.violationItem) {
-        return {
-          item,
-          action: "ASK",
-          askReason: "ruling_violation",
-          ruling: ruling.id,
-          reason: "The reviewer says this pull request breaks a standing rule. The wizard never hands consent, a GA4 proxy or Meta's never-list to an agent: you decide."
-        }
-      }
       return { item, action: "DECLINE", ruling: ruling.id, reason: ruling.reply }
     }
-    const located = item.path !== null && isRepoRelativePath(item.path) ? item.path : null
-    // LF4-P1-3 (round 1): OWNERSHIP FIRST. §3x.3 Infinite's own code and the wizard's own change are never handed to the
-    // customer's agent, whatever the finding says.
-    const owner = located !== null ? (ctx.ownership?.(located, item.line) ?? null) : null
-    if (owner !== null) {
-      return { item, action: "INFINITE", label: owner, reason: `This is ${owner} (${item.path}): recorded for Infinite to fix.` }
-    }
+
+    if (located === null) return { item, action: "ASK", askReason: "unlocated", reason: "The finding has no safe file location, so it remains open for the site owner to scope." }
+    if (isPolicyPath(located, ctx.appRoot)) return { item, action: "ASK", askReason: "owner_file", reason: "This finding remains open. Policy pages are read-only for the wizard; the site owner must address it." }
+
     // LF4-P1-3: a finding that asks to change a name only Infinite's runtime defines asks to change Infinite's code,
     // even on the customer's call line.
     const internals = ctx.infiniteInternalsIn?.(text, item.path) ?? []
@@ -366,10 +374,7 @@ export function triage(items: readonly TriageItem[], ctx: TriageContext): Triage
     if (CONVERSION_NAMES.test(text)) {
       return { item, action: "ASK", askReason: "conversion_names", reason: "Conversion names are your call; the wizard never changes them on a reviewer's say-so." }
     }
-    if (PRIVACY_TEXT.test(text)) {
-      return { item, action: "ASK", askReason: "privacy_text", reason: "Privacy text is your call; the wizard inserts only the paragraph you approved." }
-    }
-    if (item.severity === "question") {
+    if (item.severity === "question" && !protectedFinding(item)) {
       const answer = ctx.answerFor(item)
       return answer === null
         ? { item, action: "ASK", askReason: "unlocated", reason: "A question nothing this run measured can answer: you decide." }
@@ -389,18 +394,8 @@ export function triage(items: readonly TriageItem[], ctx: TriageContext): Triage
         reason: `Fixing this means editing ${item.path}, which is outside the files this run may change: you decide.`
       }
     }
-    // R4-5: an R9 finding is decided only by the page-change checks of the tools it names, and only when EVERY one passed.
-    const named = item.item === "R9" ? spaChecksNamed(text) : null
-    const deterministic = named ?? (item.item ? DETERMINISTIC_CHECKS_BY_ITEM[item.item] ?? [] : [])
-    const passed = deterministic.filter((checkId) => ctx.passingChecks.has(checkId))
-    const decides = named === null ? passed.length > 0 : named.length > 0 && passed.length === named.length
-    if (decides && item.severity !== "blocker") {
-      return {
-        item,
-        action: "DECLINE",
-        reason: `Not changed: the wizard's own check${passed.length > 1 ? "s" : ""} ${passed.join(", ")} passed on this commit, and its checks outrank a reviewer's opinion.`
-      }
-    }
+    // A static check that passed on the same topic never declines a reviewer's finding (live run 2: the reviewer is the
+    // one that owns the judgement calls, and a check that passes on the wrong code would silence it). Its evidence wins.
     return { item, action: "FIX", reason: "In scope and inside the allowlist." }
   })
 }

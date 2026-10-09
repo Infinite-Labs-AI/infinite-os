@@ -27,8 +27,16 @@ import { WIZARD_PATHS, type WizardRunState } from "./contracts/state.js"
 import { guardBridge } from "./engine.js"
 import { buildScanner } from "../review/context.js"
 import { safeText } from "../review/post.js"
+import { safeDisplayText } from "../review/display.js"
 import { mergeIsDeployed } from "./steps/prove.js"
 import { HARNESS_OUTPUTS_RELATIVE_PATH } from "../harness/outputs.js"
+import { canPush } from "../github/repo.js"
+import type { WizardGitOps } from "./contracts/git-host.js"
+import { forkTargetMatches } from "./push-target.js"
+import { readOriginHead } from "./steps/before.js"
+import { measureOwnerDiff, measureWizardCommits, unrecordedCommits, ownerBoundaryStop, type OwnerBoundaryMeasurement } from "../jobs/owner-diff.js"
+import { isPolicyPath } from "../jobs/owner-boundary.js"
+import { gitlabMergeRequestPushOptions } from "../git/push.js"
 
 export const UNINSTALL_RECORD_SCHEMA = "infinite-tag.wizard-uninstall.v1" as const
 export const UNINSTALL_RECORD_PATH = `${WIZARD_PATHS.dir}/uninstall.json`
@@ -75,6 +83,10 @@ export interface UninstallRecord {
   pr: { number: number; url: string } | null
   linkId: string | null
   pieces: Record<UninstallPiece, PieceState>
+  wizardCommits?: string[]
+  approvedForeignCommits?: string[]
+  ownerBoundary?: OwnerBoundaryMeasurement
+  lastPush?: { sha: string; at: string }
 }
 
 /** The link step, run for an uninstall that has no saved link (a fresh clone, a teammate's machine). */
@@ -253,7 +265,7 @@ async function resolveBase(ctx: UninstallContext, deps: WizardDeps): Promise<str
   }
   const facts = await deps.host.repoFacts().catch(() => null)
   if (facts && !("unsupported" in facts) && facts.defaultBranch) return facts.defaultBranch
-  return null
+  return readOriginHead(deps, ctx.root)
 }
 
 /**
@@ -309,6 +321,11 @@ export async function runUninstallFlow(ctx: UninstallContext, rawDeps: WizardDep
   const lines: string[] = []
 
   const existing = await readRecord(ctx.root)
+  // The commit record is saved before the boundary check and push. An interrupted/refused
+  // publication is not a completed uninstall whose cloud cleanup can be resumed.
+  if (existing?.wizardCommits?.length && !existing.lastPush) {
+    return stop("INF_WIZ_PUSH_REFUSED", `The uninstall is paused: recorded commit${existing.wizardCommits.length === 1 ? "" : "s"} ${existing.wizardCommits.join(", ")} on branch ${existing.branch} ${existing.wizardCommits.length === 1 ? "has" : "have"} no confirmed measured push. Cloud settings and links were left alone. Review this branch and complete the uninstall explicitly.`, lines, existing)
+  }
   if (existing && UNINSTALL_PIECES.some((piece) => PENDING_STATES.has(existing.pieces[piece]))) {
     return followUp(ctx, deps, existing, lines)
   }
@@ -323,45 +340,105 @@ export async function runUninstallFlow(ctx: UninstallContext, rawDeps: WizardDep
   if (!tree.clean && dirty.length > 0) {
     return stop("INF_WIZ_DIRTY_TREE", `Commit or stash your changes first (${dirty.slice(0, 5).join(", ")}${dirty.length > 5 ? ", …" : ""}).`, lines)
   }
+  let headOwner: string | null = null
+  if (deps.host.kind === "github") {
+    const git = deps.git as Partial<WizardGitOps>
+    const saved = ctx.state?.pushTarget
+    if (saved?.kind === "fork") {
+      if (!forkTargetMatches(saved)) return stop("INF_WIZ_PUSH_REFUSED", "The saved uninstall fork destination is invalid.", lines)
+      if (!git.setPushRemote) return stop("INF_WIZ_PUSH_REFUSED", "The approved fork destination cannot be restored for uninstall.", lines)
+      git.setPushRemote(saved.remoteUrl)
+      headOwner = saved.headOwner
+    } else {
+      const facts = await deps.host.repoFacts().catch(() => null)
+      if (!facts || "unsupported" in facts || facts.viewerPermission === null) lines.push("GitHub push access could not be checked early; the push will confirm it.")
+      if (facts && !("unsupported" in facts) && facts.viewerPermission !== null && !canPush(facts.viewerPermission)) {
+        if (facts.allowForking !== true || !deps.host.createFork || !git.setPushRemote) return stop("INF_WIZ_PUSH_REFUSED", "This repo cannot be pushed or forked by your account. Ask its owner for write access or fork permission.", lines)
+        const approved = await ctx.ask("confirm", { question: "Create your fork and open the uninstall pull request from it?", defaultYes: false })
+        if (approved !== true) return stop("INF_WIZ_PUSH_REFUSED", "The fork pull request was not approved.", lines)
+        const origin = await deps.git.remoteUrl()
+        try {
+          const fork = await deps.host.createFork(/^(?:git@github\.com:|ssh:\/\/git@github\.com\/)/.test(origin ?? ""))
+          git.setPushRemote(fork.remoteUrl)
+          headOwner = fork.headOwner
+        } catch (error) {
+          return stop("INF_WIZ_PUSH_REFUSED", `GitHub could not create the uninstall fork: ${error instanceof Error ? error.message : String(error)}`, lines)
+        }
+      }
+    }
+  }
   const base = await resolveBase(ctx, deps)
   if (!base) return stop("INF_WIZ_BRANCH_FAILED", "Cannot tell which branch ships to production; run again with --base <branch>.", lines)
   const day = ctx.now().toISOString().slice(0, 10)
   const branch = `infinite/tag/uninstall-${day}-${randomBytes(3).toString("hex")}`
+  let baseSha: string
   try {
-    await deps.git.createBranch(base, branch)
+    baseSha = (await deps.git.createBranch(base, branch)).baseSha
   } catch (error) {
     return stop("INF_WIZ_BRANCH_FAILED", `Could not create ${branch} from origin/${base}: ${error instanceof Error ? error.message : String(error)}`, lines)
   }
   lines.push(`Branch ${branch} (from origin/${base})`)
+  const record: UninstallRecord = {
+    schema: UNINSTALL_RECORD_SCHEMA, createdAt: ctx.now().toISOString(), base, branch, pr: null,
+    linkId: ctx.state?.link?.linkId ?? null, pieces: { server_lane_env: "no_link", site_source: "no_link", link: "no_link" },
+    wizardCommits: [], approvedForeignCommits: []
+  }
 
   // 2. Reverse the install on that branch; commit; push; PR.
   const reversal = await deps.installer.uninstall({ root: ctx.root, dryRun: false })
-  for (const file of reversal.leftAsIs) lines.push(`Changed since the install, left as is: ${file}`)
+  const scanner = buildScanner({ root: ctx.root, appRoot: ctx.state?.appRoot ?? "." }, deps, [])
+  const leftAsIsNotes = reversal.leftAsIs.map(file => safeDisplayText(scanner, isPolicyPath(file, ctx.state?.appRoot ?? ".")
+    ? `Kept ${file} as it is: it is a policy page.`
+    : `Left as is (changed since the install): ${file}`))
+  lines.push(...leftAsIsNotes)
   let pr: UninstallRecord["pr"] = null
   if (reversal.reversed.length === 0) {
     lines.push("Nothing in the code to reverse.")
   } else {
-    await deps.git.stage([...new Set([...reversal.reversed, WIZARD_PATHS.installManifest])])
+    const stagedPaths = [...new Set([...reversal.reversed, WIZARD_PATHS.installManifest])]
+    const working = await measureOwnerDiff({ root: ctx.root, appRoot: ctx.state?.appRoot ?? ".", baseSha: await deps.git.head(), paths: stagedPaths })
+    if (working.state !== "checked") return stop("INF_WIZ_PUSH_REFUSED", safeDisplayText(scanner, ownerBoundaryStop(working)), lines)
+    await deps.git.stage(stagedPaths)
     const runId = ctx.state?.runId ?? null
-    await deps.git.commit({ message: UNINSTALL_COMMIT_MESSAGE, trailers: runId ? { "Infinite-Tag-Run": runId } : {} })
+    const committed = await deps.git.commit({ message: UNINSTALL_COMMIT_MESSAGE, trailers: runId ? { "Infinite-Tag-Run": runId } : {} })
+    record.wizardCommits!.push(committed.sha)
+    await writeRecord(deps, ctx.root, record)
+    const head = await deps.git.head()
+    record.ownerBoundary = await measureWizardCommits({ root: ctx.root, appRoot: ctx.state?.appRoot ?? ".", baseSha, headSha: head, wizardCommits: record.wizardCommits! })
+    await writeRecord(deps, ctx.root, record)
+    if (record.ownerBoundary.state !== "checked") return stop("INF_WIZ_PUSH_REFUSED", safeDisplayText(scanner, ownerBoundaryStop(record.ownerBoundary)), lines, record)
+    const foreign = await unrecordedCommits({ root: ctx.root, baseSha, headSha: head, wizardCommits: record.wizardCommits!, approvedForeignCommits: [] })
+    if (foreign === null) return stop("INF_WIZ_PUSH_REFUSED", "Nothing pushed: unrecorded uninstall-branch commits could not be listed.", lines, record)
+    if (foreign.length) {
+      const list = foreign.map(commit => `${commit.sha.slice(0, 12)} ${scanner.redact(commit.subject).text}`).join("\n")
+      if (await ctx.ask("confirm", { question: `These commits are not in the uninstall's own commit record:\n${list}\nPush these owner commits too?`, defaultYes: false }) !== true) return stop("INF_WIZ_PUSH_REFUSED", "The additional commits were not approved for push.", lines, record)
+      if (await deps.git.head() !== head) return stop("INF_WIZ_PUSH_REFUSED", "The branch changed while approving the push. Nothing pushed.", lines, record)
+      record.approvedForeignCommits = foreign.map(commit => commit.sha)
+      await writeRecord(deps, ctx.root, record)
+    }
     try {
-      await deps.git.push(branch)
+      const pushGit = deps.git as Partial<WizardGitOps>
+      if (deps.host.kind === "gitlab" && pushGit.pushWithOptions) {
+        try { await pushGit.pushWithOptions(branch, gitlabMergeRequestPushOptions(base, UNINSTALL_PR_TITLE), head) }
+        catch { await deps.git.push(branch, head) }
+      } else await deps.git.push(branch, head)
+      record.lastPush = { sha: head, at: ctx.now().toISOString() }
+      await writeRecord(deps, ctx.root, record)
     } catch (error) {
-      return stop("INF_WIZ_PUSH_REFUSED", `Push refused: ${error instanceof Error ? error.message : String(error)}`, lines)
+      return stop("INF_WIZ_PUSH_REFUSED", `Push refused: ${error instanceof Error ? error.message : String(error)}`, lines, record)
     }
     const body = [
       "This pull request removes the analytics install infinite-tag added, file by file.",
       "",
       ...reversal.reversed.map((file) => `Reversed: ${file}`),
-      ...reversal.leftAsIs.map((file) => `Left as is (changed since the install): ${file}`),
+      ...leftAsIsNotes,
       "",
       "Infinite's settings for this site stay as they are until this is merged and deployed."
     ].join("\n")
     // B29: the uninstall PR body passes the same §3g.5 secret scan as every other posted string.
-    const scanner = buildScanner({ root: ctx.root, appRoot: ctx.state?.appRoot ?? "." }, deps, [])
     await deps.fs.writeTextAtomic(join(ctx.root, UNINSTALL_PR_BODY_PATH), `${safeText(scanner, body)}\n`, 0o600)
     try {
-      const created = await deps.host.createDraftPr({ base, head: branch, title: UNINSTALL_PR_TITLE, bodyFile: join(ctx.root, UNINSTALL_PR_BODY_PATH) })
+      const created = await deps.host.createDraftPr({ base, head: headOwner ? `${headOwner}:${branch}` : branch, title: UNINSTALL_PR_TITLE, bodyFile: join(ctx.root, UNINSTALL_PR_BODY_PATH) })
       if ("unsupported" in created) lines.push(`Pushed ${branch}; open a merge request for it on your git host.`)
       else {
         pr = { number: created.number, url: created.url }
@@ -373,15 +450,7 @@ export async function runUninstallFlow(ctx: UninstallContext, rawDeps: WizardDep
   }
 
   // 3. The cloud pieces, one ask each; "after the merge" is the default. No saved link → link first.
-  const record: UninstallRecord = {
-    schema: UNINSTALL_RECORD_SCHEMA,
-    createdAt: ctx.now().toISOString(),
-    base,
-    branch,
-    pr,
-    linkId: ctx.state?.link?.linkId ?? null,
-    pieces: { server_lane_env: "no_link", site_source: "no_link", link: "no_link" }
-  }
+  record.pr = pr
   const linked = await ensureLink(ctx, record, lines)
   if (!linked.ok) {
     await writeRecord(deps, ctx.root, record)

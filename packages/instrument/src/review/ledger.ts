@@ -3,15 +3,17 @@
 // a loop), which decisions are still open for the user, and which round ran on which head. The run state's
 // `pr.handledThreadIds` stays the record of replied threads.
 import type { ReviewChecklistItemId, ReviewResult } from "../wizard/contracts/agents.js"
+import { ownerInformationOnly, protectedFinding } from "./integrity.js"
 import type { ChecklistItem, JobItemState } from "../wizard/contracts/jobs.js"
 import type { InfiniteOwnLabel } from "./post.js"
 import type { TriageAction, TriageDecision } from "./triage.js"
-import { RULINGS, triageKey } from "./triage.js"
+import { RULINGS, isRepoRelativePath, rulingForCategory, triageKey } from "./triage.js"
 
 export const REVIEW_LEDGER_PATH = ".infinite/wizard/review-ledger.json"
 
 export interface ReviewLedger {
   version: 1
+  checkRegistration?: { sha: string; complete: boolean; startedAt?: string }
   runId: string
   declined: Array<{ key: string; reason: string; round: number }>
   /** ASK items not yet answered: they go into the final comment under "You decide". */
@@ -40,6 +42,9 @@ export interface ReviewLedger {
 }
 
 export interface LedgerFinding {
+  category?: "analytics" | "security" | "owner_consent_privacy" | "request_ga4_proxy" | "request_meta_unsupported" | "request_meta_deletion"
+  body?: string
+  suggestedFix?: string | null
   key: string
   findingId: string | null
   item: ReviewChecklistItemId | null
@@ -77,11 +82,17 @@ const CLOSING_STATES: readonly JobItemState[] = ["done_in_code", "waiting_deploy
 export function openFindings(
   ledger: Pick<ReviewLedger, "rounds" | "declined" | "findings">,
   jobs: readonly Pick<ChecklistItem, "id" | "state">[],
-  ownership?: (path: string, line: number | null) => InfiniteOwnLabel | null
+  ownership?: (path: string, line: number | null) => InfiniteOwnLabel | null,
+  writtenByRun?: (path: string, line: number | null) => boolean
 ): OpenFinding[] {
   const latest = new Map<string, LedgerFinding>()
   if (ledger.findings && ledger.findings.length > 0) {
-    for (const finding of ledger.findings) latest.set(findingKey(finding.key, finding.findingId), finding)
+    for (const finding of ledger.findings) {
+      // Older ledgers omitted suggestions from their triage rows; recover only that
+      // scope evidence from the matching saved review before deciding to close it.
+      const original = ledger.rounds.find(round => round.round === finding.round)?.review?.findings.find(entry => entry.id === finding.findingId && triageKey(entry) === finding.key)
+      latest.set(findingKey(finding.key, finding.findingId), { ...finding, suggestedFix: finding.suggestedFix ?? original?.suggested_fix })
+    }
   } else {
     const rulingReplies = new Set(RULINGS.map((ruling) => ruling.reply))
     for (const round of ledger.rounds) {
@@ -91,11 +102,14 @@ export function openFindings(
         latest.set(findingKey(key, finding.id), {
           key,
           findingId: finding.id,
+          category: finding.category,
+          body: finding.body,
+          suggestedFix: finding.suggested_fix,
           item: finding.item,
           severity: finding.severity,
           path: finding.path,
           line: finding.line,
-          action: declined ? "DECLINE" : "FIX",
+          action: ownerInformationOnly(finding) ? "OWNER_INFO" : declined ? "DECLINE" : "FIX",
           ruling: declined && rulingReplies.has(declined.reason) ? declined.reason : null,
           label: null,
           round: round.round
@@ -105,8 +119,14 @@ export function openFindings(
   }
   const out: OpenFinding[] = []
   for (const finding of latest.values()) {
-    if (finding.action === "ANSWER") continue
-    if (finding.action === "DECLINE" && finding.ruling !== null) continue
+    if (finding.action === "ANSWER" && !protectedFinding(finding)) continue
+    if (ownerInformationOnly(finding)) continue
+    // Resumed ledgers can contain old keyword declines. Only a matching structured request
+    // can still be closed; blockers and reports of a broken ruling stay open, as in fresh triage.
+    const ruling = rulingForCategory(finding.category)
+    if (finding.action === "DECLINE" && ruling && !protectedFinding(finding)
+
+      && (finding.ruling === ruling.id || finding.ruling === ruling.reply)) continue
     if (finding.action === "FIX" && finding.findingId !== null) {
       const job = jobs.find((entry) => entry.id === `review_comments:${finding.findingId}`)
       if (job && CLOSING_STATES.includes(job.state)) continue
@@ -125,10 +145,12 @@ function findingKey(key: string, findingId: string | null): string {
   return `${key}|${findingId ?? "-"}`
 }
 
-/** `<item> <path>:<line>` (+ the label), the verdict's name for an open finding. */
+/**
+ * `<path>:<line>`, the verdict's name for an open finding: where the owner looks, never a checklist id (the finding's
+ * own words are on the report's list, not in the headline).
+ */
 export function openFindingName(finding: { item: string | null; path: string | null; line: number | null; label: OpenFinding["label"] }): string {
-  const where = finding.path === null ? "general" : finding.line === null ? finding.path : `${finding.path}:${finding.line}`
-  return `${finding.item ?? "review"} ${where}${finding.label ? ` (${finding.label})` : ""}`
+  return finding.path === null ? "the pull request" : finding.line === null ? finding.path : `${finding.path}:${finding.line}`
 }
 
 export function emptyLedger(runId: string): ReviewLedger {
@@ -155,6 +177,9 @@ export function recordDecisions(ledger: ReviewLedger, decisions: readonly Triage
     const entry: LedgerFinding = {
       key,
       findingId: decision.item.findingId,
+      category: decision.item.category,
+      body: decision.item.body,
+      suggestedFix: decision.item.suggestedFix,
       item: decision.item.item,
       severity: decision.item.severity,
       path: decision.item.path,

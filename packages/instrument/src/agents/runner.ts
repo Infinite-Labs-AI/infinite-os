@@ -17,6 +17,9 @@
 // The pinned models live in ONE constant (`AGENT_MODELS`, River 10-02); if the user's plan or CLI rejects
 // one, the turn is retried ONCE with the user's default model at the same effort, and the user is told.
 // Never a provider switch, never Infinite-paid inference, never a real prompt in tests (fakes only).
+import { REVIEWER_OWNER_BOUNDARY } from "../jobs/owner-boundary.js"
+import { createScanner } from "../review/scan.js"
+import { redactDisplayText } from "../review/display.js"
 import { randomUUID } from "node:crypto"
 import { access, chmod, open, readFile, rm, writeFile } from "node:fs/promises"
 import { basename, dirname, join } from "node:path"
@@ -26,6 +29,7 @@ import {
   AGENT_LIMITS,
   CLAIMS_SCHEMA,
   codexPermissionArgs,
+  JOB_REVIEW_SCHEMA,
   REVIEW_SCHEMA,
   schemaFileText,
   type AgentDetectResult,
@@ -34,8 +38,10 @@ import {
   type AgentRunner,
   type AgentRunOutcome,
   type AgentRunResult,
+  type JobReviewResult,
   type ReviewFailure,
   type ReviewResult,
+  type ReviewRunInput,
   type RunJobsInput,
   type SessionRef
 } from "../wizard/contracts/agents.js"
@@ -53,7 +59,7 @@ import {
   parseClaudeLine,
   type ModelChoice
 } from "./claude.js"
-import { buildCodexReviewerArgv, buildCodexWorkerArgv, codexModelRejected, codexUnrecognizedConfig, parseCodexLine } from "./codex.js"
+import { buildCodexReviewerArgv, buildCodexWorkerArgv, codexModelRejected, codexRequestRejected, codexUnrecognizedConfig, parseCodexLine } from "./codex.js"
 import { detectAgents, apiKeySourceMatches, resolveCodexRuntime, type DetectedAgents } from "./detect.js"
 import { buildAgentEnv } from "./env.js"
 import { Fence, recoverCrashedTurns, type FenceBlock, type FenceEditAttribution, type FenceGateHit, type FenceStray, type TreeSeal } from "./fence.js"
@@ -62,7 +68,7 @@ import { AGENT_LABEL, claudeToolBeat, codexItemBeat, displayPath, Narrator, Thin
 import { AgentProcessRegistry } from "./process.js"
 import { ensurePrivateDir, repoSecretPaths, resolveRealpath, resolveSensitivePaths, runScratchDir, snapshotDir, wizardCacheRoot } from "./paths.js"
 import { sanitizeUntrusted } from "./sanitize.js"
-import { parseReview, parseStructuredClaims, type StructuredClaims } from "./schema-check.js"
+import { parseJobReview, parseReview, parseStructuredClaims, type StructuredClaims } from "./schema-check.js"
 import { ClaimChannel, isPlanDecidedTopic } from "./mcp/tools.js"
 import type { McpServerHandler } from "./mcp/jsonrpc.js"
 import { startMcpBridge } from "./mcp/bridge.js"
@@ -76,13 +82,29 @@ export { AGENT_MODELS }
 
 /** Prompts on stdin (the job brief is the system prompt for Claude and the prompt for Codex). */
 export const WORKER_KICKOFF =
-  "Do the jobs in your instructions. Start with job_list. Edit files only; never run git, a build, the tests, an install or a dev server (the wizard builds and tests after your turn). Claim each job with job_claim when you think it is done, blocked or not needed; your claim is not the result, the wizard checks. Finish with the JSON your output schema asks for."
+  "Do the jobs in your instructions. Start with job_list. Edit files only; never run git, a build, the tests, an install or a dev server (the wizard builds and tests after your turn). Finish and claim one job at a time. Read job_claim's staticChecks result and fix any problem before moving to the next job; the wizard runs the remaining checks after your turn. Finish with the JSON your output schema asks for."
 export const WORKER_RESUME_KICKOFF =
   "Continue. The wizard ran its own checks; its notes and any answers from the user are at the end of your instructions. Fix what failed, then claim again with job_claim and finish with the JSON your output schema asks for."
-/** The first line of every Claude system prompt: the value after `--append-system-prompt` never starts with "-". */
+/**
+ * The first line of every Claude system prompt: the value after `--append-system-prompt` never starts with "-". Live run
+ * 6: it no longer repeats the owner boundary paragraph, which the brief itself opens with (`jobs/briefs.ts`
+ * `operatorRules`, the same text Codex gets with no header), so the agent reads it once.
+ */
 export const SYSTEM_PROMPT_HEADER = "Infinite tag wizard: your instructions for this run."
+/** The reviewer's first system-prompt line: the owner boundary without the worker's own instruction. */
+export const REVIEWER_SYSTEM_PROMPT_HEADER = `Infinite tag wizard: your review instructions for this run.\n${REVIEWER_OWNER_BOUNDARY}`
 export const REVIEWER_KICKOFF =
-  "Review the pull request checked out in this folder against your checklist (R1 to R16). Read only. Answer only with the JSON your output schema asks for."
+  "Review the pull request checked out in this folder against your supplied checklist. Consent, privacy policies and terms are outside the review: do not evaluate or comment on them. Read only. Answer only with the JSON your output schema asks for."
+/** The jobs' review (`wizard/steps/jobs-review.ts`): the same reviewer, answering the jobs' questions. */
+export const JOBS_REVIEWER_KICKOFF =
+  "Answer every question in your instructions about the change in this folder, from the code. Do not judge the site owner's consent choices, banner or policy pages. Read only. Answer only with the JSON your output schema asks for."
+
+/** What one kind of review asks for: its strict schema, its kickoff and its parser. */
+function reviewSpec(input: Pick<ReviewRunInput, "schema">): { schema: unknown; kickoff: string; parse: (value: unknown) => ReviewResult | JobReviewResult | null } {
+  return input.schema === "jobs"
+    ? { schema: JOB_REVIEW_SCHEMA, kickoff: JOBS_REVIEWER_KICKOFF, parse: parseJobReview }
+    : { schema: REVIEW_SCHEMA, kickoff: REVIEWER_KICKOFF, parse: parseReview }
+}
 
 /** How long Codex has to reach the claim channel before the run is called toolless. */
 export const CODEX_STARTUP_TIMEOUT_MS = 45_000
@@ -114,7 +136,7 @@ export type AgentRunResultWithExtras = AgentRunResult & AgentRunExtras
  * job the fence blocked (review O3 F14), so when it reverted anything and gave no `blocked` list, every
  * item of the turn is blocked (fail closed) instead of none.
  */
-export function runExtras(result: AgentRunResult, items: readonly { id: string }[] = []): AgentRunExtras {
+export function runExtras(result: Omit<AgentRunResult, "session">, items: readonly { id: string }[] = []): AgentRunExtras {
   const extras = result as Partial<AgentRunExtras>
   let blocked: FenceBlock[]
   if (Array.isArray(extras.blocked)) blocked = extras.blocked
@@ -139,6 +161,8 @@ export function runExtras(result: AgentRunResult, items: readonly { id: string }
 }
 
 export interface AgentRunnerOptions {
+  /** Repo-relative application directory used for policy page routing. */
+  appRoot?: string
   /** The repo root (absolute). */
   root: string
   /** The user's home (absolute): scratch, snapshots and the sensitive-path list come from it. */
@@ -184,6 +208,19 @@ interface AttemptResult {
 }
 
 export class AgentRunnerImpl implements AgentRunner {
+  // Set ONLY by the runner's dispatch record. A multi-item child has no trustworthy current-job
+  // identity; agent report_progress / claim order must never turn that uncertainty into blame.
+  private activeJob: string | null = null
+  private readonly pendingEdits = new Map<string, { path: string; owner: string | null }>()
+  private readonly codexEditOwners = new Map<string, string | null>()
+  private flushEditActivities(ids?: readonly string[]): void {
+    for (const id of ids ?? this.pendingEdits.keys()) {
+      const edit = this.pendingEdits.get(id)
+      if (!edit) continue
+      this.activeFence?.recordEditActivity(edit.owner, edit.path)
+      this.pendingEdits.delete(id)
+    }
+  }
   private readonly registry = new AgentProcessRegistry()
   private detected: DetectedAgents | null = null
   private activeFence: Fence | null = null
@@ -265,7 +302,13 @@ export class AgentRunnerImpl implements AgentRunner {
     const now = this.options.now ?? (() => new Date())
     let token = ""
     const literals = () => [token, ...(this.options.secretLiterals?.() ?? [])].filter((literal) => literal.length >= 8)
-    const redact = (text: string) => literals().reduce((acc, literal) => acc.split(literal).join("[redacted]"), text)
+    const allowedIds = await this.options.connectionIds()
+    // Claims, questions and progress reach the terminal before the later report scan. Use the same
+    // provider/context rules here, before limits can truncate a key. The MCP token arrives after setup.
+    const redact = (text: string) => redactDisplayText(createScanner({
+      literals: literals().map(value => ({ value, kind: "mcp_token" as const })),
+      allowedIds
+    }), text)
     const narrator = new Narrator({ agent: kind, role: "worker", emit: (beat) => input.onNarrate(beat), now: () => now().getTime(), throttleMs: this.options.narrationThrottleMs })
     // One claim channel PER ATTEMPT (review O3 F20): a model-fallback retry must not inherit the first
     // attempt's claims or its `initialized` count (that would hide a toolless retry).
@@ -274,7 +317,18 @@ export class AgentRunnerImpl implements AgentRunner {
         items: input.items,
         now,
         redact,
-        onClaim: (claim) => input.onClaim(claim),
+        onClaim: async (claim) => {
+          if (this.pendingEdits.size > 0) return { state: "undetermined", problems: ["An editing tool is still running. Wait for it to finish, then claim again."] }
+          if (!this.activeFence || !(await this.activeFence.claimCheckSafe())) return { state: "undetermined", problems: ["The safety fence found an out-of-scope or changing file; no static check ran. The turn will be settled before any further checks."] }
+          const consentProblems = await this.activeFence.claimConsentProblems(claim.jobId)
+          // The change since the previous claim is this job's (attribution by claim, `claim-attribution.ts`). Taken after
+          // the consent put-back, so the snapshot holds what this job really keeps. A claim refused above (an edit still
+          // running, an unsafe tree) takes none: its change then counts toward the next claim.
+          await this.activeFence.markClaim(claim.jobId)
+          if (consentProblems.length > 0) return { state: "problem", problems: consentProblems }
+          const feedback = await input.onClaim(claim)
+          return feedback && typeof feedback === "object" ? feedback : undefined
+        },
         onAsk: (question) => input.onAsk(question),
         onProgress: (progress) => {
           input.onProgress(progress)
@@ -293,7 +347,10 @@ export class AgentRunnerImpl implements AgentRunner {
     this.mcpTokens.add(token)
     // The snapshot dir is unique per process and turn, so a later run never overwrites a crashed turn's copies.
     const turnDir = (suffix = "") => snapshotDir(this.options.home, runId, `${turn}${suffix}-${process.pid}-${Date.now().toString(36)}`)
-    let fence = await Fence.begin({ root: this.options.root, snapshotDir: turnDir(), runId, turn, items: input.items })
+    this.activeJob = input.items.length === 1 ? input.items[0]!.id : null
+    this.pendingEdits.clear()
+    this.codexEditOwners.clear()
+    let fence = await Fence.begin({ root: this.options.root, appRoot: this.options.appRoot, snapshotDir: turnDir(), runId, turn, items: input.items })
     this.activeFence = fence
     let modelFallback = false
     try {
@@ -303,12 +360,16 @@ export class AgentRunnerImpl implements AgentRunner {
         modelFallback = true
         input.onNarrate({ agent: kind, role: "worker", text: `${this.models()[kind].label} isn't on your plan: using your default model` })
         if (!fence.isSettled) await fence.abort()
-        fence = await Fence.begin({ root: this.options.root, snapshotDir: turnDir("-retry"), runId, turn: `${turn}-retry`, items: input.items })
+        fence = await Fence.begin({ root: this.options.root, appRoot: this.options.appRoot, snapshotDir: turnDir("-retry"), runId, turn: `${turn}-retry`, items: input.items })
         this.activeFence = fence
+        this.pendingEdits.clear()
+        this.codexEditOwners.clear()
+        this.activeJob = input.items.length === 1 ? input.items[0]!.id : null
         channel = newChannel()
         attempt = await this.workerAttempt(kind, info, input, { bridge, scratch, narrator, channel, turn, model: this.modelFor(kind) })
       }
       if (this.interrupted && attempt.outcome === "completed") attempt.outcome = "error"
+      this.flushEditActivities()
       const claims = mergeClaims(channel.claims, attempt.structured, input.items, now, redact)
       const questions = mergeQuestions(channel.questions, attempt.structured, input.items, redact)
       const base = {
@@ -358,10 +419,18 @@ export class AgentRunnerImpl implements AgentRunner {
     return join(wizardCacheRoot(this.options.home), runId, `review-${n}-${reviewer === "claude_code" ? "claude" : "codex"}.jsonl`)
   }
 
-  async review(input: { worktreeDir: string; reviewer: AgentKind; brief: string; onNarrate?: (beat: { agent: AgentKind; role: "reviewer"; text: string }) => void }): Promise<ReviewResult | ReviewFailure> {
+  /**
+   * Every outcome that is not a parsed review is a failure that says WHY (live runs: a refused request, a missing
+   * binary and a crash were all reported as "unparseable", so the review step asked again with "your answer did not
+   * match the schema" and then said exactly that, when no answer had ever come back). Only `unparseable` is an answer.
+   */
+  async review(input: ReviewRunInput): Promise<ReviewResult | ReviewFailure> {
     await assertReviewWorktree(input.worktreeDir, this.options.root)
     const info = await this.infoFor(input.reviewer)
-    if (!info) return { error: "unparseable" }
+    if (!info) {
+      const reason = (await this.detect()).unavailable?.find((entry) => entry.kind === input.reviewer)?.reason
+      return { error: "unavailable", message: reason === "logged_out" ? "is not signed in" : reason === "not_installed" ? "is not installed" : "was not found on this computer" }
+    }
     this.reviews += 1
     const runId = this.options.runId() ?? "local-run"
     const scratch = join(runScratchDir(this.options.home, runId), `review-${this.reviews}`)
@@ -372,9 +441,19 @@ export class AgentRunnerImpl implements AgentRunner {
       result = await this.reviewAttempt(info, input, scratch, this.modelFor(input.reviewer))
     }
     await rm(scratch, { recursive: true, force: true })
+    const message = result.errorText ? { message: result.errorText } : {}
     if (result.outcome === "out_of_usage") return { error: "out_of_usage" }
     if (result.outcome === "timeout") return { error: "timeout" }
+    if (result.requestRejected) return { error: "rejected", ...message }
+    // A non-zero exit, a failed turn or a kill; also a run that "finished" on an error result with no answer.
+    if (result.outcome === "error" || (result.review === null && result.errorText !== null)) return { error: "error", ...message }
     return result.review ?? { error: "unparseable" }
+  }
+
+  /** The jobs' review: the same reviewer and the same failures, answering `JOB_REVIEW_SCHEMA` (`wizard/steps/jobs-review.ts`). */
+  async reviewJobs(input: ReviewRunInput): Promise<JobReviewResult | ReviewFailure> {
+    const result = (await this.review({ ...input, schema: "jobs" })) as unknown as JobReviewResult | ReviewFailure
+    return "error" in result ? result : parseJobReview(result) ?? { error: "unparseable" }
   }
 
   // ---- internals ----
@@ -416,7 +495,7 @@ export class AgentRunnerImpl implements AgentRunner {
       input.onNarrate({ agent: kind, role: "worker", text })
     }
     // §3x.3 (D1): silence after a tool result is the model thinking, said as `Thinking · N s` (never the last tool's beat).
-    const ticker = new ThinkingTicker(ctx.narrator, () => (this.options.now ?? (() => new Date()))().getTime())
+    const ticker = new ThinkingTicker(ctx.narrator, () => (this.options.now ?? (() => new Date()))().getTime(), (seconds) => input.onActivity?.({ kind: "thinking", seconds }))
     const tickTimer = setInterval(() => ticker.tick(), 1_000)
     tickTimer.unref()
     const state = {
@@ -478,11 +557,24 @@ export class AgentRunnerImpl implements AgentRunner {
               return
             case "tool_use": {
               ticker.acted()
-              const beat = claudeToolBeat(event.name, event.input, beatCtx)
-              if (beat) ctx.narrator.beat(beat)
+              for (const use of [event, ...event.additional ?? []]) {
+                const beat = claudeToolBeat(use.name, use.input, beatCtx)
+                const toolInput = typeof use.input === "object" && use.input !== null ? use.input as Record<string, unknown> : {}
+                const path = displayPath(toolInput.file_path ?? toolInput.path ?? toolInput.notebook_path, this.options.root)
+                if (use.name === "Read") input.onActivity?.({ kind: "read", path })
+                if (use.name === "Edit" || use.name === "Write" || use.name === "MultiEdit") {
+                  const overlapping = [...this.pendingEdits.values()].filter(edit => edit.path === path)
+                  // Concurrent writes to one file have no reliable byte attribution; never guess a claimant.
+                  overlapping.forEach(edit => { edit.owner = null })
+                  this.pendingEdits.set(use.id ?? `unidentified-${this.pendingEdits.size}`, { path, owner: overlapping.length ? null : this.activeJob })
+                  input.onActivity?.({ kind: "edit", path })
+                }
+                if (beat) ctx.narrator.beat(beat)
+              }
               return
             }
             case "tool_result":
+              this.flushEditActivities(event.ids)
               ticker.toolReturned()
               return
             case "assistant_error":
@@ -561,6 +653,19 @@ export class AgentRunnerImpl implements AgentRunner {
             if (event.phase === "completed") ticker.toolReturned()
             else ticker.acted()
             const beat = codexItemBeat(event.item, beatCtx)
+            if (typeof event.item === "object" && event.item !== null && (event.item as { type?: string }).type === "file_change") {
+              const id = (event.item as { id?: string }).id
+              if (id && event.phase !== "completed") this.codexEditOwners.set(id, this.activeJob)
+              const owner = id && this.codexEditOwners.has(id) ? this.codexEditOwners.get(id)! : this.activeJob
+              for (const change of (event.item as { changes?: Array<{ path?: string }> }).changes ?? []) {
+                if (change.path) {
+                  const path = displayPath(change.path, this.options.root)
+                  if (event.phase === "completed") this.activeFence?.recordEditActivity(owner, path)
+                  input.onActivity?.({ kind: "edit", path })
+                }
+              }
+              if (id && event.phase === "completed") this.codexEditOwners.delete(id)
+            }
             if (beat) ctx.narrator.beat(beat)
           } else if (event.kind === "error") {
             const message = event.message
@@ -630,10 +735,10 @@ export class AgentRunnerImpl implements AgentRunner {
 
   private async reviewAttempt(
     info: AgentInfo,
-    input: { worktreeDir: string; reviewer: AgentKind; brief: string; onNarrate?: (beat: { agent: AgentKind; role: "reviewer"; text: string }) => void },
+    input: ReviewRunInput,
     scratch: string,
     model: ModelChoice
-  ): Promise<{ outcome: "completed" | "out_of_usage" | "timeout" | "error"; review: ReviewResult | null; modelRejected: boolean }> {
+  ): Promise<{ outcome: "completed" | "out_of_usage" | "timeout" | "error"; review: ReviewResult | null; modelRejected: boolean; requestRejected?: boolean; errorText: string | null }> {
     const sensitive = await resolveSensitivePaths({ home: this.options.home, env: this.options.env })
     // §3x.3 (D3) The reviewer's event stream is kept (0600), so the next slow review can be measured, and its tool
     // beats are narrated like the worker's (run 3's Codex review left no trace of its 8.5 minutes).
@@ -645,12 +750,19 @@ export class AgentRunnerImpl implements AgentRunner {
       void log.appendFile(`${line}\n`).catch(() => undefined)
     }
     const narrator = new Narrator({ agent: input.reviewer, role: "reviewer", emit: (beat) => input.onNarrate?.({ agent: beat.agent, role: "reviewer", text: beat.text }), now: () => (this.options.now ?? (() => new Date()))().getTime(), throttleMs: this.options.narrationThrottleMs })
+    const ticker = new ThinkingTicker(narrator, () => (this.options.now ?? (() => new Date()))().getTime(), (seconds) => input.onActivity?.({ kind: "thinking", seconds }))
+    const tickTimer = setInterval(() => ticker.tick(), 1_000)
+    tickTimer.unref()
     const beatCtx = { root: input.worktreeDir, isAllowed: () => true, agent: input.reviewer, jobNumber: () => null }
     let outcome: "completed" | "out_of_usage" | "timeout" | "error" | null = null
     let modelRejected = false
+    let requestRejected = false
     let structured: unknown = null
-    const stop = (value: "out_of_usage" | "error") => {
+    // The reviewer's last error, in its own words (sanitized, ≤ 200 chars), so a failed review says why.
+    let errorText: string | null = null
+    const stop = (value: "out_of_usage" | "error", text?: string | null) => {
       if (outcome === null) outcome = value
+      if (text && errorText === null) errorText = text
       void child.kill()
     }
     let child: ReturnType<AgentProcessRegistry["spawn"]>
@@ -658,11 +770,15 @@ export class AgentRunnerImpl implements AgentRunner {
     if (input.reviewer === "claude_code") {
       // Review I1 P1-4: a reviewer whose own worktree is under one of its Read denies would review nothing.
       const cwd = await resolveRealpath(input.worktreeDir)
-      if (reviewerDenyCoveringCwd(sensitive, cwd) !== null) return { outcome: "error", review: null, modelRejected: false }
+      if (reviewerDenyCoveringCwd(sensitive, cwd) !== null) {
+        clearInterval(tickTimer)
+        await log.close().catch(() => undefined)
+        return { outcome: "error", review: null, modelRejected: false, errorText: "its safety settings would have kept it from reading the pull request's files" }
+      }
       const argv = buildClaudeReviewerArgv({
         sensitive,
-        systemPrompt: `${SYSTEM_PROMPT_HEADER}\n\n${input.brief}`,
-        reviewSchema: JSON.stringify(REVIEW_SCHEMA),
+        systemPrompt: `${REVIEWER_SYSTEM_PROMPT_HEADER}\n\n${input.brief}`,
+        reviewSchema: JSON.stringify(reviewSpec(input).schema),
         maxTurns: AGENT_LIMITS.reviewer.claudeMaxTurns,
         model
       })
@@ -671,27 +787,34 @@ export class AgentRunnerImpl implements AgentRunner {
         args: argv,
         cwd: input.worktreeDir,
         env: buildAgentEnv(this.options.env, { kind: "claude_code" }),
-        stdin: REVIEWER_KICKOFF,
+        stdin: reviewSpec(input).kickoff,
         wallMs: AGENT_LIMITS.reviewer.wallMs,
         onStdoutLine: (line) => {
           keep(line)
           const event = parseClaudeLine(line)
           if (!event) return
           if (event.kind === "tool_use") {
+            ticker.acted()
+            const toolInput = typeof event.input === "object" && event.input !== null ? event.input as Record<string, unknown> : {}
+            const path = displayPath(toolInput.file_path ?? toolInput.path ?? toolInput.notebook_path, input.worktreeDir)
+            if (event.name === "Read") input.onActivity?.({ kind: "read", path })
+            if (event.name === "Edit" || event.name === "Write" || event.name === "MultiEdit") input.onActivity?.({ kind: "edit", path })
             const beat = claudeToolBeat(event.name, event.input, beatCtx)
             if (beat) narrator.beat(beat)
           }
+          if (event.kind === "tool_result") ticker.toolReturned()
           if (claudeModelRejected(event, model.model)) {
             modelRejected = true
             return stop("error")
           }
-          if (event.kind === "init" && !apiKeySourceMatches(info.whoPays, event.apiKeySource)) return stop("error")
+          if (event.kind === "init" && !apiKeySourceMatches(info.whoPays, event.apiKeySource)) return stop("error", "it would have billed a different account than the plan showed")
           if (event.kind === "assistant_error" && (event.error === "rate_limit" || event.error === "billing_error")) return stop("out_of_usage")
           if (event.kind === "rate_limit" && claudeUsageSignals(event.event).some((signal) => signal.kind === "rejected")) return stop("out_of_usage")
           if (event.kind === "result") {
             if (event.apiErrorStatus === 429) return stop("out_of_usage")
             // A review made while denied the PR's own files is not a review: never posted (review I1 P1-4).
-            if (reviewerWasBlind(event.permissionDenials, cwd)) return stop("error")
+            if (reviewerWasBlind(event.permissionDenials, cwd)) return stop("error", "it was denied the pull request's own files")
+            if (event.isError && errorText === null) errorText = sanitizeUntrusted(event.text, 200) || null
             structured = event.structuredOutput
           }
         }
@@ -710,7 +833,7 @@ export class AgentRunnerImpl implements AgentRunner {
         readRoots: [await resolveRealpath(input.worktreeDir)]
       })
       const schemaPath = join(scratch, "review.schema.json")
-      await writeFile(schemaPath, schemaFileText(REVIEW_SCHEMA), { mode: 0o600 })
+      await writeFile(schemaPath, schemaFileText(reviewSpec(input).schema), { mode: 0o600 })
       outputPath = join(scratch, "review.json")
       await rm(outputPath, { force: true })
       const argv = buildCodexReviewerArgv({ worktree: input.worktreeDir, permissionArgs, model, outputPath, schemaPath })
@@ -719,13 +842,18 @@ export class AgentRunnerImpl implements AgentRunner {
         args: argv,
         cwd: input.worktreeDir,
         env: buildAgentEnv(this.options.env, { kind: "codex" }),
-        stdin: `${input.brief}\n\n${REVIEWER_KICKOFF}\n`,
+        stdin: `${input.brief}\n\n${reviewSpec(input).kickoff}\n`,
         wallMs: AGENT_LIMITS.reviewer.wallMs,
         onStdoutLine: (line) => {
           keep(line)
           const event = parseCodexLine(line)
           if (event?.kind === "item") {
+            if (event.phase === "completed") ticker.toolReturned()
+            else ticker.acted()
             const beat = codexItemBeat(event.item, beatCtx)
+            if (typeof event.item === "object" && event.item !== null && (event.item as { type?: string }).type === "file_change") {
+              for (const change of (event.item as { changes?: Array<{ path?: string }> }).changes ?? []) if (change.path) input.onActivity?.({ kind: "edit", path: displayPath(change.path, input.worktreeDir) })
+            }
             if (beat) narrator.beat(beat)
           }
           if (!event || event.kind !== "error") return
@@ -734,11 +862,19 @@ export class AgentRunnerImpl implements AgentRunner {
             modelRejected = true
             return stop("error")
           }
-          if (codexUnrecognizedConfig(event.message)) return stop("error")
+          if (codexUnrecognizedConfig(event.message)) return stop("error", reviewerErrorText(event.message))
+          if (codexRequestRejected(event.message)) {
+            requestRejected = true
+            return stop("error", reviewerErrorText(event.message))
+          }
+          // A top-level error can be transient ("Reconnecting… 1/5"): kept as the last word, never a stop by itself.
+          // A failed turn is the reason itself, so it replaces an earlier transient line.
+          if (event.fatal || errorText === null) errorText = reviewerErrorText(event.message)
         }
       })
     }
     const exit = await child.done
+    clearInterval(tickTimer)
     await log.close().catch(() => undefined)
     if (outputPath) {
       try {
@@ -748,8 +884,24 @@ export class AgentRunnerImpl implements AgentRunner {
       }
     }
     const final: "completed" | "out_of_usage" | "timeout" | "error" = outcome ?? (exit.timedOut ? "timeout" : exit.code === 0 ? "completed" : "error")
-    return { outcome: final, review: final === "completed" ? parseReview(structured) : null, modelRejected }
+    // The jobs' review parses its own schema; `review()` hands it back as is (`reviewJobs`).
+    const review = final === "completed" ? (reviewSpec(input).parse(structured) as ReviewResult | null) : null
+    // A completed run that answered keeps no stale transient error (a "Reconnecting…" before a good answer).
+    return { outcome: final, review, modelRejected, requestRejected, errorText: review ? null : errorText }
   }
+}
+
+/** A reviewer's error line in plain words: a JSON service body is reduced to its `error.message`; sanitized, ≤ 200. */
+export function reviewerErrorText(raw: string): string | null {
+  let text = raw
+  try {
+    const parsed = JSON.parse(raw) as { error?: { message?: unknown } | unknown; message?: unknown }
+    const inner = typeof parsed === "object" && parsed !== null && typeof parsed.error === "object" && parsed.error !== null ? (parsed.error as { message?: unknown }).message : parsed?.message
+    if (typeof inner === "string" && inner.trim() !== "") text = inner
+  } catch {
+    // Not JSON: the line itself is the message.
+  }
+  return sanitizeUntrusted(text, 200) || null
 }
 
 /** §3y.10: the worker's Codex profile also denies `<root>/.infinite` (its realpath, when it exists). */

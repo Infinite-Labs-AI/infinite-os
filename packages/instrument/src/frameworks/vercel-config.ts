@@ -18,6 +18,7 @@ import type {
   PosthogProxySpec
 } from "../types.js"
 import { computeContentHash } from "../manifest.js"
+import { reverseEditRecord, sha256Tagged } from "../install/edits.js"
 import { isManagedInfiniteFile, managedFileBanner } from "./managed-files.js"
 import { firstExistingPath, normalizeAppRelativePath, writeFileIfChanged } from "./shared.js"
 
@@ -613,19 +614,20 @@ export function buildNextConfigSource(proxy: ProxyInput): string {
   return [
     managedFileBanner,
     "",
-    "export default {",
+    "const nextConfig = {",
     "  async rewrites() {",
     "    return [",
     rewriteLiterals,
     "    ]",
     "  }",
     "}",
+    "export default nextConfig",
     ""
   ].join("\n")
 }
 
 /** Human-readable snippet for the "add these to your existing next.config" manual instruction. */
-function buildManualNextConfigInstruction(proxy: ProxyInput): string {
+export function buildManualNextConfigInstruction(proxy: ProxyInput): string {
   const rewriteLiterals = buildManagedRewritePairs(proxy)
     .map(
       (pair) =>
@@ -649,6 +651,23 @@ export interface NextConfigProxyPlan {
   deferred?: Array<{ path: string; snippet: string }>
 }
 
+/** A receipt extension must reverse exactly to the generator's original ownership anchor. */
+function recordedConfigState(source: string, path: string, ownership: ManagedConfigOwnership | undefined, manifest?: InstallManifest | null): "original" | "recorded" | "unverified" {
+  if (ownership?.kind !== "created") return "unverified"
+  const fullPath = normalizeAppRelativePath(manifest?.appRoot ?? ".", path)
+  const edits = manifest?.edits?.filter(edit => edit.file === fullPath) ?? []
+  if (edits.length && edits.at(-1)!.afterHash !== sha256Tagged(source)) return "unverified"
+  if (computeContentHash(source) === ownership.installedHash) return "original"
+  let before = source
+  for (const edit of [...edits].reverse()) {
+    const reversed = reverseEditRecord(before, edit)
+    if (!reversed.ok || reversed.content === null) return "unverified"
+    before = reversed.content
+    if (computeContentHash(before) === ownership.installedHash) return "recorded"
+  }
+  return "unverified"
+}
+
 /**
  * Create a hash-owned config when absent, validate ownership on reapply, or statically prove that
  * an unmanaged config already contains every exact rewrite. Unproven configs remain plan-only.
@@ -657,7 +676,7 @@ export function planNextConfigProxy(
   root: string,
   proxy: ProxyInput,
   ownership?: Record<string, ManagedConfigOwnership>,
-  options: { deferUnmanaged?: boolean } = {}
+  options: { deferUnmanaged?: boolean; previousManifest?: InstallManifest | null } = {}
 ): NextConfigProxyPlan {
   const existingPaths = nextConfigCandidates.filter((candidate) =>
     existsSync(join(root, candidate))
@@ -674,10 +693,12 @@ export function planNextConfigProxy(
   const existing = existingPaths[0] ?? null
   const source = existing ? readFileSync(join(root, existing), "utf8") : null
   const existingIsManaged = source !== null && isManagedInfiniteFile(source)
+  let recordedConfig = false
 
-  if (existing && existingIsManaged) {
+  if (existing && (existingIsManaged || ownership?.[existing]?.kind === "created")) {
     const expected = ownership?.[existing]
-    if (expected?.kind !== "created" || expected.installedHash !== computeContentHash(source!)) {
+    const state = recordedConfigState(source!, existing, expected, options.previousManifest)
+    if (state === "unverified") {
       return {
         files: [existing],
         instructions: [],
@@ -686,9 +707,12 @@ export function planNextConfigProxy(
         ]
       }
     }
+    recordedConfig = state === "recorded"
   }
 
-  if (existing && !existingIsManaged) {
+  // Preserve recorded extensions like a verified agent proxy. Re-rendering the original template
+  // would erase them; the original installedHash also remains needed after uninstall reverses them.
+  if (existing && (!existingIsManaged || recordedConfig)) {
     if (hasExactNextConfigRewrites(source!, proxy)) {
       return { files: [], instructions: [], blockers: [] }
     }
@@ -735,7 +759,7 @@ export function planNextConfigProxy(
 }
 
 interface JsToken {
-  kind: "identifier" | "string" | "punctuation"
+  kind: "identifier" | "string" | "template" | "punctuation"
   value: string
 }
 
@@ -786,9 +810,9 @@ export function hasExactNextConfigRewrites(source: string, proxy: ProxyInput): b
   ) {
     return false
   }
-  const actual = literalRewritesFromConfig(tokens, exportedObjects[0]!)
-  if (!actual) return false
   const expected = buildManagedRewritePairs(proxy)
+  const actual = literalRewritesFromConfig(tokens, exportedObjects[0]!, new Set(expected.map((pair) => pair.source)))
+  if (!actual) return false
   return (
     expected.every((pair) =>
       actual.some(
@@ -832,7 +856,13 @@ function tokenizeNextConfig(source: string): JsToken[] | null {
       index += 1
       while (index < source.length) {
         const next = source[index]!
-        if (next === "\\") return null
+        if (next === "\\") {
+          const escaped = decodeStringEscape(source, index)
+          if (!escaped) return null
+          value += escaped.value
+          index = escaped.next
+          continue
+        }
         if (next === quote) {
           closed = true
           index += 1
@@ -846,7 +876,30 @@ function tokenizeNextConfig(source: string): JsToken[] | null {
       tokens.push({ kind: "string", value })
       continue
     }
-    if (character === "`") return null
+    if (character === "`") {
+      let closed = false
+      let value = ""
+      index += 1
+      while (index < source.length) {
+        const next = source[index]!
+        if (next === "\\") {
+          if (index + 1 >= source.length) return null
+          value += source.slice(index, index + 2)
+          index += 2
+          continue
+        }
+        if (next === "`") {
+          closed = true
+          index += 1
+          break
+        }
+        value += next
+        index += 1
+      }
+      if (!closed) return null
+      tokens.push({ kind: "template", value })
+      continue
+    }
     const identifier = source.slice(index).match(/^[A-Za-z_$][A-Za-z0-9_$]*/)?.[0]
     if (identifier) {
       tokens.push({ kind: "identifier", value: identifier })
@@ -865,6 +918,28 @@ function tokenizeNextConfig(source: string): JsToken[] | null {
     index += 1
   }
   return tokens
+}
+
+/** Decode JS string literals before exact-pair comparison; an unknown escape makes the config unprovable. */
+function decodeStringEscape(source: string, at: number): { value: string; next: number } | null {
+  const escaped = source[at + 1]
+  if (!escaped) return null
+  const simple: Record<string, string> = { "0": "\0", b: "\b", f: "\f", n: "\n", r: "\r", t: "\t", v: "\v", "\\": "\\", "'": "'", '"': '"', "/": "/" }
+  if (escaped in simple) return { value: simple[escaped]!, next: at + 2 }
+  if (escaped === "x") {
+    const hex = source.slice(at + 2, at + 4)
+    return /^[0-9a-fA-F]{2}$/.test(hex) ? { value: String.fromCharCode(parseInt(hex, 16)), next: at + 4 } : null
+  }
+  if (escaped === "u") {
+    if (source[at + 2] === "{") {
+      const end = source.indexOf("}", at + 3)
+      const hex = end < 0 ? "" : source.slice(at + 3, end)
+      return /^[0-9a-fA-F]{1,6}$/.test(hex) && parseInt(hex, 16) <= 0x10ffff ? { value: String.fromCodePoint(parseInt(hex, 16)), next: end + 1 } : null
+    }
+    const hex = source.slice(at + 2, at + 6)
+    return /^[0-9a-fA-F]{4}$/.test(hex) ? { value: String.fromCharCode(parseInt(hex, 16)), next: at + 6 } : null
+  }
+  return null
 }
 
 function declaredObjectExpressions(tokens: JsToken[]): Map<string, number> {
@@ -888,7 +963,7 @@ function declaredObjectExpressions(tokens: JsToken[]): Map<string, number> {
   return declarations
 }
 
-function literalRewritesFromConfig(tokens: JsToken[], objectStart: number): VercelRewrite[] | null {
+function literalRewritesFromConfig(tokens: JsToken[], objectStart: number, expectedSources: ReadonlySet<string>): VercelRewrite[] | null {
   const objectEnd = matchingToken(tokens, objectStart, "{", "}")
   if (objectEnd === null) return null
   const properties = topLevelSegments(tokens, objectStart + 1, objectEnd)
@@ -901,7 +976,7 @@ function literalRewritesFromConfig(tokens: JsToken[], objectStart: number): Verc
   const [start, end] = rewrites[0]!
   const key = tokens[start]?.value === "async" ? start + 1 : start
   const arrayStart = returnedArrayStart(tokens, key, end)
-  return arrayStart === null ? null : literalRewriteArray(tokens, arrayStart)
+  return arrayStart === null ? null : literalRewriteArray(tokens, arrayStart, expectedSources)
 }
 
 function returnedArrayStart(tokens: JsToken[], key: number, end: number): number | null {
@@ -929,8 +1004,15 @@ function returnedArrayStart(tokens: JsToken[], key: number, end: number): number
 
 function returnedArrayInBody(tokens: JsToken[], bodyStart: number): number | null {
   const bodyEnd = matchingToken(tokens, bodyStart, "{", "}")
-  if (bodyEnd === null || tokens[bodyStart + 1]?.value !== "return") return null
-  const arrayStart = bodyStart + 2
+  if (bodyEnd === null) return null
+  let cursor = bodyStart + 1
+  // Allow local string constants used by unrelated destinations, but no control flow or calls.
+  while (["const", "let", "var"].includes(tokens[cursor]?.value ?? "")) {
+    if (tokens[cursor + 1]?.kind !== "identifier" || tokens[cursor + 2]?.value !== "=" || tokens[cursor + 3]?.kind !== "string" || tokens[cursor + 4]?.value !== ";") return null
+    cursor += 5
+  }
+  if (tokens[cursor]?.value !== "return") return null
+  const arrayStart = cursor + 1
   if (tokens[arrayStart]?.value !== "[") return null
   const arrayEnd = matchingToken(tokens, arrayStart, "[", "]")
   if (arrayEnd === null) return null
@@ -938,7 +1020,7 @@ function returnedArrayInBody(tokens: JsToken[], bodyStart: number): number | nul
   return remainder.length === 0 ? arrayStart : null
 }
 
-function literalRewriteArray(tokens: JsToken[], arrayStart: number): VercelRewrite[] | null {
+function literalRewriteArray(tokens: JsToken[], arrayStart: number, expectedSources: ReadonlySet<string>): VercelRewrite[] | null {
   const arrayEnd = matchingToken(tokens, arrayStart, "[", "]")
   if (arrayEnd === null) return null
   const rewrites: VercelRewrite[] = []
@@ -946,19 +1028,26 @@ function literalRewriteArray(tokens: JsToken[], arrayStart: number): VercelRewri
     if (tokens[start]?.value !== "{") return null
     const objectEnd = matchingToken(tokens, start, "{", "}")
     if (objectEnd === null || objectEnd !== end - 1) return null
-    const values = new Map<string, string>()
+    const values = new Map<string, JsToken>()
     for (const [propertyStart, propertyEnd] of topLevelSegments(tokens, start + 1, objectEnd)) {
       if (
         propertyEnd - propertyStart !== 3 ||
         tokens[propertyStart + 1]?.value !== ":" ||
-        tokens[propertyStart + 2]?.kind !== "string"
+        !["string", "template"].includes(tokens[propertyStart + 2]?.kind ?? "")
       ) {
         return null
       }
-      values.set(tokens[propertyStart]!.value, tokens[propertyStart + 2]!.value)
+      values.set(tokens[propertyStart]!.value, tokens[propertyStart + 2]!)
     }
     if (values.size !== 2 || !values.has("source") || !values.has("destination")) return null
-    rewrites.push({ source: values.get("source")!, destination: values.get("destination")! })
+    const source = values.get("source")!
+    const destination = values.get("destination")!
+    if (source.kind !== "string") return null
+    if (destination.kind === "template") {
+      if (expectedSources.has(source.value)) return null
+      continue
+    }
+    rewrites.push({ source: source.value, destination: destination.value })
   }
   return rewrites
 }

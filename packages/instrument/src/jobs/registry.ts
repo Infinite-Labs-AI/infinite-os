@@ -1,3 +1,7 @@
+import { planExclusions } from "../install/plan-exclusions.js"
+import { withNote } from "./state-machine.js"
+import { isContinuedWork } from "../install/plan-permission.js"
+import { scopeOwnerJob } from "./owner-scope.js"
 // The checklist job registry (lane O8; §3e.1, §3e.7). It turns what `before` measured into CANDIDATE
 // checklist items, keeps only the ones the user's plan approved, hands each agent job its allowlist and
 // brief, and computes item states from the wizard's own check results.
@@ -28,7 +32,7 @@ import {
   type ScanResult
 } from "../wizard/contracts/jobs.js"
 import type { TestTool } from "../wizard/contracts/test-engine.js"
-import { buildAllow, unionAllow, type AllowSpec } from "./allow.js"
+import { buildAllow, unionAllow, isConsentLine, type AllowSpec } from "./allow.js"
 import { buildBrief, prescribedPasteOf, type BriefFacts } from "./briefs.js"
 import {
   capturesPageviewManually,
@@ -38,11 +42,25 @@ import {
 } from "./detectors/adopted-tags.js"
 import { detectDuplicates } from "./detectors/duplicates.js"
 import { OUTCOME_CONVERSION_TYPES } from "./detectors/outcomes.js"
+import { frozenUnitAt } from "./consent-units.js"
 import { isJobScan, scanForJobs, type JobScan } from "./detectors/index.js"
-import { approvedConversionNames, approvedPrivacyText, boundConversionNames } from "./plan-data.js"
+import { approvedConversionNames, boundConversionNames } from "./plan-data.js"
+import {
+  BROWSER_COMMERCE_EVENTS,
+  COMMERCE_EVENTS_TARGET,
+  SERVER_SITE_VIAS,
+  inventoryEntry,
+  META_EVENT_NAME,
+  type EventInventory,
+  type EventInventoryEntry,
+  type EventSite,
+  type FunnelEvent,
+  type InventoryTool
+} from "../scan/event-inventory.js"
 import { repoPath, type RepoSnapshot } from "./repo-files.js"
 import { applyResults } from "./state-machine.js"
 import { MANAGED_NEXT_CONFIG_FILE } from "../frameworks/vercel-config.js"
+import type { Scanner } from "../review/scan.js"
 
 // ---------------------------------------------------------------------------------------------
 // Item ids and the plan line each candidate needs
@@ -166,25 +184,34 @@ const TARGET_CHECKS: Partial<Record<JobId, (target: string, framework: string) =
   // LF4 close round 2 (P1-1): `posthog_config` passes on an untouched config, so each target whose change is a setting
   // the wizard can read also carries `posthog_improve_applied` (the setting is in the adopted init).
   posthog_improve: (target, framework) =>
-    target === "proxy"
+    target === COMMERCE_EVENTS_TARGET
+      ? // What the commerce item adds is checked by the review agent's questions (`review/questions.ts`).
+        ["PV:posthog_distinct_id_receipt"]
+      : target === "proxy"
       ? ["S:posthog_config", "S:posthog_improve_applied", ...(framework.startsWith("next") ? ["S:next_rewrites_exact"] : []), "RH:posthog_via_proxy_once", "PV:posthog_distinct_id_receipt"]
-      : target === "history_change" || target === "defaults"
+      : target === "history_change" || target === "defaults" || target === "sensitive_pages"
         ? ["S:posthog_config", "S:posthog_improve_applied", "PV:posthog_distinct_id_receipt"]
         : ["S:posthog_config", "PV:posthog_distinct_id_receipt"],
   // R4-8: a page-change page_view is proven by the rehearsal's own page change (one GA4 page_view after it, never two).
   ga4_improve: (target) =>
-    target === "id"
-      ? ["T1:ga4_loader_id", "RH:ga4_one_page_view", "PV:ga4_seen_leaving"]
+    target === COMMERCE_EVENTS_TARGET
+      ? ["PV:ga4_seen_leaving"]
+      : target === "id"
+      ? ["S:ga4_id_applied", "T1:ga4_loader_id", "RH:ga4_one_page_view", "PV:ga4_seen_leaving"]
       : target === "spa_page_view"
-        ? ["RH:ga4_spa_page_view", "RH:ga4_one_page_view", "PV:ga4_seen_leaving"]
+        ? ["S:spa_page_view_applied", "RH:ga4_spa_page_view", "RH:ga4_one_page_view", "PV:ga4_seen_leaving"]
         : ["RH:ga4_one_page_view", "PV:ga4_seen_leaving"],
   // R4-2: the capture beside an adopted pixel is checked like the writer it replaces: one `_fbc`, holding the last
   // click, on the page as the agent left it (`item-t0.ts` builds that page from the job's files).
   meta_improve: (target) =>
-    target === "retire_fbc_writer" || target === "capture"
+    target === COMMERCE_EVENTS_TARGET
+      ? // Proven by the review agent's answers (every promised event sent once, before the page leaves); the event id rule
+        // stays a hard check.
+        ["S:meta_event_id_from_helper", "PV:meta_seen_leaving"]
+      : target === "retire_fbc_writer" || target === "capture"
       ? ["S:click_id_capture", "T0:fbc_capture", "PV:meta_seen_leaving"]
       : target === "spa_page_view"
-        ? ["RH:meta_spa_page_view"]
+        ? ["S:spa_page_view_applied", "RH:meta_spa_page_view"]
         : target === "autoconfig_off_adopted"
           ? // LF4-P1-2: its own work is checked (the mirror's event-id check passed on a page with nothing of it).
             ["S:meta_autoconfig_off", "PV:meta_seen_leaving"]
@@ -199,20 +226,19 @@ const TARGET_CHECKS: Partial<Record<JobId, (target: string, framework: string) =
   // offline engine can load (static HTML / Vite's index.html). A Next component's init is not: there the
   // rehearsal's preview_self load decides (I1b; before, the item carried a T0 check that tested the
   // MANAGED page instead of the agent's edit, so a correct guard could never pass).
-  // §3x.3: an outcome conversion's success branch cannot run in a no-send load (every non-GET is cancelled), so its
-  // checks are the static `track_after_success` and the passive first real conversion; a click conversion keeps the
-  // click test.
+  // §3x.3: an outcome conversion's success branch cannot run in a no-send load (every non-GET is cancelled), so it has
+  // no click test: its call is in the code (`conversion_tracked`), and where it sits is a review question. A click
+  // conversion keeps the click test.
   conversions_to_tools: (target) =>
     OUTCOME_CONVERSION_TYPES.has(target as ConversionType)
-      ? ["S:no_fbq_standard_on_click", "S:track_after_success", "P:first_real_conversion"]
-      : // LF4 close round 2 (P1-1): on a framework whose click test runs in the rehearsal, `no_fbq_standard_on_click`
-        // was the click conversion's only local check, and it passes with nothing of the job in the code.
-        ["T0:click_test", "RH:click_test", "S:no_fbq_standard_on_click", "S:conversion_tracked", "P:first_real_conversion"],
+      ? ["S:conversion_tracked", "S:meta_event_id_from_server", "P:first_real_conversion"]
+      : ["T0:click_test", "RH:click_test", "S:conversion_tracked", "S:meta_event_id_from_server", "P:first_real_conversion"],
+  // A form's completed outcome cannot run in the no-send click rehearsal (its POST is cancelled): the review agent's
+  // answer proves it.
+  setup_check_fixes: target => target === "silent_form" ? [] : null,
   preview_guard: (target, framework) => {
     const t0 = T0_CLICK_FRAMEWORKS.has(framework) ? ["T0:host_matrix"] : []
-    return target === "meta"
-      ? ["S:adopted_init_guarded", ...t0, "RH:preview_self_silent", "T1:meta_host_matrix"]
-      : ["S:adopted_init_guarded", ...t0, "RH:preview_self_silent"]
+    return target === "meta" ? [...t0, "RH:preview_self_silent", "T1:meta_host_matrix"] : [...t0, "RH:preview_self_silent"]
   }
 }
 
@@ -236,6 +262,11 @@ interface CandidateInput {
   evidence: Evidence[]
   allow: AllowSpec
   blockedReason?: BlockedReason
+  leftForYou?: string
+  /** A title of its own (else `itemTitle`). */
+  title?: string
+  /** The inventory entries this item fills (jobs 3, 4, 5, 8, 10 seeded from the event inventory). */
+  inventory?: EventInventoryEntry[]
 }
 
 const TOOL_TITLE: Readonly<Record<string, string>> = { ga4: "GA4", posthog: "PostHog", meta: "Meta pixel", infinite: "Infinite" }
@@ -250,7 +281,7 @@ export function itemTitle(jobId: JobId, target: string): string {
     case "preview_guard":
       return `Keep previews silent: ${TOOL_TITLE[target] ?? target}`
     case "conversions_to_tools":
-      return `Send the ${target} conversion to GA4 and PostHog`
+      return `Send the ${target} conversion to every tool`
     case "server_conversions":
       return `Report the ${target} conversion from the server`
     default:
@@ -266,14 +297,16 @@ function makeItem(input: CandidateInput, framework: string): ChecklistItem {
     id: itemId(input.jobId, input.target),
     jobId: input.jobId,
     n: spec.n,
-    title: itemTitle(input.jobId, input.target),
+    title: input.title ?? itemTitle(input.jobId, input.target),
     owner: "agent",
     trigger: { finding: input.finding, evidence: dedupeEvidence(input.evidence) },
     allow: input.allow,
     checks: checksFor(input.jobId, input.target, framework),
-    state: blockedReason ? "blocked" : "pending"
+    state: blockedReason ? "blocked" : "pending",
+    ...(input.inventory && input.inventory.length > 0 ? { inventory: input.inventory.map((entry) => JSON.parse(JSON.stringify(entry)) as EventInventoryEntry) } : {})
   }
   if (blockedReason) item.blockedReason = blockedReason
+  if (input.leftForYou) { item.state = "left_for_you"; withNote(item, input.leftForYou); item.checks = []; delete item.blockedReason }
   return item
 }
 
@@ -340,6 +373,125 @@ function problemChecks(facts: BeforeFacts, pattern: RegExp, tiers: readonly Chec
   return facts.checks.filter((check) => check.state === "problem" && tiers.includes(check.tier) && pattern.test(check.checkId))
 }
 
+
+// ---------------------------------------------------------------------------------------------
+// The event inventory → gap jobs (P0-4 / P0-5): a job only ever adds an event to a tool that does not get it
+// ---------------------------------------------------------------------------------------------
+
+/** The target of the browser commerce-event items (jobs 3, 4 and 5): `meta_improve:commerce_events`, … */
+export { COMMERCE_EVENTS_TARGET }
+
+/** Trigger sites in server code (the server lane's to report from, never a browser job's). */
+const SERVER_VIAS = SERVER_SITE_VIAS
+
+/** The trigger sites of an inventory entry that run in the browser. */
+export function browserSites(entry: EventInventoryEntry): EventSite[] {
+  return entry.sites.filter((site) => !SERVER_VIAS.has(site.via))
+}
+
+/** The trigger sites of an inventory entry that run on the server. */
+export function serverSites(entry: EventInventoryEntry): EventSite[] {
+  return entry.sites.filter((site) => SERVER_VIAS.has(site.via))
+}
+
+/** Plain words for each funnel event (plan lines, titles, findings). */
+export const EVENT_WORDS: Readonly<Record<FunnelEvent, string>> = {
+  view_item: "product views",
+  add_to_cart: "add-to-cart",
+  begin_checkout: "checkout starts",
+  purchase: "purchases",
+  lead: "leads",
+  sign_up: "sign-ups",
+  start_trial: "trial starts"
+}
+
+/** The funnel event a job-8 / job-10 target reports (a conversion type, or the server's `begin_checkout`). */
+export const FUNNEL_EVENT_OF_TARGET: Readonly<Partial<Record<string, FunnelEvent>>> = {
+  signup: "sign_up",
+  lead: "lead",
+  purchase: "purchase",
+  trial: "start_trial",
+  begin_checkout: "begin_checkout"
+}
+
+/** "a", "a and b", "a, b and c". */
+export function listWords(words: readonly string[]): string {
+  if (words.length <= 1) return words.join("")
+  return `${words.slice(0, -1).join(", ")} and ${words[words.length - 1]}`
+}
+
+function siteList(sites: readonly EventSite[]): string {
+  const shown = sites.slice(0, 4).map((site) => `${site.file}:${site.line}`)
+  return sites.length > 4 ? `${shown.join(", ")} and ${sites.length - 4} more` : shown.join(", ")
+}
+
+/** Where a NEW payment webhook goes: an API route beside the checkout route that creates the session. */
+export function newWebhookPath(checkoutFile: string): string {
+  const extension = /\.([cm]?[jt]sx?)$/.exec(checkoutFile)?.[1]?.replace(/x$/, "") ?? "ts"
+  const pages = /^(.*?(?:^|\/))pages\/api\//.exec(checkoutFile)
+  if (pages) return `${pages[1]}pages/api/stripe-webhook.${extension}`
+  const app = /^(.*?(?:^|\/))app\/api\//.exec(checkoutFile)
+  if (app) return `${app[1]}app/api/stripe-webhook/route.${extension}`
+  const slash = checkoutFile.lastIndexOf("/")
+  return `${slash < 0 ? "" : checkoutFile.slice(0, slash + 1)}stripe-webhook.${extension}`
+}
+
+/**
+ * Which tools the site runs (or this run installs): GA4 / PostHog / Meta adopted in the census, sending in the site's
+ * code (the inventory), or connected in Infinite.
+ */
+export function toolPresence(inventory: EventInventory, facts: Pick<BeforeFacts, "census" | "keys">): { ga4: boolean; posthog: boolean; meta: boolean; ga4Adopted: boolean; posthogAdopted: boolean } {
+  const adopted = (tool: "ga4" | "posthog" | "meta") => facts.census.entries.some((entry) => entry.tool === tool && entry.owner === "adopted")
+  const sends = (tool: InventoryTool) => inventory.events.some((entry) => (entry.tools[tool]?.length ?? 0) > 0)
+  const ga4Adopted = adopted("ga4") || sends("ga4")
+  const posthogAdopted = adopted("posthog") || sends("posthog")
+  return {
+    ga4Adopted,
+    posthogAdopted,
+    ga4: ga4Adopted || (facts.keys.ga4.status === "connected" && facts.keys.ga4.streams.length > 0),
+    posthog: posthogAdopted || facts.keys.posthog.status === "connected",
+    meta: adopted("meta") || sends("meta_browser") || (facts.keys.meta.status === "connected" && facts.keys.meta.pixels.length > 0)
+  }
+}
+
+const COMMERCE_TOOL_NAME: Readonly<Record<"meta_browser" | "ga4" | "posthog", string>> = { meta_browser: "Meta", ga4: "GA4", posthog: "PostHog" }
+
+/** The event names a tool's line uses: Meta's standard events, GA4's recommended events, plain words for PostHog. */
+function eventNamesFor(tool: "meta_browser" | "ga4" | "posthog", events: readonly FunnelEvent[]): string[] {
+  return events.map((event) => (tool === "meta_browser" ? META_EVENT_NAME[event] : tool === "ga4" ? event : EVENT_WORDS[event]))
+}
+
+/**
+ * One browser gap job (jobs 3, 4, 5): the tool's missing commerce events, at the site's own trigger sites and in its own
+ * send helpers (where the other tools already get the event). A trigger site inside the site's consent code is never an
+ * edit place: the helper it calls covers it (a product-view call in a consent component goes through `viewItem()`).
+ */
+function commerceCandidate(
+  jobId: "meta_improve" | "ga4_improve" | "posthog_improve",
+  tool: "meta_browser" | "ga4" | "posthog",
+  gaps: readonly EventInventoryEntry[],
+  allow: (files: readonly string[]) => AllowSpec,
+  frozen: (site: EventSite) => boolean
+): CandidateInput {
+  const name = COMMERCE_TOOL_NAME[tool]
+  const names = listWords(eventNamesFor(tool, gaps.map((entry) => entry.event)))
+  const where = gaps.map((entry) => `${EVENT_WORDS[entry.event]} (${siteList(browserSites(entry))})`)
+  const sites = gaps.flatMap((entry) => browserSites(entry))
+  const sends = gaps.flatMap((entry) => Object.values(entry.tools).flatMap((list) => (list ?? []).filter((site) => !SERVER_VIAS.has(site.via))))
+  const editable = [...sites, ...sends].filter((site) => !frozen(site))
+  // Nothing editable outside consent code: the job is the owner's, said with its real evidence.
+  const places = editable.length > 0 ? editable : sites
+  return {
+    jobId,
+    target: COMMERCE_EVENTS_TARGET,
+    title: `Add ${name} ${names} in the browser`,
+    finding: `${name}: add ${names} where your site already tracks ${listWords(where)}.`,
+    evidence: places.map((site) => ({ file: site.file, line: site.line })),
+    allow: allow([...new Set(places.map((site) => site.file))]),
+    inventory: [...gaps]
+  }
+}
+
 /**
  * §3e.1 triggers → candidates. Pure and deterministic: the same scan and facts always give the same
  * items in the same order (job number, then id). Nothing here comes from an agent.
@@ -348,7 +500,7 @@ export function seedCandidatesFrom(scan: JobScan, facts: BeforeFacts): Checklist
   const d = scan.detections
   const framework = scan.framework
   const cmpFiles = d.cmp.files
-  const allow = (files: readonly string[], create: readonly string[] = []): AllowSpec => buildAllow(files, create, cmpFiles)
+  const allow = (files: readonly string[], create: readonly string[] = []): AllowSpec => buildAllow(files, create, cmpFiles, scan.snapshot.appRoot)
   const out: CandidateInput[] = []
 
   // 1 server_lane_mount
@@ -493,6 +645,29 @@ export function seedCandidatesFrom(scan: JobScan, facts: BeforeFacts): Checklist
     })
   }
 
+  // 3, 4, 5 (P0-4): the commerce steps a tool on this site does not get yet, at the site's own trigger sites. Meta gets
+  // ViewContent / AddToCart from the browser; GA4 and PostHog get every step they miss (only where the site runs them).
+  const inventory = d.eventInventory
+  const presence = toolPresence(inventory, facts)
+  // Live run 3: the pages whose form posts to a sign-up route that saves nothing yet. There is no lead there to report,
+  // from the server or the browser, so no conversion job (and no silent-form fix) is seeded for them.
+  const unsavedPages = (event: FunnelEvent | null | undefined): Set<string> =>
+    new Set((inventory.unsavedFormRoutes ?? []).filter((route) => event === undefined || event === null || route.event === event).flatMap((route) => route.pages))
+  const browserGaps = (tool: InventoryTool, events: readonly FunnelEvent[]) =>
+    inventory.events.filter((entry) => events.includes(entry.event) && entry.missing.includes(tool) && browserSites(entry).length > 0)
+  const commerceAllow = (files: readonly string[]) => allow(files)
+  const frozenSite = (site: EventSite) => {
+    const source = scan.snapshot.files.get(site.file)
+    return source !== undefined && frozenUnitAt(source, site.line, site.file) !== null
+  }
+  const metaCommerce = browserGaps("meta_browser", BROWSER_COMMERCE_EVENTS)
+  if (presence.meta && metaCommerce.length > 0) out.push(commerceCandidate("meta_improve", "meta_browser", metaCommerce, commerceAllow, frozenSite))
+  const COMMERCE_STEPS: readonly FunnelEvent[] = ["view_item", "add_to_cart", "begin_checkout"]
+  const ga4Commerce = browserGaps("ga4", COMMERCE_STEPS)
+  if (presence.ga4Adopted && ga4Commerce.length > 0) out.push(commerceCandidate("ga4_improve", "ga4", ga4Commerce, commerceAllow, frozenSite))
+  const posthogCommerce = browserGaps("posthog", COMMERCE_STEPS)
+  if (presence.posthogAdopted && posthogCommerce.length > 0) out.push(commerceCandidate("posthog_improve", "posthog", posthogCommerce, commerceAllow, frozenSite))
+
   // 6 duplicates_remove
   for (const duplicate of detectDuplicates(facts.census, facts.dryLive)) {
     out.push({
@@ -514,20 +689,69 @@ export function seedCandidatesFrom(scan: JobScan, facts: BeforeFacts): Checklist
       target: tool,
       finding: `The site's own ${tool === "ga4" ? "GA4" : tool === "posthog" ? "PostHog" : "Meta pixel"} fires on preview deployments too`,
       evidence: fileEvidence(findings),
-      allow: allow(filesOf(findings))
+      allow: allow(filesOf(findings)),
+
     })
   }
 
-  // 8 server_conversions (one per conversion type)
+  // 8 server_conversions (one per conversion type, plus the checkout start). Seeded only while Infinite (and Meta
+  // through Infinite's relay) does not get the event yet. A store that creates Stripe Checkout sessions with no payment
+  // webhook still gets its purchase job: the agent writes the webhook route (listed in `allow.create`).
+  const serverGap = (entry: EventInventoryEntry | null) => entry === null || entry.missing.includes("infinite") || entry.missing.includes("meta_server")
+  const checkoutFiles = [...new Set(inventory.checkoutCreates.map((site) => site.file))]
+  // The page that sends a server event's request (the cart that starts checkout, the form that signs up) carries the
+  // visitor's tracking signal to the server route: the job may add it there, outside the site's consent code.
+  // Finding 1: the pages the scan saw send a request to the route itself come first (the cart form that posts to the
+  // checkout route), then the event's browser trigger sites.
+  const signalPages = (event: FunnelEvent, routes: readonly string[]) => {
+    const entry = inventoryEntry(inventory, event)
+    const requests = (inventory.pageRequests ?? []).filter((request) => routes.includes(request.route))
+    const sites: Array<{ file: string; line: number }> = [...requests, ...(entry ? browserSites(entry) : [])]
+    return [...new Set(sites.filter((site) => {
+      const source = scan.snapshot.files.get(site.file)
+      return source !== undefined && frozenUnitAt(source, site.line, site.file) === null
+    }).map((site) => site.file))]
+  }
   for (const type of CONVERSION_TYPES) {
     const findings = d.outcomes.filter((finding) => finding.conversionType === type)
+    const funnel = FUNNEL_EVENT_OF_TARGET[type]
+    const entry = funnel ? inventoryEntry(inventory, funnel) : null
+    if (funnel && entry && !serverGap(entry)) continue
+    const entryList = entry ? { inventory: [entry] } : {}
+    if (type === "purchase" && findings.length === 0 && inventory.checkoutCreates.length > 0) {
+      const webhooks = [...new Set(inventory.checkoutCreates.map((site) => newWebhookPath(site.file)))]
+      out.push({
+        jobId: "server_conversions",
+        target: type,
+        title: "Report purchases from a new payment webhook",
+        finding: `Stripe Checkout starts at ${siteList(inventory.checkoutCreates)} and the site has no payment webhook: add ${listWords(webhooks)} so your server reports each purchase when Stripe confirms the payment`,
+        evidence: inventory.checkoutCreates.map((site) => ({ file: site.file, line: site.line })),
+        allow: allow([...checkoutFiles, ...signalPages("begin_checkout", checkoutFiles)], webhooks),
+        ...entryList
+      })
+      continue
+    }
     if (findings.length === 0) continue
     out.push({
       jobId: "server_conversions",
       target: type,
       finding: `${findings.map((finding) => finding.detail).join(", ")}: report the ${type} from the server when it becomes real`,
       evidence: fileEvidence(findings),
-      allow: allow(filesOf(findings))
+      // A purchase webhook reads the match data the checkout route saved on the session, so both are in scope.
+      allow: allow([...filesOf(findings), ...(type === "purchase" ? [...checkoutFiles, ...signalPages("begin_checkout", checkoutFiles)] : funnel ? signalPages(funnel, filesOf(findings)) : [])]),
+      ...entryList
+    })
+  }
+  const checkoutStart = inventoryEntry(inventory, "begin_checkout")
+  if (inventory.checkoutCreates.length > 0 && serverGap(checkoutStart)) {
+    out.push({
+      jobId: "server_conversions",
+      target: "begin_checkout",
+      title: "Report checkout starts from the server",
+      finding: `Checkout sessions are created at ${siteList(inventory.checkoutCreates)}: report each checkout start from the server when the session is created`,
+      evidence: inventory.checkoutCreates.map((site) => ({ file: site.file, line: site.line })),
+      allow: allow([...checkoutFiles, ...signalPages("begin_checkout", checkoutFiles)]),
+      ...(checkoutStart ? { inventory: [checkoutStart] } : {})
     })
   }
 
@@ -553,16 +777,34 @@ export function seedCandidatesFrom(scan: JobScan, facts: BeforeFacts): Checklist
   ])
   for (const type of CONVERSION_TYPES) {
     if (!conversionTypes.has(type)) continue
+    // A purchase is reported from the server (job 8, the payment webhook), never from a browser call: no job 10 for it.
+    // GA4 / PostHog purchase coverage is the site's own; the wizard never adds a second one.
+    if (type === "purchase") continue
+    // P0-5: a conversion the site already sends to GA4 and PostHog gets no browser job (it would count twice there).
+    // Only the tools that miss it, and run on this site, are named; Infinite and Meta get it from the server (job 8).
+    const funnel = FUNNEL_EVENT_OF_TARGET[type]
+    const funnelEntry = funnel ? inventoryEntry(inventory, funnel) : null
+    const browserTools = (["ga4", "posthog"] as const).filter((tool) => (funnelEntry ? funnelEntry.missing.includes(tool) : true) && presence[tool])
+    if (funnel && browserTools.length === 0) continue
+    // The item's copy of the entry names as missing only the browser tools THIS job adds (a tool the site does not run
+    // is absent, not missing), so its brief's `destinations` are exactly the title's tools.
+    const itemEntry = funnelEntry ? { ...funnelEntry, missing: funnelEntry.missing.filter((tool) => (tool !== "ga4" && tool !== "posthog") || (browserTools as readonly string[]).includes(tool)) } : null
+    const gapFields = itemEntry
+      ? { inventory: [itemEntry], title: `Send the ${type} conversion to ${listWords(browserTools.map((tool) => COMMERCE_TOOL_NAME[tool]))}` }
+      : {}
     if (OUTCOME_CONVERSION_TYPES.has(type)) {
       const success = d.successPaths.filter((finding) => finding.conversionType === type)
+      const unsaved = unsavedPages(funnel)
+      if (unsaved.size > 0 && success.length > 0 && success.every((finding) => unsaved.has(finding.file))) continue
       out.push(
         success.length > 0
           ? {
               jobId: "conversions_to_tools",
               target: type,
-              finding: `The ${type} succeeds at ${success.map((finding) => `${finding.file}:${finding.line}`).join(", ")}; send the approved ${type} conversion to GA4 and PostHog there`,
+              finding: `The ${type} succeeds at ${success.map((finding) => `${finding.file}:${finding.line}`).join(", ")}; send the approved ${type} conversion to ${funnelEntry ? listWords(browserTools.map((tool) => COMMERCE_TOOL_NAME[tool])) : "every tool"} there`,
               evidence: fileEvidence(success),
-              allow: allow(filesOf(success))
+              allow: allow(filesOf(success)),
+              ...gapFields
             }
           : {
               jobId: "conversions_to_tools",
@@ -570,7 +812,8 @@ export function seedCandidatesFrom(scan: JobScan, facts: BeforeFacts): Checklist
               finding: `No place where a ${type} succeeds was found in the browser code (only links to it); the conversion is not sent from a click`,
               evidence: fileEvidence([...d.conversionElements, ...d.outcomes].filter((finding) => finding.conversionType === type)),
               allow: allow([]),
-              blockedReason: "needs_you"
+              blockedReason: "needs_you",
+              ...gapFields
             }
       )
       continue
@@ -580,7 +823,7 @@ export function seedCandidatesFrom(scan: JobScan, facts: BeforeFacts): Checklist
     out.push({
       jobId: "conversions_to_tools",
       target: type,
-      finding: `${type} conversion points found; send the approved ${type} conversion to GA4 and PostHog`,
+      finding: `${type} conversion points found; send the approved ${type} conversion to every tool`,
       evidence: fileEvidence([...elements, ...handlers]),
       allow: allow([...filesOf(elements), ...filesOf(handlers)])
     })
@@ -588,10 +831,12 @@ export function seedCandidatesFrom(scan: JobScan, facts: BeforeFacts): Checklist
 
   // 11 setup_check_fixes (static setup-check problems with file evidence)
   const setupProblems = facts.checks.filter(
-    (check) => check.state === "problem" && check.tier === "S" && (check.evidence ?? []).some((entry) => "file" in entry)
+    (check) => check.state === "problem" && check.tier === "S" && !!check.reason?.trim() && check.reason.trim() !== "problem" && (check.evidence ?? []).some((entry) => "file" in entry)
   )
+  const unsavedFormPages = unsavedPages(null)
   for (const check of [...setupProblems].sort((a, b) => (a.checkId < b.checkId ? -1 : a.checkId > b.checkId ? 1 : 0))) {
     const evidence = (check.evidence ?? []).filter((entry): entry is { file: string; line: number } => "file" in entry)
+    if (CONVERSION_SETUP_CHECKS.has(check.checkId) && evidence.length > 0 && evidence.every((entry) => unsavedFormPages.has(entry.file))) continue
     out.push({
       jobId: "setup_check_fixes",
       target: check.checkId,
@@ -655,24 +900,16 @@ export function seedCandidatesFrom(scan: JobScan, facts: BeforeFacts): Checklist
     })
   }
 
-  // 14 privacy_paragraph (newly installed tools + a privacy page that does not name them yet)
-  const newTools = newlyInstalledTools(facts)
-  const page = d.privacy.find((finding) => newTools.some((tool) => !finding.names[tool]))
-  if (page && newTools.length > 0) {
-    out.push({
-      jobId: "privacy_paragraph",
-      target: "page",
-      finding: `This run installs ${newTools.join(", ")}; the privacy page does not name ${newTools.filter((tool) => !page.names[tool]).join(", ")}`,
-      evidence: fileEvidence([page]),
-      allow: allow([page.file])
-    })
-  }
-
-  const items = out.map((input) => makeItem(input, framework))
+  const items = out.map(input => {
+    const item = makeItem(input, framework)
+    if (item.state === "blocked" && item.allow.files.length === 0) return item
+    return scopeOwnerJob(item, scan.snapshot.files, scan.snapshot.appRoot)
+  })
   const unique = new Map<string, ChecklistItem>()
   for (const item of items) if (!unique.has(item.id)) unique.set(item.id, item)
   const sorted = [...unique.values()].sort((a, b) => a.n - b.n || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
-  return withDistinctTitles(sorted)
+  // Live run 2: never offer a setup-check conversion fix for a form a conversion job already covers (the plan shows neither).
+  return withDistinctTitles(withoutConversionCoveredSetupFixes(sorted))
 }
 
 /**
@@ -683,8 +920,28 @@ export function withDistinctTitles(items: readonly ChecklistItem[]): ChecklistIt
   const perJob = new Map<string, number>()
   for (const item of items) perJob.set(item.jobId, (perJob.get(item.jobId) ?? 0) + 1)
   return items.map((item) =>
-    item.jobId in JOB_TABLE && item.title === JOB_TABLE[item.jobId as keyof typeof JOB_TABLE].title && (perJob.get(item.jobId) ?? 0) > 1 ? { ...item, title: `${item.title}: ${itemTarget(item)}` } : item
+    item.jobId in JOB_TABLE && item.title === JOB_TABLE[item.jobId as keyof typeof JOB_TABLE].title && (perJob.get(item.jobId) ?? 0) > 1 ? { ...item, title: `${item.title}: ${targetWords(itemTarget(item))}` } : item
   )
+}
+
+/** A job target in plain words for a title ("history_change" is a key; "page-change counting" is what it does). */
+const TARGET_WORDS: Readonly<Record<string, string>> = {
+  history_change: "page-change counting",
+  defaults: "recommended settings",
+  sensitive_pages: "sensitive pages",
+  proxy: "your own domain route",
+  spa_page_view: "page-change counting",
+  autoconfig_off_adopted: "automatic events off",
+  click_id_capture: "ad click capture",
+  silent_form: "a form that sends nothing",
+  commerce_events: "shop events",
+  capture: "ad click capture",
+  retire_fbc_writer: "the old click cookie writer",
+  mirror: "the server's event id"
+}
+
+export function targetWords(target: string): string {
+  return TARGET_WORDS[target] ?? target.replace(/[_:]+/g, " ").trim()
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -707,12 +964,21 @@ const PLAN_WIDE_KINDS: ReadonlySet<PlanLineKind> = new Set(["server_lane", "conv
  *   with no bound approved name is dropped, whatever the line says. Job 14 needs the approved paragraph.
  */
 export function applyApprovalsTo(candidates: readonly ChecklistItem[], plan: PlanModel, approvals: PlanApprovals): ChecklistItem[] {
-  const declined = new Set(approvals.declined)
-  const approved = new Set(approvals.approved)
+  const automatic = plan.lines.filter(isContinuedWork).map(line => line.id)
+  const exclusions = planExclusions(plan, approvals.declined)
+  const declined = exclusions.lineIds
+  const approved = new Set([...approvals.approved, ...automatic].filter(id => !declined.has(id)))
   const conversionNames = approvedConversionNames(plan, approvals)
-  const privacyText = approvedPrivacyText(plan, approvals)
   const out: ChecklistItem[] = []
   for (const candidate of candidates) {
+    if (exclusions.blocksJob(candidate)) continue
+    if (candidate.jobId === "privacy_paragraph") continue // Retired; never revive an old approved job.
+    if (candidate.state === "left_for_you") {
+      const instruction = plan.lines.find(line => line.id === `owner_only:${candidate.id}`)?.text
+      const guard = instruction ? /\n```js\n([\s\S]*?)\n```/.exec(instruction)?.[1] : undefined
+      out.push(instruction ? { ...candidate, trigger: { ...candidate.trigger, finding: instruction }, ...(candidate.ownerBoundary ? { ownerBoundary: { ...candidate.ownerBoundary, ...(guard ? { guard } : {}) } } : {}) } : candidate)
+      continue
+    }
     const lines = plan.lines.filter((line) => line.jobIds?.includes(candidate.id))
     if (lines.some((line) => declined.has(line.id))) continue
     const kind = requiredLineKind(candidate)
@@ -727,13 +993,11 @@ export function applyApprovalsTo(candidates: readonly ChecklistItem[], plan: Pla
         item.blockedReason = "needs_you"
       } else if (kind === "conversion_names" && boundConversionNames(itemTarget(candidate), conversionNames).length === 0) {
         continue
-      } else if (kind === "privacy_text" && privacyText === null) {
-        continue
       }
     }
     out.push(item)
   }
-  return withoutCoveredSetupFixes(out)
+  return withoutConversionCoveredSetupFixes(withoutCoveredSetupFixes(out))
 }
 
 /** §3x.3 (B4) The setup findings another job fixes: a setup code → the job that owns its fix. */
@@ -763,6 +1027,27 @@ function withoutCoveredSetupFixes(items: readonly ChecklistItem[]): ChecklistIte
       return byCode.includes(owner.jobId as JobId) && evidence.some((entry) => ownerLines.some((other) => other.file === entry.file))
     })
     return !covered
+  })
+}
+
+/** Setup checks whose fix sends a conversion (a silent lead form, a misplaced conversion marker). */
+const CONVERSION_SETUP_CHECKS: ReadonlySet<string> = new Set(["silent_form", "conversion_placement"])
+/** Conversions a form completes (a purchase and a checkout start are the payment flow's, never a form's). */
+const FORM_CONVERSION_JOBS: ReadonlySet<string> = new Set(["server_conversions", "conversions_to_tools"])
+
+/**
+ * Live run 2 (P0-2): no setup-check conversion fix (`silent_form`, `conversion_placement`) for a form a server or browser
+ * conversion job already covers, i.e. one whose files include the form's page. The lead server job reports that form's
+ * conversion from its API route with the visitor's match data; a silent-form edit on top sent GA4 and PostHog a second
+ * `lead` beside the site's own `generate_lead`, and its co-ownership of the page put the lead's own lines back. A
+ * purchase or checkout-start job never covers a form (its page is the cart).
+ */
+export function withoutConversionCoveredSetupFixes(items: readonly ChecklistItem[]): ChecklistItem[] {
+  const covering = items.filter((item) => FORM_CONVERSION_JOBS.has(item.jobId) && item.state !== "left_for_you" && itemTarget(item) !== "purchase" && itemTarget(item) !== "begin_checkout")
+  return items.filter((item) => {
+    if (item.jobId !== "setup_check_fixes" || !CONVERSION_SETUP_CHECKS.has(itemTarget(item))) return true
+    const pages = item.trigger.evidence.filter((entry): entry is { file: string; line: number } => "file" in entry).map((entry) => entry.file)
+    return !covering.some((owner) => pages.some((page) => owner.allow.files.includes(page) || owner.allow.create.includes(page)))
   })
 }
 
@@ -807,14 +1092,29 @@ export function reverifyNotNeededIn(item: ChecklistItem, scan: JobScan, seed: Re
       return fresh(fileEvidence(d.serverMount.filter((finding) => pathSlug(finding.file) === target)))
     case "unusual_layout":
       return fresh(fileEvidence(d.layout.filter((finding) => finding.kind === target)))
-    case "server_conversions":
+    case "server_conversions": {
+      if (target === "begin_checkout" || (target === "purchase" && d.outcomes.every((finding) => finding.conversionType !== "purchase"))) {
+        const entry = inventoryEntry(d.eventInventory, target === "purchase" ? "purchase" : "begin_checkout")
+        const open = entry !== null && (entry.missing.includes("infinite") || entry.missing.includes("meta_server"))
+        return fresh(open ? d.eventInventory.checkoutCreates.map((site) => ({ file: site.file, line: site.line })) : [])
+      }
       return fresh(fileEvidence(d.outcomes.filter((finding) => finding.conversionType === target)))
+    }
     case "identify_reset":
       return fresh(fileEvidence(d.auth.login))
     case "conversions_to_tools":
       if (OUTCOME_CONVERSION_TYPES.has(target as ConversionType)) return fresh(fileEvidence(d.successPaths.filter((finding) => finding.conversionType === target)))
       return fresh(fileEvidence([...d.conversionElements, ...d.outcomes].filter((finding) => finding.conversionType === target)))
+    case "ga4_improve":
+    case "posthog_improve":
     case "meta_improve":
+      if (target === COMMERCE_EVENTS_TARGET) {
+        const tool: InventoryTool = item.jobId === "meta_improve" ? "meta_browser" : item.jobId === "ga4_improve" ? "ga4" : "posthog"
+        const events = (item.inventory ?? []).map((entry) => entry.event)
+        const open = d.eventInventory.events.filter((entry) => events.includes(entry.event) && entry.missing.includes(tool))
+        return fresh(open.flatMap((entry) => browserSites(entry).map((site) => ({ file: site.file, line: site.line }))))
+      }
+      if (item.jobId !== "meta_improve") return { agrees: false, evidence: item.trigger.evidence }
       if (target === "retire_fbc_writer") return fresh(fileEvidence(d.fbcWriters.filter((finding) => finding.hostOnly)))
       if (target === "mirror") return fresh(fileEvidence(d.metaBrowserStandardEvents))
       return { agrees: false, evidence: item.trigger.evidence }
@@ -829,6 +1129,8 @@ export function reverifyNotNeededIn(item: ChecklistItem, scan: JobScan, seed: Re
 // ---------------------------------------------------------------------------------------------
 
 export interface JobRegistryOptions {
+  /** Current run literals and public IDs, used before check reasons enter stored job state. */
+  scanner?(): Scanner
   /**
    * The brief's context for the current run (the engine reads it from the run state). A brief without a
    * run id is a programming error, so the registry throws instead of writing one.
@@ -842,10 +1144,11 @@ export interface JobRegistryOptions {
 }
 
 /** The union of the run's agent allowlists (jobs 15 and 16 work inside it; widening = ASK). */
-export function unionAllowedFiles(items: readonly ChecklistItem[], cmpFiles: readonly string[]): AllowSpec {
+export function unionAllowedFiles(items: readonly ChecklistItem[], cmpFiles: readonly string[], appRoot = "."): AllowSpec {
   return unionAllow(
     items.filter((item) => item.owner === "agent").map((item) => item.allow),
-    cmpFiles
+    cmpFiles,
+    appRoot
   )
 }
 
@@ -882,7 +1185,7 @@ export function createJobRegistry(options: JobRegistryOptions): O8JobRegistry {
     },
     allowedFiles(item) {
       // Re-filtered through the global deny and the CMP files every time: a stored list can never widen past them.
-      return buildAllow(item.allow.files, item.allow.create, cmpFiles)
+      return buildAllow(item.allow.files, item.allow.create, cmpFiles, seedSnapshot?.appRoot ?? options.briefFacts()?.appRoot ?? ".")
     },
     brief(items) {
       const facts = options.briefFacts()
@@ -898,7 +1201,8 @@ export function createJobRegistry(options: JobRegistryOptions): O8JobRegistry {
     },
     apply(items, results, runId, applyOptions) {
       const liveSince = options.liveSince?.() ?? null
-      return items.map((item) => applyResults(item, results, runId, { budgetLeft: true, liveSince, ...applyOptions }).item)
+      const scanner = options.scanner?.()
+      return items.map((item) => applyResults(item, results, runId, { budgetLeft: true, liveSince, scanner, ...applyOptions }).item)
     },
     reverifyNotNeeded(item, scan) {
       const jobScan = toJobScan(scan)

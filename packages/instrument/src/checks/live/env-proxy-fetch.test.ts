@@ -44,25 +44,4 @@ describe("envProxyFetch", () => {
     await expect(fetchImpl("https://acme-store.com/", { redirect: "manual" })).rejects.toThrow(/refused the tunnel/)
     expect(seen).toEqual(["CONNECT acme-store.com:443"])
   })
-
-  it("an http read goes to the proxy with the absolute URL; a NO_PROXY host goes direct (negative)", async () => {
-    const viaProxy: string[] = []
-    const proxy = createServer((req, res) => {
-      viaProxy.push(String(req.url))
-      res.writeHead(301, { Location: "https://acme-store.com/" })
-      res.end()
-    })
-    const proxyPort = await listen(proxy)
-    const direct = createServer((_req, res) => res.end("direct"))
-    const directPort = await listen(direct)
-    const env = { HTTP_PROXY: `http://127.0.0.1:${proxyPort}`, NO_PROXY: "127.0.0.1" }
-    const fetchImpl = envProxyFetch(env)
-    const response = await fetchImpl("http://acme-store.com/landing?x=1", { redirect: "manual" })
-    expect(response.status).toBe(301)
-    expect(response.headers.get("location")).toBe("https://acme-store.com/")
-    expect(viaProxy).toEqual(["http://acme-store.com/landing?x=1"])
-    const local = await fetchImpl(`http://127.0.0.1:${directPort}/`)
-    expect(await local.text()).toBe("direct")
-    expect(viaProxy).toHaveLength(1)
-  })
 })

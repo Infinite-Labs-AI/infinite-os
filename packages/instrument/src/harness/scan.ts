@@ -5,11 +5,11 @@
 import { readFileSync, readdirSync, statSync } from "node:fs"
 import { join } from "node:path"
 
-import { providerScanSkippedDirectories, providerScanSkippedFiles } from "../inspect.js"
+import { providerScanSkippedDirectories, providerScanSkippedFiles } from "../provider-scan-rules.js"
 
 export const SCAN_EXTENSIONS = /\.(html|htm|tsx|jsx|ts|js|mjs|cjs|astro|vue|svelte)$/
 /**
- * The skip lists are the tag's own (inspect.ts) so provider detection and conversion proposal can
+ * The skip lists are shared with the tag's provider scan so provider detection and conversion proposal can
  * never disagree with the installer's scan; the harness only adds its own `.infinite/` output dir.
  */
 export const SCAN_SKIPPED_FILES = providerScanSkippedFiles

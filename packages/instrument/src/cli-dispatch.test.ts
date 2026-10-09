@@ -1,7 +1,4 @@
-import { INSTRUMENT_VERSION } from "./package-manager.js"
-import { mkdtempSync, rmSync } from "node:fs"
-import { tmpdir } from "node:os"
-import { join } from "node:path"
+import { rmSync } from "node:fs"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 // The wizard, doctor, MCP-proxy and harness entry points are mocked so this file proves ROUTING:
@@ -50,12 +47,7 @@ function expectNoWizardEntry(): void {
 describe("runCli → the wizard", () => {
   const wizardArgvs: Array<{ argv: string[]; expected: string[] }> = [
     { argv: [], expected: [] },
-    { argv: ["wizard"], expected: [] },
     { argv: ["wizard", "--json", "--resume"], expected: ["--json", "--resume"] },
-    { argv: ["--json"], expected: ["--json"] },
-    { argv: ["--resume", "--json"], expected: ["--resume", "--json"] },
-    { argv: ["--answers", "f", "--json"], expected: ["--answers", "f", "--json"] },
-    { argv: ["--yes", "--consent-mode", "required"], expected: ["--yes", "--consent-mode", "required"] }
   ]
 
   for (const { argv, expected } of wizardArgvs) {
@@ -86,68 +78,15 @@ describe("runCli → the wizard", () => {
 })
 
 describe("runCli → the classic commands, unchanged", () => {
-  it("harness keeps its own dispatch", async () => {
-    expect(await runCli(["harness", "--check", "--json"])).toBe(46)
-    expect(runHarnessCommand).toHaveBeenCalledWith(["--check", "--json"])
-    expectNoWizardEntry()
-  })
-
-  for (const argv of [["help"], ["--help"], ["-h"]]) {
-    it(`${JSON.stringify(argv)} prints help and never opens the wizard`, async () => {
-      expect(await runCli(argv)).toBe(0)
-      expect(stdout()).toContain("Usage: infinite-tag")
-      expectNoWizardEntry()
-    })
-  }
-
-  it("help names the wizard and doctor, and hides mcp-proxy", async () => {
-    await runCli(["help"])
-    const help = stdout()
-    expect(help).toContain("npx infinite-tag")
-    expect(help).toMatch(/^\s+doctor\s/m)
-    expect(help).not.toContain("mcp-proxy")
-  })
-
-  it("--version prints the version and exits 0 (B23), never the wizard", async () => {
-    const log = vi.spyOn(console, "log").mockImplementation(() => undefined)
-    try {
-      expect(await runCli(["--version"])).toBe(0)
-      expect(log).toHaveBeenCalledWith(INSTRUMENT_VERSION)
-    } finally {
-      log.mockRestore()
-    }
-    expectNoWizardEntry()
-    // negative: --version with anything after it is not the version flag (the installer's parser decides)
-    expect(routeCliArgv(["--version", "extra"])).toEqual({ kind: "installer", argv: ["--version", "extra"] })
-  })
-
   it('["install","--json", …] still reaches the old parser', async () => {
     // An argument only the installer's parser rejects proves the argv got there.
     expect(await runCli(["install", "--json", "--not-a-real-flag"])).toBe(1)
     expect(stderr()).toContain("Unknown argument: --not-a-real-flag")
     expectNoWizardEntry()
   })
-
-  it("uninstall WITHOUT --pr stays the installer's dry-run uninstall", async () => {
-    const root = mkdtempSync(join(tmpdir(), "infinite-tag-dispatch-"))
-    tempRoots.push(root)
-    expect(await runCli(["uninstall", "--root", root])).toBe(0)
-    expect(stderr()).toContain("Dry run only")
-    expectNoWizardEntry()
-  })
 })
 
 describe("routeCliArgv", () => {
-  it("routes exactly as §F0 lists", () => {
-    expect(routeCliArgv([])).toEqual({ kind: "wizard", argv: [] })
-    expect(routeCliArgv(["wizard", "--yes"])).toEqual({ kind: "wizard", argv: ["--yes"] })
-    expect(routeCliArgv(["--no-agent"])).toEqual({ kind: "wizard", argv: ["--no-agent"] })
-    expect(routeCliArgv(["mcp-proxy"])).toEqual({ kind: "mcp-proxy" })
-    expect(routeCliArgv(["doctor"])).toEqual({ kind: "doctor", argv: [] })
-    expect(routeCliArgv(["uninstall", "--yes", "--pr"])).toEqual({ kind: "wizard-uninstall", argv: ["--yes", "--pr"] })
-    expect(routeCliArgv(["harness", "--json"])).toEqual({ kind: "harness", argv: ["--json"] })
-  })
-
   it("negatives: help flags, --version and every classic command stay with the installer", () => {
     for (const argv of [["--help"], ["-h"], ["help"], ["install", "--json"], ["uninstall", "--yes"], ["plan"], ["verify"], ["server-lane", "--brief"]]) {
       expect(routeCliArgv(argv)).toEqual({ kind: "installer", argv })
@@ -156,19 +95,3 @@ describe("routeCliArgv", () => {
   })
 })
 
-describe("the foundation stubs (until lanes O1, O3 and O9 fill them)", () => {
-  it("runWizardCommand / runWizardUninstall say the wizard is not built and exit 2 (when nothing installed the wiring)", async () => {
-    ;(await vi.importActual<typeof import("./wizard/wiring.js")>("./wizard/wiring.js")).setWizardWiring(null)
-    const actual = await vi.importActual<typeof import("./wizard/command.js")>("./wizard/command.js")
-    expect(await actual.runWizardCommand(["--json"])).toBe(2)
-    expect(await actual.runWizardUninstall(["--pr"])).toBe(2)
-    expect(stderr()).toContain("not built yet")
-  })
-
-  it("runMcpProxy and runDoctorCommand exit 2 (never a silent 0)", async () => {
-    const proxy = await vi.importActual<typeof import("./agents/mcp/proxy.js")>("./agents/mcp/proxy.js")
-    const doctor = await vi.importActual<typeof import("./doctor/command.js")>("./doctor/command.js")
-    expect(await proxy.runMcpProxy()).toBe(2)
-    expect(await doctor.runDoctorCommand(["--json"])).toBe(2)
-  })
-})

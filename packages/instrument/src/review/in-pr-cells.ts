@@ -43,7 +43,7 @@ function verdicts(jobs: readonly ChecklistItem[], jobId: JobId, runId: string): 
 const PLAIN_NAME = /^[A-Za-z0-9_.-]{1,40}$/
 
 export function consentWords(mode: "not_required" | "required"): string {
-  return mode === "required" ? "ask first (consent required)" : "collect by default"
+  return mode === "required" ? "waits for your banner's yes" : "starts with your site's own analytics, or on page load if it has none"
 }
 
 /**
@@ -63,7 +63,7 @@ export function preMergeCells(state: Pick<WizardRunState, "jobs" | "plan">, inpu
     const problems = conversions.filter((entry) => entry.verdict === "problem").length
     const names = wired.map((entry) => entry.item.id.slice(entry.item.id.indexOf(":") + 1))
     const named = names.length > 0 && names.length <= 6 && names.every((name) => PLAIN_NAME.test(name)) ? ` (${names.join(", ")})` : ""
-    const extra = { checkId: "outcome_after_success" }
+    const extra = { checkId: "outcome_declared" }
     if (problems > 0) {
       const display = `${wired.length} of ${conversions.length} wired in code`
       finishLine.conversions_server_side = cell("problem", "problem", display, "wizard_check", at, runId, extra)
@@ -80,10 +80,10 @@ export function preMergeCells(state: Pick<WizardRunState, "jobs" | "plan">, inpu
     }
   }
 
-  // 7 identity_joined: job 9's static checks (identify on sign-in, reset on sign-out).
+  // 7 identity_joined: job 9, checked by the review agent (identify on sign-in, reset on sign-out).
   const identity = verdicts(state.jobs, "identify_reset", runId)
   if (identity.length > 0) {
-    const extra = { checkId: "identify_on_auth_success" }
+    const extra = { checkId: "jobs_review" }
     finishLine.identity_joined = identity.some((entry) => entry.verdict === "problem")
       ? cell("problem", "problem", "identify or reset is missing in code", "wizard_check", at, runId, extra)
       : identity.every((entry) => entry.verdict === "pass")
@@ -97,10 +97,10 @@ export function preMergeCells(state: Pick<WizardRunState, "jobs" | "plan">, inpu
     const held = input.keys?.infinite.consentMode ?? null
     const consent =
       held === chosen
-        ? cell("pass", chosen, `"${consentWords(chosen)}" recorded`, "cloud_read", at, runId)
+        ? cell("info", chosen, `${consentWords(chosen)} (recorded in Infinite)`, "cloud_read", at, runId)
         : held === null
-          ? cell("info", chosen, `"${consentWords(chosen)}" chosen in the plan (not read back from Infinite)`, "plan_answer", at, runId)
-          : cell("problem", held, `the plan chose "${consentWords(chosen)}"; Infinite has "${consentWords(held)}"`, "cloud_read", at, runId)
+          ? cell("info", chosen, `${consentWords(chosen)} (set by this run; not read back from Infinite)`, "plan_answer", at, runId)
+          : cell("problem", held, `this run set "${consentWords(chosen)}"; Infinite has "${consentWords(held)}"`, "cloud_read", at, runId, { reason: "test_error" })
     finishLine.consent_recorded = consent
     cells.consent_setting = consent
   }
@@ -129,7 +129,7 @@ export function derivedInPrCells(column: InPrCells, state: Pick<WizardRunState, 
   } else if (silent?.state === "problem") {
     cells.preview_share = cell("problem", "sends data", "the preview link sends data", "desktop_test", at, runId, extra)
   } else if (guardAdded) {
-    cells.preview_share = cell("info", "guard added", "guard added (the preview link was not loaded)", "wizard_check", at, runId, { checkId: "adopted_init_guarded" })
+    cells.preview_share = cell("info", "guard added", "guard added (the preview link was not loaded)", "wizard_check", at, runId, { checkId: "jobs_review" })
   } else if (silent?.reason) {
     cells.preview_share = cell("undetermined", null, NULL_DISPLAY, "desktop_test", at, runId, { ...extra, reason: silent.reason })
   }

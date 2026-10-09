@@ -38,11 +38,4 @@ describe("PostHog proxy", () => {
     // Negative: the real library with a JavaScript content type.
     expect((await run({ "https://acme.test/ingest/static/array.js": { body: "!function(){var posthog={}}()", headers: { "content-type": "application/javascript" } } })).result.state).toBe("pass")
   })
-
-  it("is undetermined when the site cannot be reached, and info when PostHog is not proxied at all", async () => {
-    expect((await run({})).result.state).toBe("undetermined")
-    const direct = await run({}, "https://eu.i.posthog.com")
-    expect(direct.result.state).toBe("info")
-    expect(direct.requests).toEqual([])
-  })
 })

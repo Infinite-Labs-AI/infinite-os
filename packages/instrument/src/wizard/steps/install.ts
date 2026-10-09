@@ -1,3 +1,5 @@
+import { planExclusions } from "../../install/plan-exclusions.js"
+import { configRewriteJobs } from "../../install/config-rewrite-jobs.js"
 // Step `install` (§3d.1 step 5, lane O7): "Install".
 //
 // Ensures the site source and records the consent answer through the site-source verb (C4 records it
@@ -8,12 +10,18 @@
 import { createHash } from "node:crypto"
 
 import type { WizardApplyResult } from "../../install/installer.js"
+import type { ManualRequirement } from "../../types.js"
+import { itemT0Scenarios, runItemT0, t0RunParams } from "../item-t0.js"
+import type { CheckResult } from "../contracts/jobs.js"
 import { DECISION_LINE_IDS } from "../../install/plan-model.js"
+import { CAPTURE_WAITING } from "../../install/consent-handoff.js"
 import { bridgeErrorCode, keysOnly, loadPlanApprovals, loadPlanInputs, planCandidates } from "../../install/step-inputs.js"
 import { bridgeFailureLine, bridgeFailureOutcome, bridgeFailureState, hardStopOutcome } from "../../bridge/outcomes.js"
 import { makeEditRecord } from "../../install/edits.js"
 import { isProofBody, PROOF_FILE_PLAN_LINE_ID, proofFileTarget } from "../../install/proof-file.js"
 import { isPreviewShapedHost, resolveProductionHost } from "../site-host.js"
+import { isSupportedFramework } from "../../frameworks/index.js"
+import { restoreUninstalledFence } from "../uninstalled-fence.js"
 import { GITIGNORE_FENCE_START } from "../../harness/outputs.js"
 import { wizardGitExtras } from "../../git/index.js"
 import type { InstallerApplyResult } from "../contracts/jobs.js"
@@ -124,34 +132,59 @@ export function openLayoutJobs(paths: readonly string[], existing: readonly Chec
     .filter((item) => !existing.some((other) => other.id === item.id))
 }
 
-/** The item id of the rewrite job for the user's own Next config (review I1 P1-2). */
-export const CONFIG_REWRITES_TARGET = "next_config_rewrites"
+/** Known installer proposals held at the owner boundary are information, never worker tasks. */
+export function ownerLayoutJobs(requirements: readonly ManualRequirement[], existing: readonly ChecklistItem[] = []): ChecklistItem[] {
+  const byPlacement = new Map<string, ManualRequirement[]>()
+  for (const requirement of requirements) {
+    if (!requirement.ownerBoundary) continue
+    // A file may need more than one handoff with different placement/frozen-unit provenance.
+    const key = JSON.stringify([requirement.path, requirement.ownerBoundary])
+    byPlacement.set(key, [...byPlacement.get(key) ?? [], requirement])
+  }
+  const occupied = existing.filter(job => job.state === "left_for_you" && job.ownerBoundary)
+  return [...byPlacement.values()].map(entries => {
+    const path = entries[0]!.path
+    const first = entries[0]!
+    const wiring = [...new Set(entries.map(entry => entry.snippet).filter(Boolean))].join("\n\n")
+    const note = [...new Set(entries.map(entry => entry.reason))].join("\n")
+    const ownerBoundary = { ...first.ownerBoundary!, ...(wiring ? { wiring } : {}) }
+    const identity = JSON.stringify([ownerBoundary, note])
+    const baseId = `unusual_layout:${path}`
+    const matching = occupied.find(job => (job.id === baseId || job.id.startsWith(`${baseId}:handoff:`)) && JSON.stringify([job.ownerBoundary, job.note]) === identity)
+    let id = matching?.id ?? baseId
+    if (!matching && occupied.some(job => job.id === id)) id = `${baseId}:handoff:${sha256(identity).slice(7)}`
+    const job: ChecklistItem = { id, jobId: "unusual_layout", n: JOB_TABLE.unusual_layout.n,
+      title: `Analytics wiring left for you: ${path}`, owner: "code", state: "left_for_you", checks: [], allow: { files: [], create: [] }, note,
+      ownerBoundary,
+      trigger: { finding: `${note}${wiring ? `\n\nFor you to copy into ${path}; keep your consent code as it is.\n\n\`\`\`js\n${wiring}\n\`\`\`` : ""}`, evidence: [{ file: path, line: first.ownerBoundary!.line }] } }
+    occupied.push(job)
+    return job
+  })
+}
 
-/**
- * Review I1 P1-2: the managed rewrites the user's OWN next.config lacks (the installer never edits it) are a job
- * for the agent, checked by the wizard (`next_rewrites_exact`, then the build), never "installed".
- */
-export function configRewriteJobs(deferred: ReadonlyArray<{ path: string; snippet: string }>, existing: readonly ChecklistItem[]): ChecklistItem[] {
-  const spec = JOB_TABLE.unusual_layout
-  return deferred
-    .map((entry): ChecklistItem => ({
-      id: `unusual_layout:${CONFIG_REWRITES_TARGET}`,
-      jobId: "unusual_layout",
-      n: spec.n,
-      title: "Add the analytics rewrites to your Next config",
-      owner: "agent",
-      trigger: {
-        finding: `Your own ${entry.path} lacks the same-origin rewrites the managed tag posts through; add exactly these to its async rewrites(), changing nothing else:\n${entry.snippet}`,
-        evidence: [{ file: entry.path, line: 1 }]
-      },
-      allow: { files: [entry.path], create: [] },
-      checks: [
-        { id: "next_rewrites_exact", tier: "S", state: "not_run" },
-        { id: "build", tier: "B", state: "not_run" }
-      ],
-      state: "pending"
-    }))
-    .filter((item, index, all) => all.findIndex((other) => other.id === item.id) === index && !existing.some((other) => other.id === item.id))
+export { CONFIG_REWRITES_TARGET, configRewriteJobs } from "../../install/config-rewrite-jobs.js"
+
+/** Validate the deterministic capture using its actual static and offline evidence; never dispatch a worker. */
+export async function verifyManagedCaptureJobs(ctx: WizardContext, deps: Pick<WizardDeps, "checks" | "registry" | "fs">, result: InstallerApplyResult & Partial<WizardApplyResult>, params: Readonly<Record<string, unknown>>): Promise<void> {
+  if (result.managedCapture) {
+    const runId = ctx.state.get().runId ?? ctx.runId
+    if (runId) {
+      for (const saved of ctx.state.get().jobs.filter(job => job.owner === "code" && job.jobId === "meta_improve" && /^meta_improve:capture(?::|$)/.test(job.id) && job.state !== "left_for_you")) {
+        const item: ChecklistItem = { ...saved, state: "claimed", consentActivation: result.managedCapture.mode === "required" ? "waiting_banner_signal" : undefined, claim: { status: "done", note: "The wizard emitted the managed module and its fixed entrypoint wiring", at: ctx.now().toISOString() }, edits: [...saved.edits ?? [], ...result.edits.filter(edit => edit.jobId === "meta_improve:capture").map(edit => ({ editId: edit.id, file: edit.file }))] }
+        const raw = await deps.checks.run("click_id_capture", { item, root: ctx.root, appRoot: ctx.appRoot, runId })
+        const staticChecks: CheckResult[] = (Array.isArray(raw) ? raw : [raw]).map(check => ({ ...check, tier: "S", runId }))
+        const scenarios = await itemT0Scenarios(item, [{ checkId: "fbc_capture" }], params, { root: ctx.root, fs: deps.fs })
+        const offline = await runItemT0(deps, scenarios, result.artifacts ?? {}, { runId, at: () => ctx.now().toISOString() })
+        const [checked] = deps.registry.apply([item], [...staticChecks, ...offline.map(check => ({ ...check, tier: "T0" as const, runId }))], runId)
+        if (checked) {
+          if (checked.consentActivation && ["done_in_code", "waiting_deploy", "proven"].includes(checked.state)) { checked.state = "done_in_code"; checked.note = CAPTURE_WAITING }
+          ctx.state.update(current => { current.jobs = current.jobs.map(job => job.id === checked.id ? checked : job) })
+          ctx.emit.emit("job.state", { itemId: checked.id, state: checked.state, by: "wizard", note: checked.note ?? "Managed capture checked from the emitted module and fixed entrypoint" })
+        }
+      }
+      await ctx.state.save()
+    }
+  }
 }
 
 async function run(ctx: WizardContext, deps: WizardDeps): Promise<StepOutcome> {
@@ -172,6 +205,10 @@ async function run(ctx: WizardContext, deps: WizardDeps): Promise<StepOutcome> {
     return { kind: "failed", code: "INF_WIZ_BRIDGE_PROTOCOL", message: `The Infinite app does not offer ${inputs.missingCapability}; update the app.`, next: "halt" }
   }
   const scan = await deps.installer.scan({ root: ctx.root, ...(ctx.appRoot !== "." ? { appRoot: ctx.appRoot } : {}), hosting: inputs.hosting })
+  if (!isSupportedFramework(scan.framework)) {
+    const restored = await restoreUninstalledFence(ctx.root, deps)
+    return { kind: "failed", code: "INF_WIZ_APPLY_ROLLED_BACK", message: `Unsupported repository shape for instrumentation. No install was started.${restored ? " The wizard's gitignore change was restored." : " The gitignore file contains other changes; it was left untouched."}`, next: "halt" }
+  }
   const candidates = await planCandidates(ctx, deps)
   let keys = keysOnly(inputs.keys)
 
@@ -188,7 +225,8 @@ async function run(ctx: WizardContext, deps: WizardDeps): Promise<StepOutcome> {
     await ctx.state.save()
     return { kind: "parked", code: "INF_WIZ_NEEDS_ANSWERS", reason: "The saved plan changed; re-confirm it.", resumeHint: PARK_HINT }
   }
-  const approved = new Set(state.plan.lines.filter((line) => line.approved === true).map((line) => line.id))
+  const exclusions = planExclusions(check, savedApprovals.excluded ?? savedApprovals.approvals.declined)
+  const approved = new Set(state.plan.lines.filter((line) => line.approved === true && !exclusions.lineIds.has(line.id)).map((line) => line.id))
 
   // Review I1 P1-2: an install that cannot be applied stops HERE, before the first cloud write (the site source).
   const blocked = deps.installer.preflight?.(check, savedApprovals.approvals) ?? null
@@ -205,7 +243,7 @@ async function run(ctx: WizardContext, deps: WizardDeps): Promise<StepOutcome> {
   if (deps.agents.isAgentAlive()) throw new Error("An agent is still running; the site source is not changed while one runs.")
 
   // ---- the site source + the consent answer: ONLY behind an approved Infinite line (P2-20) ----
-  const installInfinite = check.lines.some((line) => line.kind === "install_provider" && line.id.startsWith("install_provider:infinite") && approved.has(line.id))
+  const installInfinite = exclusions.infiniteWrites && check.lines.some((line) => line.kind === "install_provider" && line.id.startsWith("install_provider:infinite") && approved.has(line.id))
   let claim: ClaimPublic | null = null
   // Review P1-5: the claim whose proof line this install keeps in the repo. A pending claim's (the proof the merge
   // must serve), and on the verified-source path the workspace's PROVEN claim's: every PR preview and merge deployment
@@ -342,22 +380,26 @@ async function run(ctx: WizardContext, deps: WizardDeps): Promise<StepOutcome> {
     plan,
     savedApprovals.approvals
   )
+  const ownerJobs = ownerLayoutJobs(result.ownerRequirements ?? [], ctx.state.get().jobs)
+  for (const job of ownerJobs) sub(ctx, job.trigger.finding, "info")
   for (const deferred of result.deferredConfigRewrites ?? []) {
     sub(ctx, `Your own ${deferred.path} is left as it is: the agent adds Infinite's collect rewrite there (the wizard checks it)`, "info")
   }
-  if (openJobs.length > 0 || result.edits.length > 0) {
+  if (openJobs.length > 0 || ownerJobs.length > 0 || result.edits.length > 0) {
     ctx.state.update((current) => {
-      current.jobs = [...current.jobs, ...openJobs]
+      const ownerIds = new Set(ownerJobs.map(job => job.id))
+      current.jobs = [...current.jobs.filter(job => !ownerIds.has(job.id)), ...openJobs.filter(job => !ownerIds.has(job.id)), ...ownerJobs]
     })
     await ctx.state.save()
   }
+  if (result.managedCapture) await verifyManagedCaptureJobs(ctx, deps, result, await t0RunParams(ctx, deps))
   if (result.build === "passed") sub(ctx, "✓ Build passes", "ok")
   else if (result.build === "failed_baseline") sub(ctx, "The build was already failing before this run (not caused by the install)", "warn")
 
   const files = result.changedFiles?.length ?? result.edits.length
   const build = result.build === "passed" ? "build passes" : result.build === "failed_baseline" ? "build was already red" : "build not checked yet"
   const open = result.openJobs.length > 0 ? ` · ${result.openJobs.length} file${result.openJobs.length === 1 ? "" : "s"} need${result.openJobs.length === 1 ? "s" : ""} the agent (not live yet)` : ""
-  return { kind: "ok", status: `${files} file${files === 1 ? "" : "s"} written · ${build}${open}` }
+  return { kind: "ok", status: `${files} file${files === 1 ? "" : "s"} written · ${build}${open}${ownerJobs.length ? ` · ${ownerJobs.length} owner-only wiring step${ownerJobs.length === 1 ? "" : "s"} left for you` : ""}` }
 }
 
 export const step: WizardStep<"install"> = {

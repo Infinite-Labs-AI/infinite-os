@@ -14,6 +14,7 @@ import {
   writeFileIfChanged
 } from "../frameworks/shared.js"
 import { computeContentHash } from "../manifest.js"
+import { recordGeneratedApi } from "../jobs/generated-api.js"
 import type {
   InstallManifest,
   ManagedConfigOwnership,
@@ -37,10 +38,12 @@ import { netlifyTarget } from "./targets/netlify.js"
 import { nodeMountSnippet, nodeTarget } from "./targets/node.js"
 import {
   missingAncestorDirectories,
-  outcomeHelperTarget,
   planManagedFiles,
-  type ServerLaneTargetDefinition
+  type ServerLaneTargetDefinition,
+  type ServerLaneTargetFile,
+  type TargetBuildInput
 } from "./targets/shared.js"
+import { detectOutcomeBackgroundMode, outcomeHelperOptionsFor, outcomeHelperSource } from "./targets/outcome-helper.js"
 import { vercelAnyTarget } from "./targets/vercel-any.js"
 import {
   SERVER_LANE_FENCE_START,
@@ -123,6 +126,60 @@ export function serverLaneTargetForMode(mode: string): ServerLaneTargetDefinitio
   return null
 }
 
+const OUTCOME_HELPER_PATTERN = /(?:^|\/)lib\/infinite-outcome\.(ts|js|mjs)$/
+
+/** The outcome helper's source for an app-relative path we planned (its extension picks the language). */
+export function outcomeHelperSourceForPath(input: TargetBuildInput, appRootAbsolute: string, appRelativePath: string): string {
+  const extension = OUTCOME_HELPER_PATTERN.exec(appRelativePath)?.[1] as "ts" | "js" | "mjs" | undefined
+  return outcomeHelperSource(input, {
+    language: extension === "js" || extension === "mjs" ? "js" : "ts",
+    extension: extension ?? "ts",
+    background: detectOutcomeBackgroundMode(appRootAbsolute)
+  })
+}
+
+/**
+ * Every whole file a lane mode writes, app-relative → contents. The host targets build their own set;
+ * Next.js and the brief-only fallback write the one outcome helper (Next's middleware + module are
+ * written separately, because the middleware may be a patch of the customer's own file).
+ */
+export function buildServerLaneFiles(
+  mode: string,
+  input: TargetBuildInput,
+  appRootAbsolute: string,
+  plannedAppRelativePaths: readonly string[]
+): Record<string, string> {
+  const target = serverLaneTargetForMode(mode)
+  if (target) return target.build(input, appRootAbsolute)
+  const files: Record<string, string> = {}
+  for (const path of plannedAppRelativePaths) {
+    if (OUTCOME_HELPER_PATTERN.test(path)) files[path] = outcomeHelperSourceForPath(input, appRootAbsolute, path)
+  }
+  return files
+}
+
+/** Plan the outcome helper as a managed whole file (create / keep / manual, like every target file). */
+function planOutcomeHelper(
+  input: PlanServerLaneInput,
+  basename: string
+): { created: NonNullable<ServerLanePlan["created"]>; assumptions: string[]; blockers: string[] } {
+  const planned = planManagedFiles([{ path: outcomeHelperOptionsFor(input.appRootAbsolute, basename).path, role: "module" }], {
+    appRootAbsolute: input.appRootAbsolute,
+    previousManifest: input.previousManifest,
+    toRootRelative: (appRelative) => normalizeAppRelativePath(input.appRoot, appRelative)
+  })
+  return {
+    created: planned.files.map((file: ServerLaneTargetFile) => ({
+      path: normalizeAppRelativePath(input.appRoot, file.path),
+      role: file.role,
+      action: file.action,
+      ...(file.reason ? { reason: file.reason } : {})
+    })),
+    assumptions: planned.assumptions,
+    blockers: planned.blockers
+  }
+}
+
 /** Non-Next stacks: pick a target from the HOST, or fall back to the brief. */
 function planHostedServerLane(
   input: PlanServerLaneInput,
@@ -131,16 +188,21 @@ function planHostedServerLane(
   const hosting = detectHostingWithEvidence(input.appRootAbsolute)
   const target = selectServerLaneTarget(hosting.hosting, input.appRootAbsolute)
   if (!target) {
+    // No page-view lane to wire here, but the outcome helper is host-agnostic (WebCrypto + fetch), so
+    // conversions can still be reported with the same API as on every other target.
+    const outcome = planOutcomeHelper(input, "lib/infinite-outcome")
     return {
       mode: "brief",
       briefPath: base.briefPath,
       envKeys: base.envKeys,
-      files: [],
+      created: outcome.created,
+      files: outcome.created.filter((file) => file.action !== "manual").map((file) => file.path),
       assumptions: [
         ...base.assumptions,
-        "The server lane is not patched automatically for this stack; the agent brief is the install."
+        "The server lane is not patched automatically for this stack; the agent brief is the install.",
+        ...outcome.assumptions
       ],
-      blockers: base.blockers
+      blockers: [...base.blockers, ...outcome.blockers]
     }
   }
 
@@ -265,15 +327,23 @@ export function planServerLane(input: PlanServerLaneInput): ServerLanePlanDraft 
     middleware.action === "patch" ||
     (middleware.action === "keep" && previousOwnership !== undefined)
 
+  // The same outcome helper as every other target, beside the managed module.
+  const outcome = planOutcomeHelper(input, underSrc ? "src/lib/infinite-outcome" : "lib/infinite-outcome")
+
   return {
     mode: "next-middleware",
     briefPath,
     modulePath,
     middleware,
+    created: outcome.created,
     envKeys,
-    files: [...(managesMiddleware ? [middlewarePath] : []), modulePath],
-    assumptions,
-    blockers
+    files: [
+      ...(managesMiddleware ? [middlewarePath] : []),
+      modulePath,
+      ...outcome.created.filter((file) => file.action !== "manual").map((file) => file.path)
+    ],
+    assumptions: [...assumptions, ...outcome.assumptions],
+    blockers: [...blockers, ...outcome.blockers]
   }
 }
 
@@ -314,6 +384,10 @@ export function applyServerLane(input: ApplyServerLaneInput): ApplyServerLaneRes
     input.artifacts.infinite?.productionHosts ?? input.artifacts.productionHosts ?? []
 
   let status: ServerLaneBriefStatus = { kind: "other-stack", framework: input.framework }
+  /** The outcome helper this run wrote (or would have), root-relative, for the brief's examples. */
+  let outcomeHelperPath: string | undefined
+  /** Next / brief mode: an outcome helper we could not write, carried into the brief by hand. */
+  const outcomeManual: Array<{ path: string; reason: string; contents: string }> = []
 
   if (input.plan.mode === "next-middleware" && input.plan.modulePath && input.plan.middleware) {
     const moduleAppRelative = toAppRelative(input.appRoot, input.plan.modulePath)
@@ -414,8 +488,9 @@ export function applyServerLane(input: ApplyServerLaneInput): ApplyServerLaneRes
   }
 
   const target = serverLaneTargetForMode(input.plan.mode)
-  if (target && input.plan.created) {
-    const built = target.build(
+  if (input.plan.created && input.plan.created.length > 0) {
+    const built = buildServerLaneFiles(
+      input.plan.mode,
       {
         siteSourceKey,
         productionHosts,
@@ -424,7 +499,8 @@ export function applyServerLane(input: ApplyServerLaneInput): ApplyServerLaneRes
           : {}),
         ...(apiOrigin ? { apiOrigin } : {})
       },
-      appRootAbsolute
+      appRootAbsolute,
+      input.plan.created.map((file) => toAppRelative(input.appRoot, file.path))
     )
     const created: string[] = []
     const manual: Array<{ path: string; reason: string; contents: string }> = []
@@ -495,28 +571,31 @@ export function applyServerLane(input: ApplyServerLaneInput): ApplyServerLaneRes
         (left, right) => right.split("/").length - left.split("/").length
       )
     }
-    status = {
-      kind: "target",
-      mode: input.plan.mode,
-      label: target.label,
-      created,
-      manual,
-      installPackages: input.plan.installPackages ?? [],
-      ...(input.plan.mode === "node-module" ? { mount: nodeMountSnippet() } : {})
+    if (target) {
+      status = {
+        kind: "target",
+        mode: input.plan.mode,
+        label: target.label,
+        created,
+        manual,
+        installPackages: input.plan.installPackages ?? [],
+        ...(input.plan.mode === "node-module" ? { mount: nodeMountSnippet() } : {})
+      }
+    } else {
+      outcomeManual.push(...manual)
     }
+    outcomeHelperPath = created.find((path) => OUTCOME_HELPER_PATTERN.test(path)) ?? manual.find((file) => OUTCOME_HELPER_PATTERN.test(file.path))?.path
   }
 
-  // For the host-chosen targets that emit the self-contained outcome helper, the brief's examples
-  // must import it exactly as the customer's routes will — with the extension when it is JS (#24).
-  const outcomeEmittingModes = new Set(["vercel-middleware", "netlify-edge", "cloudflare-pages"])
-  const outcomeBrief = outcomeEmittingModes.has(input.plan.mode)
-    ? (() => {
-        const outcome = outcomeHelperTarget(appRootAbsolute)
-        return {
-          outcomeImportSpecifier: `../lib/infinite-outcome${outcome.language === "ts" ? "" : `.${outcome.extension}`}`,
-          outcomeLanguage: outcome.language
-        }
-      })()
+  // Every mode now ships the outcome helper, so the brief's examples import it exactly as the
+  // customer's routes will: with the extension when it is JS (#24).
+  const outcomeExtension = outcomeHelperPath ? /\.(ts|js|mjs)$/.exec(outcomeHelperPath)?.[1] : undefined
+  const outcomeBrief = outcomeHelperPath
+    ? {
+        outcomeImportSpecifier: `../lib/infinite-outcome${outcomeExtension === "ts" ? "" : `.${outcomeExtension}`}`,
+        outcomeLanguage: (outcomeExtension === "ts" ? "ts" : "js") as "ts" | "js",
+        outcomeHelperPath
+      }
     : {}
 
   const briefInput = {
@@ -525,7 +604,8 @@ export function applyServerLane(input: ApplyServerLaneInput): ApplyServerLaneRes
     productionHosts,
     ...(apiOrigin ? { apiOrigin } : {}),
     moduleImportPath: SERVER_LANE_MODULE_IMPORT_PATH,
-    ...outcomeBrief
+    ...outcomeBrief,
+    ...(outcomeManual.length > 0 ? { outcomeManual } : {})
   }
   // The full guide lives under docs/ so the repo root is not buried under 700 lines; the root file
   // is a short pointer at it. `brief` (returned + printed by the CLI) is the full guide.
@@ -540,6 +620,9 @@ export function applyServerLane(input: ApplyServerLaneInput): ApplyServerLaneRes
   } else {
     // Written but kept out of changedFiles: the CLI narrates the runtime files + the root pointer;
     // the guide is a doc the pointer links to, tracked here purely so uninstall can remove it.
+    // Its fixed examples also pass through the owner diff check. Trust only these exact emitted
+    // bytes, never the filename/banner or any additions an agent makes to the guide afterwards.
+    recordGeneratedApi(input.root, guideRootRelative, brief)
     writeFileIfChanged(appRootAbsolute, guideAppRelative, brief)
     manifest.guide = guideRootRelative
     guideWritten = true

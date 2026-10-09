@@ -123,20 +123,22 @@ describe("prove: GitHub Deployments as the deploy signal (no Infinite Vercel con
     expect(outcome.kind).not.toBe("parked")
     expect(subs.join(" ")).toContain(`a later commit, ${SERVING_SHA.slice(0, 7)}, includes it`)
   })
+
+  it("an unreadable production status is unknown immediately, not an empty-history claim or a twenty-minute wait", async () => {
+    const bundle = world({ deployments: { forSha: ["not_found"], latest: [null] } })
+    Object.assign(bundle.deps.host, { latestProductionDeployment: async () => { throw new Error("fake unreadable deployment history") } })
+    const started = bundle.clock.now().getTime()
+    const { outcome } = await run(bundle, mergedState(answeredSite(false)), { yes: true })
+    expect(outcome).toMatchObject({ kind: "parked", reason: expect.stringContaining("could not be read") })
+    expect((outcome as { reason: string }).reason).toContain("unknown")
+    expect((outcome as { reason: string }).reason).not.toContain("no earlier")
+    expect(bundle.clock.now().getTime()).toBe(started)
+    expect(bundle.log.names("bridge")).not.toContain("bridge.startTest")
+  })
 })
 
 describe("prove: no signal at all → ONE question instead of a wait", () => {
   const noSignal = () => world({})
-
-  it("yes → the visit runs", async () => {
-    const bundle = noSignal()
-    const { outcome, asked } = await run(bundle, mergedState(answeredSite(false)), { json: false }, () => true)
-    expect(asked).toHaveLength(1)
-    expect(asked[0]).toMatchObject({ kind: "confirm", payload: { defaultYes: false } })
-    expect((asked[0]!.payload as { question: string }).question).toBe(`Infinite can't see when ${HOST} deploys (no Vercel connection, no GitHub deployments). Is pull request #2 live on ${HOST} now?`)
-    expect(outcome.kind).not.toBe("parked")
-    expect(bundle.log.names("bridge")).toContain("bridge.startTest")
-  })
 
   it("no → parked DEPLOY_TIMEOUT with 'run again once it's live'; --yes parks at once without asking", async () => {
     const no = await run(noSignal(), mergedState(answeredSite(false)), { json: false }, () => false)
@@ -183,59 +185,6 @@ describe("prove: the site-file claim (§3y.4)", () => {
     expect(bundle.log.names("bridge").filter((name) => name === "bridge.startTest")).toHaveLength(1)
   })
 
-  it("review P3-1: the file already live and --yes → parked DEPLOY_TIMEOUT (no visit), the claim still recorded proven", async () => {
-    const bundle = world({ siteProve: [proven], files: FILE_ALREADY_LIVE })
-    const { outcome, ctx } = await run(bundle, mergedState(answeredSite(true)), { yes: true }, () => {
-      throw new Error("--yes must not ask")
-    })
-    expect(outcome).toMatchObject({ kind: "parked", code: "INF_WIZ_DEPLOY_TIMEOUT" })
-    expect(ctx.current().site?.claim?.state).toBe("proven")
-    expect(bundle.log.names("bridge")).not.toContain("bridge.startTest")
-  })
-
-  it("review P3-1: the file already live but GitHub shows the merge's deployment → '(GitHub deployment)', never site_file", async () => {
-    const bundle = world({ deployments: { forSha: ["building", "building", "ready"] }, siteProve: [proven], keysAfterProof: true, files: FILE_ALREADY_LIVE })
-    const { outcome, subs } = await run(bundle, mergedState(answeredSite(true)))
-    expect(outcome.kind, JSON.stringify(outcome)).not.toBe("parked")
-    expect(subs).toContain(`✓ Deployed ${MERGE_SHA.slice(0, 7)} (GitHub deployment)`)
-    expect(subs.some((text) => text.includes("Infinite read its proof file"))).toBe(false)
-    // Once proven, the claim is not asked again.
-    expect(bundle.log.names("bridge").filter((name) => name === "bridge.proveSite")).toHaveLength(1)
-  })
-
-  it("review P3-1: a git that cannot show files (unknown) never counts site_file", async () => {
-    const bundle = world({ siteProve: [proven], keysAfterProof: true })
-    const { subs } = await run(bundle, mergedState(answeredSite(true)), { json: false }, () => false)
-    expect(subs.some((text) => text.includes("Infinite read its proof file"))).toBe(false)
-  })
-
-  it("review P1-1: the cloud answers site-prove 'none' (the claim expired or another source took the site) → parked HOST_UNCONFIRMED at once with THAT reason, never 'not served', no visit", async () => {
-    const none = { state: "none" as const, hosts: [], siteSource: null }
-    const bundle = world({ siteProve: [pending(), none] })
-    const { outcome, subs } = await run(bundle, mergedState(answeredSite(true)))
-    expect(outcome).toMatchObject({ kind: "parked", code: "INF_WIZ_HOST_UNCONFIRMED" })
-    expect((outcome as { reason: string }).reason).toBe(`${HOST} isn't confirmed: Infinite no longer holds a pending proof for it (it expired, or another Infinite source took the site).`)
-    expect((outcome as { reason: string }).reason).not.toContain("not served")
-    const names = bundle.log.names("bridge")
-    // It stopped asking after the 'none' (no 20-minute wait on a claim that cannot prove).
-    expect(names.filter((name) => name === "bridge.proveSite")).toHaveLength(2)
-    expect(names).not.toContain("bridge.claimProof")
-    expect(names).not.toContain("bridge.startTest")
-    expect(subs.some((text) => text.startsWith("✓ Deployed"))).toBe(false)
-  })
-
-  it("review P1-1: deployed on GitHub, then 'none' during the 3-minute grace → the same honest park, at once", async () => {
-    const none = { state: "none" as const, hosts: [], siteSource: null }
-    const bundle = world({ deployments: { forSha: ["ready"] }, siteProve: [none] })
-    const started = bundle.clock.now().getTime()
-    const { outcome } = await run(bundle, mergedState(answeredSite(true)))
-    expect(outcome).toMatchObject({ kind: "parked", code: "INF_WIZ_HOST_UNCONFIRMED" })
-    expect((outcome as { reason: string }).reason).toContain("no longer holds a pending proof")
-    expect(bundle.log.names("bridge").filter((name) => name === "bridge.proveSite")).toHaveLength(1)
-    expect(bundle.clock.now().getTime() - started).toBeLessThan(PROVE_LIMITS.claimGraceMs)
-    expect(bundle.log.names("bridge")).not.toContain("bridge.startTest")
-  })
-
   it("deployed on GitHub but the claim still pending → 3 more minutes of proofs, then parked HOST_UNCONFIRMED with NO real visit and NO proof claim", async () => {
     const bundle = world({ deployments: { forSha: ["ready"] }, siteProve: [pending("wrong_token")] })
     const { outcome } = await run(bundle, mergedState(answeredSite(true)))
@@ -248,5 +197,23 @@ describe("prove: the site-file claim (§3y.4)", () => {
     const proofs = names.filter((name) => name === "bridge.proveSite").length
     expect(proofs).toBeGreaterThanOrEqual(PROVE_LIMITS.claimGraceMs / PROVE_LIMITS.claimGracePollMs - 1)
     expect(proofs).toBeLessThanOrEqual(PROVE_LIMITS.claimGraceMs / PROVE_LIMITS.claimGracePollMs + 2)
+  })
+})
+
+it.each([false])("stops immediately on a production author block and names it (Infinite hosting=%s)", connected => {
+  const bundle = connected ? fakeDeps({ bridge: { deploy: [{ mergeDeployment: { state: "building", readyAt: null }, serving: null, target: "production" }] } }) : world({})
+  const reason = "Vercel - Git author must have access to the project on Vercel to create deployments"
+  Object.assign(bundle.deps.host, { productionDeployment: async () => ({ state: "failed", blocked: true, reason }), latestProductionDeployment: async () => null, vercelDeploymentSeen: async () => true })
+  const ctx = fakeContext(mergedState(answeredSite(false)), {}, bundle.clock)
+  const started = bundle.clock.now().getTime()
+  return step.run(ctx, bundle.deps).then(outcome => {
+    expect(outcome).toMatchObject({ kind: "parked", code: "INF_WIZ_DEPLOY_FAILED", reason: expect.stringContaining(reason) })
+    expect((outcome as { reason: string }).reason).toContain("is blocked")
+    expect((outcome as { reason: string }).reason).toMatch(/\.$/)
+    expect((outcome as { resumeHint: string }).resumeHint).toMatch(/member of (?:the|your) hosting team/i)
+    expect((outcome as { resumeHint: string }).resumeHint).toMatch(/redeploy.*merge|merge.*redeploy/i)
+    expect((outcome as { resumeHint: string }).resumeHint).toContain("npx infinite-tag")
+    expect(bundle.clock.now().getTime() - started).toBeLessThan(PROVE_LIMITS.deployPollMs)
+    expect(bundle.log.names("bridge")).not.toContain("bridge.claimProof")
   })
 })

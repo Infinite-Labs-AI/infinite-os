@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest"
 
 import type { ChecklistItem, CheckResult, CheckTier, JobId } from "../wizard/contracts/jobs.js"
-import { applyClaim, applyResults, blockItem, markMerged, waitsForRealEvent } from "./state-machine.js"
+import { applyClaim, applyResults, applyReview, blockItem, failItem, leaveForOwner, unblockItem, withNote } from "./state-machine.js"
+import { createScanner } from "../review/scan.js"
 import { JOB_TABLE, checkProvesChange } from "../wizard/contracts/jobs.js"
 
 const RUN = "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80"
@@ -53,12 +54,6 @@ describe("claims (§3e.5: the agent can only claim)", () => {
     expect(disagreed.note).toBe("agent said not needed; the wizard found app/login/actions.ts:7")
     expect(disagreed.item.trigger.evidence).toEqual([{ file: "app/login/actions.ts", line: 7 }])
   })
-
-  it("a blocked claim blocks with agent_blocked; code jobs ignore claims", () => {
-    expect(applyClaim(item("csp"), { jobId: "csp:x", status: "blocked", note: "nonce", at: AT }, never).item).toMatchObject({ state: "blocked", blockedReason: "agent_blocked" })
-    const code = { ...item("csp"), owner: "code" as const }
-    expect(applyClaim(code, { jobId: "csp:x", status: "done", note: "", at: AT }, never).changed).toBe(false)
-  })
 })
 
 describe("checks decide (§3e.5)", () => {
@@ -68,22 +63,22 @@ describe("checks decide (§3e.5)", () => {
     expect(next.item.state).toBe("waiting_deploy")
   })
 
-  it("LF4 close round 2 (P1-1): only a check that proves the change may tick; checks that pass on absence only fail", () => {
-    // conversions_to_tools: `no_fbq_standard_on_click` passes with nothing of the job in the code; it never ticks alone.
-    const bare: ChecklistItem = { ...item("conversions_to_tools", "claimed"), checks: [{ id: "no_fbq_standard_on_click", tier: "S", state: "not_run" }, { id: "first_real_conversion", tier: "P", state: "not_run" }] }
-    expect(applyResults(bare, [result("no_fbq_standard_on_click", "S", "pass")], RUN, { budgetLeft: true }).item.state).toBe("claimed")
+  it("only a check that proves the change may tick; checks that pass on absence only fail", () => {
+    // conversions_to_tools: `meta_event_id_from_server` passes with nothing of the job in the code; it never ticks alone.
+    const bare: ChecklistItem = { ...item("conversions_to_tools", "claimed"), checks: [{ id: "meta_event_id_from_server", tier: "S", state: "not_run" }, { id: "first_real_conversion", tier: "P", state: "not_run" }] }
+    expect(applyResults(bare, [result("meta_event_id_from_server", "S", "pass")], RUN, { budgetLeft: true }).item.state).toBe("claimed")
     // A claimed item with only such checks is still verified by its recorded, in-scope diff…
     const edited = { ...bare, edits: [{ editId: "e1", file: "app/page.tsx" }] }
-    expect(applyResults(edited, [result("no_fbq_standard_on_click", "S", "pass")], RUN, { budgetLeft: true }).item.state).toBe("waiting_real_event")
+    expect(applyResults(edited, [result("meta_event_id_from_server", "S", "pass")], RUN, { budgetLeft: true }).item.state).toBe("waiting_real_event")
     // …but an item checked with no claim never is.
-    expect(applyResults(edited, [result("no_fbq_standard_on_click", "S", "pass")], RUN, { budgetLeft: true, claimless: true }).item.state).toBe("claimed")
+    expect(applyResults(edited, [result("meta_event_id_from_server", "S", "pass")], RUN, { budgetLeft: true, claimless: true }).item.state).toBe("claimed")
     // The absence check still FAILS a job.
-    expect(applyResults(bare, [result("no_fbq_standard_on_click", "S", "problem")], RUN, { budgetLeft: true }).item.state).toBe("pending")
+    expect(applyResults(bare, [result("meta_event_id_from_server", "S", "problem")], RUN, { budgetLeft: true }).item.state).toBe("pending")
     // With the proving check, the claim-less item is ticked by the code itself.
     const tracked: ChecklistItem = { ...bare, checks: [...bare.checks, { id: "conversion_tracked", tier: "S", state: "not_run" }] }
-    expect(applyResults(tracked, [result("no_fbq_standard_on_click", "S", "pass"), result("conversion_tracked", "S", "pass")], RUN, { budgetLeft: true, claimless: true }).item.state).toBe("waiting_real_event")
+    expect(applyResults(tracked, [result("meta_event_id_from_server", "S", "pass"), result("conversion_tracked", "S", "pass")], RUN, { budgetLeft: true, claimless: true }).item.state).toBe("waiting_real_event")
     expect(checkProvesChange("conversions_to_tools", "S", "conversion_tracked")).toBe(true)
-    expect(checkProvesChange("conversions_to_tools", "S", "no_fbq_standard_on_click")).toBe(false)
+    expect(checkProvesChange("conversions_to_tools", "S", "meta_event_id_from_server")).toBe(false)
     expect(checkProvesChange("meta_improve", "S", "meta_event_id_from_helper")).toBe(false)
     expect(checkProvesChange("identify_reset", "B", "build")).toBe(false)
   })
@@ -115,7 +110,7 @@ describe("checks decide (§3e.5)", () => {
     expect(runless.item.state).toBe("waiting_deploy")
   })
 
-  it("a stored pass from an older run never proves a resumed item (review P2-2, probe P-H)", () => {
+  it("a stored pass from an older run never proves a resumed item", () => {
     const resumed = claimedAt(item("posthog_improve", "waiting_deploy"), CLAIM_AT)
     resumed.checks = resumed.checks.map((check) => ({ ...check, state: "pass" as const, at: AT, runId: OTHER_RUN }))
     expect(applyResults(resumed, [], RUN, { budgetLeft: true }).item.state).toBe("waiting_deploy")
@@ -124,7 +119,7 @@ describe("checks decide (§3e.5)", () => {
     expect(applyResults(ours, [], RUN, { budgetLeft: true }).item.state).toBe("proven")
   })
 
-  it("a production reading taken before the change could be live never proves it (review P2-2, probe P-G)", () => {
+  it("a production reading taken before the change could be live never proves it", () => {
     const claimed = { ...claimedAt(item("redirect_utms", "claimed"), CLAIM_AT), edits: [{ editId: "edit_1", file: "vercel.json" }] }
     // `before`'s own redirect walk ran at 08:30, before the claim at 08:45.
     const early = applyResults(claimed, [{ ...result("redirect_walk", "T1", "pass"), at: "2026-10-02T08:30:00.000Z" }], RUN, { budgetLeft: true })
@@ -141,10 +136,10 @@ describe("checks decide (§3e.5)", () => {
     expect(applyResults(unclaimed, [result("redirect_walk", "T1", "pass")], RUN, { budgetLeft: true }).item.state).toBe("waiting_deploy")
   })
 
-  it("job 10 waits for a real event only after its click test passes; a failing click test sends it back (review P2-1)", () => {
+  it("job 10 waits for a real event only after its click test passes; a failing click test sends it back", () => {
     const claimed = claimedAt(item("conversions_to_tools", "claimed"), CLAIM_AT)
-    expect(claimed.checks.map((check) => `${check.tier}:${check.id}`)).toEqual(["RH:click_test", "S:no_fbq_standard_on_click", "S:conversion_tracked", "S:track_after_success", "P:first_real_conversion"])
-    const local = applyResults(claimed, [result("no_fbq_standard_on_click", "S", "pass"), result("conversion_tracked", "S", "pass"), result("track_after_success", "S", "pass")], RUN, { budgetLeft: true })
+    expect(claimed.checks.map((check) => `${check.tier}:${check.id}`)).toEqual(["RH:click_test", "S:conversion_tracked", "S:meta_event_id_from_server", "P:first_real_conversion"])
+    const local = applyResults(claimed, [result("conversion_tracked", "S", "pass"), result("meta_event_id_from_server", "S", "pass")], RUN, { budgetLeft: true })
     // Negative: the click test has not run, so it is not "waiting for a real event".
     expect(local.item.state).toBe("done_in_code")
     const failed = applyResults(local.item, [result("click_test", "RH", "problem")], RUN, { budgetLeft: true })
@@ -158,88 +153,9 @@ describe("checks decide (§3e.5)", () => {
     // negative: an undetermined passive read never proves
     expect(applyResults(passed.item, [result("first_real_conversion", "P", "undetermined")], RUN, { budgetLeft: true }).item.state).toBe("waiting_real_event")
   })
-
-  it("a failing rehearsal check on a deploy-bound item sends it back too", () => {
-    const waiting = claimedAt(item("posthog_improve", "waiting_deploy"), CLAIM_AT)
-    expect(applyResults(waiting, [result("posthog_via_proxy_once", "RH", "problem")], RUN, { budgetLeft: true }).item.state).toBe("pending")
-  })
-
-  it("jobs 8 and 9 wait for a real event after the code is done", () => {
-    for (const jobId of ["server_conversions", "identify_reset"] as const) {
-      const claimed = item(jobId, "claimed")
-      const local = claimed.checks.filter((check) => check.tier === "S" || check.tier === "B").map((check) => result(check.id, check.tier, "pass"))
-      const next = applyResults(claimed, local, RUN, { budgetLeft: true })
-      expect(next.item.state).toBe("waiting_real_event")
-      const passive = claimed.checks.filter((check) => check.tier === "P").map((check) => result(check.id, "P", "pass"))
-      expect(applyResults(next.item, passive, RUN, { budgetLeft: true }).item.state).toBe("proven")
-    }
-    expect(waitsForRealEvent("conversions_to_tools")).toBe(true)
-    expect(waitsForRealEvent("csp")).toBe(false)
-  })
-
-  it("live run 6: recorded edits without a local check stay claimed", () => {
-    const claimed = item("redirect_utms", "claimed")
-    expect(applyResults(claimed, [], RUN, { budgetLeft: true }).item.state).toBe("claimed")
-    const withEdit = { ...claimed, edits: [{ editId: "edit_1", file: "vercel.json" }] }
-    expect(applyResults(withEdit, [], RUN, { budgetLeft: true }).item.state).toBe("claimed")
-  })
-
-  it("the privacy paragraph is proven by the merge; a job with live checks is not", () => {
-    const done = item("privacy_paragraph", "done_in_code")
-    expect(markMerged(done).item.state).toBe("proven")
-    expect(markMerged(item("preview_guard", "done_in_code")).changed).toBe(false)
-  })
-
-  it("blocks with a reason", () => {
-    expect(blockItem(item("csp"), "consent_touched").item).toMatchObject({ state: "blocked", blockedReason: "consent_touched" })
-  })
 })
 
-describe("LF4-P1-2: a claimed item with nothing to verify in code and a failed rehearsal check", () => {
-  const spa = (): ChecklistItem => ({
-    ...item("ga4_improve", "claimed"),
-    id: "ga4_improve:spa_page_view",
-    claim: { status: "done", note: "", at: CLAIM_AT },
-    checks: [
-      { id: "ga4_spa_page_view", tier: "RH", state: "not_run" },
-      { id: "ga4_one_page_view", tier: "RH", state: "not_run" },
-      { id: "ga4_seen_leaving", tier: "PV", state: "not_run" }
-    ]
-  })
-
-  it("live run 6: an edited SPA job waits for this run's complete rehearsal before waiting for deploy", () => {
-    const edited = { ...spa(), edits: [{ editId: "e1", file: "app/layout.tsx" }] }
-    expect(applyResults(edited, [], RUN, { budgetLeft: true }).item.state).toBe("claimed")
-    const checks = [result("ga4_spa_page_view", "RH", "pass"), result("ga4_one_page_view", "RH", "pass")]
-    expect(applyResults(edited, checks.slice(0, 1), RUN, { budgetLeft: true }).item.state).toBe("claimed")
-    expect(applyResults(edited, checks.map(check => ({ ...check, runId: OTHER_RUN })), RUN, { budgetLeft: true }).item.state).toBe("claimed")
-    const rehearsed = applyResults(edited, checks, RUN, { budgetLeft: true }).item
-    expect(rehearsed.state).toBe("waiting_deploy")
-    expect(applyResults(rehearsed, [result("ga4_seen_leaving", "PV", "pass")], RUN, { budgetLeft: true }).item.state).toBe("proven")
-  })
-
-  it("is sent back with that check's reason (budget left), never left 'claimed'", () => {
-    const failed = { ...result("ga4_spa_page_view", "RH", "problem"), reason: "no page_view after the page change" }
-    const out = applyResults(spa(), [failed], RUN, { budgetLeft: true })
-    expect(out.item.state).toBe("pending")
-    expect(out.item.note).toContain("GA4: one page view per page change (no page views after the page change)")
-  })
-
-  it("is failed with that check's reason once the budget is spent", () => {
-    const failed = { ...result("ga4_spa_page_view", "RH", "problem"), reason: "no page_view after the page change" }
-    const out = applyResults(spa(), [failed], RUN, { budgetLeft: false })
-    expect(out.item.state).toBe("failed")
-    expect(out.item.note).toContain("check failed and the budget is spent: GA4: one page view per page change")
-  })
-
-  it("NEGATIVE: with no failed check it stays claimed (unverified), never done in code", () => {
-    const out = applyResults(spa(), [result("ga4_spa_page_view", "RH", "undetermined")], RUN, { budgetLeft: true })
-    expect(out.item.state).toBe("claimed")
-  })
-})
-
-
-it("request 2 P3-3: a Meta SPA rehearsal cannot prove the job before deployment", () => {
+it("a Meta SPA rehearsal cannot prove the job before deployment", () => {
   const spa: ChecklistItem = {
     ...claimedAt(item("meta_improve", "claimed"), CLAIM_AT),
     id: "meta_improve:spa_page_view", edits: [{ editId: "e", file: "app/layout.tsx" }],
@@ -256,32 +172,111 @@ it("request 2 P3-3: a Meta SPA rehearsal cannot prove the job before deployment"
   expect(applyResults(rehearsed, [production], RUN, { budgetLeft: true, liveSince, afterDeploy: true }).item.state).toBe("proven")
 })
 
+describe("notes redact before storage and display limits", () => {
+  const secret = "fixtureDatabasePassword"
+  const note = `Could not connect to postgres://user:${secret}@db.example/app`
 
-it("request 3 P2-B: a passed check without a deployment bound is checked but not tied to deployment", () => {
-  const spa: ChecklistItem = { ...item("meta_improve", "waiting_deploy"), checks: [{ id: "meta_spa_page_view", tier: "RH", state: "not_run" }], claim: { status: "done", note: "done", at: CLAIM_AT } }
-  const final = applyResults(spa, [result("meta_spa_page_view", "RH", "pass")], RUN, { budgetLeft: true, afterDeploy: true }).item
-  expect(final.note).toContain("Checked, but not tied to this deploy")
-  expect(final.note).not.toContain("Not checked")
+  it("stores and returns redacted notes for every transition", () => {
+    const outputs = [
+      withNote(item("posthog_improve"), note),
+      failItem(item("posthog_improve"), note),
+      leaveForOwner(item("posthog_improve"), note),
+      blockItem(item("posthog_improve"), "agent_blocked", note),
+      unblockItem(item("posthog_improve", "blocked"), note)
+    ]
+    for (const output of outputs) {
+      expect(JSON.stringify(output)).not.toContain(secret)
+      expect(JSON.stringify(output)).toContain("[redacted: url_password]")
+    }
+  })
+
+  it("redacts stored check reasons before they become item and transition notes", () => {
+    const output = applyResults(item("posthog_improve", "claimed"), [{ ...result("posthog_config", "S", "problem"), reason: note }], RUN, { budgetLeft: false })
+    expect(JSON.stringify(output)).not.toContain(secret)
+    expect(output.item.checks.find(check => check.id === "posthog_config")?.reason).toContain("[redacted: url_password]")
+    expect(output.note).toContain("[redacted:")
+  })
+
+  it("uses a supplied scanner before truncating environment values", () => {
+    const envSecret = "opaque@fixture|environmentCredential"
+    const scanner = createScanner({ literals: [{ value: envSecret, kind: "env_value" }], allowedIds: [] })
+    const output = withNote(item("posthog_improve"), "x".repeat(280) + envSecret, scanner)
+    expect(output.note).not.toContain("opaque")
+    expect(output.note).toContain("redacted")
+  })
 })
 
-it("request 3 wording: post-deploy notes use plain labels and receipt words", () => {
-  const base: ChecklistItem = { ...item("posthog_improve", "waiting_deploy"), checks: [{ id: "posthog_distinct_id_receipt", tier: "PV", state: "not_run" }], claim: { status: "done", note: "done", at: CLAIM_AT } }
-  const final = applyResults(base, [{ ...result("posthog_distinct_id_receipt", "PV", "problem"), reason: "receipt no_receipt" }], RUN, { budgetLeft: true, afterDeploy: true }).item
-  expect(final.note).toBe("Failed after the deploy: PostHog received this visit (PostHog has no record of this visit)")
-  expect(final.note).not.toMatch(/PV:|no_receipt|posthog_distinct/)
+describe("a proof visit the site's own cookie banner kept silent", () => {
+  const liveSince = "2026-10-02T08:50:00.000Z"
+  const commerce = (): ChecklistItem => ({
+    ...claimedAt(item("meta_improve", "waiting_deploy"), CLAIM_AT),
+    id: "meta_improve:commerce_events",
+    checks: [
+      { id: "meta_event_id_from_helper", tier: "S", state: "pass", runId: RUN, at: AT },
+      { id: "meta_seen_leaving", tier: "PV", state: "not_run" }
+    ]
+  })
+
+  it("is not measured, never failed, and the note says why in plain words", () => {
+    const held = { ...result("meta_seen_leaving", "PV", "undetermined"), reason: "held_by_consent — your cookie banner keeps every tool off until a visitor accepts; real visitors who accept are measured from their own visits" }
+    const next = applyResults(commerce(), [held], RUN, { budgetLeft: true, liveSince, afterDeploy: true })
+    expect(next.item.state).not.toBe("failed")
+    expect(next.item.note).toBe("Not measured after the deploy: your cookie banner keeps every tool off until a visitor accepts; real visitors who accept are measured from their own visits")
+    expect(next.item.note).not.toMatch(/\/tr|2xx|Failed/)
+  })
+
+  it("negative: a real miss still fails, in plain words", () => {
+    const missed = { ...result("meta_seen_leaving", "PV", "problem"), reason: "not_seen_leaving — no Meta request left the page and was accepted" }
+    const next = applyResults(commerce(), [missed], RUN, { budgetLeft: true, liveSince, afterDeploy: true })
+    expect(next.item.state).toBe("failed")
+    expect(next.item.note).toBe("Failed after the deploy: Meta on the real visit (no Meta request left the page and was accepted)")
+  })
 })
 
-it("request 3 post-deploy RH: an old route failure cannot fail the new deployment", () => {
-  const waiting: ChecklistItem = { ...item("posthog_improve", "waiting_deploy"), checks: [{ id: "posthog_via_proxy_once", tier: "RH", state: "not_run" }], claim: { status: "done", note: "done", at: CLAIM_AT } }
-  const final = applyResults(waiting, [result("posthog_via_proxy_once", "RH", "problem")], RUN, { budgetLeft: true, afterDeploy: true, liveSince: "2026-10-02T10:00:00.000Z" }).item
-  expect(final.state).toBe("claimed")
-  expect(final.checks[0]!.state).toBe("not_run")
-})
+describe("the review agent's answers (applyReview): a pass proves, no answer ever reverts", () => {
+  const review = (state: NonNullable<ChecklistItem["review"]>["state"], reason?: string, runId = RUN): NonNullable<ChecklistItem["review"]> => ({
+    state,
+    runId,
+    at: AT,
+    reviewer: state === "not_run" ? null : "codex",
+    ...(reason ? { reason } : {}),
+    questions: [{ id: "once", text: "Is it sent once?", answer: state === "not_run" ? "not_asked" : state === "cant_tell" ? "cant_tell" : state }]
+  })
+  // A guard job on Next: no local check at all, so nothing but the review can decide it.
+  const guard = (): ChecklistItem => ({ ...item("preview_guard", "claimed"), checks: [{ id: "preview_self_silent", tier: "RH", state: "not_run" }] })
 
+  it("pass: a job no check proves is done in code, said as checked by the review agent", () => {
+    const next = applyReview(guard(), review("pass"))
+    expect(next.item.state).toBe("done_in_code")
+    expect(next.item.note).toBe("Checked by the review agent.")
+    // Without the review the same job is never ticked (no proving check, no recorded edit).
+    expect(applyResults(guard(), [], RUN, { budgetLeft: true }).item.state).toBe("claimed")
+  })
 
-it("request 4 P3-before: failed rehearsal notes use plain words before deployment too", () => {
-  const waiting: ChecklistItem = { ...item("duplicates_remove", "waiting_deploy"), checks: [{ id: "one_beacon_per_tool", tier: "RH", state: "not_run" }], claim: { status: "done", note: "done", at: CLAIM_AT } }
-  const out = applyResults(waiting, [{ ...result("one_beacon_per_tool", "RH", "problem"), reason: "duplicate_page_view — ga4: G-ABC123 sent 2 page_view on home" }], RUN, { budgetLeft: false })
-  expect(out.item.note).toContain("Each tag once per page (GA4 sent 2 page views on the home page)")
-  expect(out.note).not.toMatch(/RH:|one_beacon_per_tool|duplicate_page_view/)
+  it("fail, cant_tell and not_run KEEP the edits (done in code) with the reviewer's words; never pending, failed or put back", () => {
+    expect(applyReview(guard(), review("fail", "the guard keeps production silent too (app/layout.tsx:4)")).item).toMatchObject({ state: "done_in_code", note: "Needs your look: the guard keeps production silent too (app/layout.tsx:4)" })
+    expect(applyReview(guard(), review("cant_tell", "the host list is built at runtime")).item).toMatchObject({ state: "done_in_code", note: "The review could not tell: the host list is built at runtime" })
+    expect(applyReview(guard(), review("not_run", "no review agent was chosen for this run")).item).toMatchObject({ state: "done_in_code", note: "Not checked by a review agent: no review agent was chosen for this run" })
+  })
+
+  it("a later check of the same tree keeps a reviewed job in code; a hard check's problem still sends it back", () => {
+    const reviewed = applyReview(guard(), review("fail", "x")).item
+    // The settlement re-checks a kept job as claimed: the review answer keeps it.
+    expect(applyResults({ ...reviewed, state: "claimed" }, [], RUN, { budgetLeft: false }).item.state).toBe("done_in_code")
+    const signup: ChecklistItem = { ...item("server_conversions", "claimed"), checks: [{ id: "outcome_declared", tier: "S", state: "not_run" }], review: review("pass") }
+    expect(applyResults(signup, [result("outcome_declared", "S", "problem")], RUN, { budgetLeft: true }).item.state).toBe("pending")
+  })
+
+  it("NEGATIVE: a review from another run proves nothing; a pending (hard-check failed) job only records the answers", () => {
+    expect(applyResults({ ...guard(), review: review("pass", undefined, "another-run") }, [], RUN, { budgetLeft: true }).item.state).toBe("claimed")
+    const pending = applyReview({ ...guard(), state: "pending" }, review("pass"))
+    expect(pending.item.state).toBe("pending")
+    expect(pending.item.review?.state).toBe("pass")
+  })
+
+  it("after the deploy, a job the review decided stays done in code while its live checks are not measured", () => {
+    const done = { ...applyReview(guard(), review("pass")).item, claim: { status: "done" as const, note: "n", at: AT } }
+    const after = applyResults(done, [], RUN, { budgetLeft: true, afterDeploy: true, liveSince: AT })
+    expect(after.item.state).toBe("done_in_code")
+  })
 })

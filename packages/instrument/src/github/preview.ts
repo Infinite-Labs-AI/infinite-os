@@ -3,6 +3,7 @@
 // `vercel[bot]` whose environment starts with `Preview`, then the first `success` status's
 // `environment_url`. A monorepo with several Vercel projects has one Preview deployment per project: pick
 // the one whose environment or URL names the linked project; when that cannot be told, none (never a guess).
+import { blockedPreview } from "./checks.js"
 import type { GhClient } from "./gh.js"
 
 export interface RawDeployment {
@@ -14,8 +15,65 @@ export interface RawDeployment {
 
 export interface RawDeploymentStatus {
   state?: string
+  description?: string | null
   environment_url?: string | null
   created_at?: string
+}
+
+export interface PreviewFailure { reason: string; blocked: boolean }
+
+/** A terminal failure of this SHA's Vercel preview, including the dashboard's blocked-deployment reason. */
+export async function previewFailureForSha(gh: GhClient, sha: string, projectName: string | null): Promise<PreviewFailure | null> {
+  if (!/^[0-9a-f]{40}$/.test(sha)) throw new Error("previewFailureForSha needs a full SHA")
+  const deployments = await gh.json<RawDeployment[]>(["api", `repos/{owner}/{repo}/deployments?sha=${sha}&per_page=20`])
+  const previews = deployments.filter(isVercelPreviewDeployment)
+  const attempts: Array<{ deployment: RawDeployment; latest: RawDeploymentStatus | undefined; index: number }> = []
+  for (const [index, deployment] of previews.entries()) {
+    const statuses = await gh.json<RawDeploymentStatus[]>(["api", `repos/{owner}/{repo}/deployments/${deployment.id}/statuses?per_page=20`])
+    attempts.push({ deployment, latest: statuses.find((status) => status.state !== "inactive"), index })
+  }
+  const candidates = attempts.length === 1 && (!projectName || matchesProject(attempts[0]!.deployment, attempts[0]!.latest?.environment_url ?? null, projectName)) ? attempts : projectName
+    ? attempts.filter(({ deployment, latest }) => matchesProject(deployment, latest?.environment_url ?? null, projectName))
+    : []
+  const newest = [...candidates].sort((a, b) => (Date.parse(b.deployment.created_at ?? "") || 0) - (Date.parse(a.deployment.created_at ?? "") || 0) || a.index - b.index)[0]
+  if (newest) {
+    const latest = newest.latest
+    if (latest && ["failure", "error", "cancelled", "canceled", "blocked"].includes(latest.state ?? "")) {
+      const reason = latest.description?.trim() || (latest.state === "blocked" ? "Vercel preview deployment blocked" : "Vercel preview deployment failed")
+      // GitHub failure/error are coarse outcomes: its REST enum has no access-block state.
+      // Use the exact known hosting phrases only for those outcomes; preserve any specific state.
+      // https://docs.github.com/en/rest/deployments/statuses#create-a-deployment-status
+      const deploymentState = latest.state === "failure" || latest.state === "error" ? undefined : latest.state
+      return { reason, blocked: blockedPreview({ name: "Vercel", bucket: "fail", state: latest.state!, deploymentState, description: reason }) }
+    }
+  }
+  // A commit status can fail before GitHub publishes a deployment row.
+  return previews.length === 0 ? commitHostingFailureForSha(gh, sha, projectName) : null
+}
+
+/** Also covers author access refusals before a production deployment row is created. */
+export async function commitHostingFailureForSha(gh: GhClient, sha: string, projectName: string | null): Promise<PreviewFailure | null> {
+  const combined = await gh.json<{ statuses?: Array<{ context?: string; state?: string; description?: string | null; target_url?: string | null }> }>(["api", `repos/{owner}/{repo}/commits/${sha}/status`]).catch(() => null)
+  const vercel = combined?.statuses?.filter(status => /^vercel(?:\b|:)/i.test(status.context ?? "")) ?? []
+  const failed = vercel.find((status) => {
+    const context = status.context ?? ""
+    if (!["failure", "error"].includes(status.state ?? "")) return false
+    if (!projectName) return vercel.length === 1 && /^vercel$/i.test(context)
+    const project = slugOf(projectName)
+    if (new RegExp(`^vercel\\s*[-–:]\\s*${project}$`, "i").test(context)) return true
+    // Single-project integrations use the bare context; the dashboard URL still identifies the project.
+    if (!/^vercel$/i.test(context)) return false
+    try {
+      const url = new URL(status.target_url ?? "")
+      return url.protocol === "https:" && ["vercel.com", "www.vercel.com"].includes(url.hostname) && url.pathname.split("/").filter(Boolean)[1] === project
+    } catch { return false }
+  })
+  if (failed) {
+    const reason = failed.description?.trim() || "Vercel deployment failed"
+    // Commit failure/error states do not describe deployment access. Use only the shared exact phrases.
+    return { reason, blocked: blockedPreview({ name: "Vercel", bucket: "fail", state: failed.state!, description: reason }) }
+  }
+  return null
 }
 
 export function isVercelPreviewDeployment(deployment: RawDeployment): boolean {
@@ -62,16 +120,16 @@ export async function previewUrlForSha(gh: GhClient, sha: string, projectName: s
   if (!/^[0-9a-f]{40}$/.test(sha)) throw new Error("previewUrlForSha needs a full SHA")
   const deployments = await gh.json<RawDeployment[]>(["api", `repos/{owner}/{repo}/deployments?sha=${sha}&per_page=20`])
   const previews = deployments.filter(isVercelPreviewDeployment)
-  const ready: Array<{ deployment: RawDeployment; url: string }> = []
-  for (const deployment of previews) {
+  const attempts: Array<{ deployment: RawDeployment; latest: RawDeploymentStatus | undefined; index: number }> = []
+  for (const [index, deployment] of previews.entries()) {
     const statuses = await gh.json<RawDeploymentStatus[]>(["api", `repos/{owner}/{repo}/deployments/${deployment.id}/statuses?per_page=20`])
-    const success = statuses.find((status) => status.state === "success" && isUsablePreviewUrl(status.environment_url))
-    if (success && isUsablePreviewUrl(success.environment_url)) ready.push({ deployment, url: success.environment_url })
+    attempts.push({ deployment, latest: statuses.find((status) => status.state !== "inactive"), index })
   }
-  if (ready.length === 0) return null
-  // One Vercel project: its preview. Several: only the linked project's, and only when exactly one matches.
-  if (previews.length === 1) return ready[0]!.url
-  if (projectName === null) return null
-  const matched = ready.filter((candidate) => matchesProject(candidate.deployment, candidate.url, projectName))
-  return matched.length === 1 ? matched[0]!.url : null
+  // Several explicitly named rows can be retries of one project. A generic Preview row alongside
+  // another candidate still cannot establish project identity from a hostname prefix alone.
+  const candidates = previews.length === 1 ? attempts : projectName === null ? [] : attempts.filter(({ deployment, latest }) => matchesProject(deployment, latest?.environment_url ?? null, projectName))
+  const environments = new Set(candidates.map(({ deployment }) => deployment.environment?.toLowerCase()))
+  if (candidates.length > 1 && (environments.size !== 1 || (environments.has("preview") && candidates.length !== attempts.length))) return null
+  const newest = [...candidates].sort((a, b) => (Date.parse(b.deployment.created_at ?? "") || 0) - (Date.parse(a.deployment.created_at ?? "") || 0) || a.index - b.index)[0]
+  return newest?.latest?.state === "success" && isUsablePreviewUrl(newest.latest.environment_url) ? newest.latest.environment_url : null
 }

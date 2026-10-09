@@ -7,7 +7,7 @@ import { dirname, join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
 
 import { scanForJobs } from "./detectors/index.js"
-import { loadRepoSnapshot, packageFactsFrom } from "./repo-files.js"
+import { loadRepoSnapshot } from "./repo-files.js"
 
 const dirs: string[] = []
 afterEach(() => {
@@ -79,9 +79,14 @@ describe("loadRepoSnapshot", () => {
     const scan = scanForJobs({ root, appRoot: ".", framework: "next-app-router", packageManager: "npm", fileCount: 1, truncated: false })
     expect(scan.detections.outcomes.map((finding) => [finding.file, finding.kind])).toEqual([["app/api/signup/route.ts", "signup"]])
   })
+})
 
-  it("ignores a package.json that is not an object", () => {
-    expect(packageFactsFrom(".", "[1,2]")).toBeNull()
-    expect(packageFactsFrom(".", "not json")).toBeNull()
+it("loads Markdown and template page sources in the bounded snapshot", () => {
+  const root = repo({
+    "app/terms/page.mdx": 'import Body from "../../components/Body"; export default Body',
+    "app/about/page.mdx": 'import Body from "../../components/Body"; export default Body',
+    "components/Body.tsx": "export default function Body() { return <p>Shared</p> }",
+    "templates/privacy.njk": "---\npermalink: /privacy/\n---\nPolicy text",
   })
+  expect([...loadRepoSnapshot(root, ".").files.keys()]).toEqual(["app/about/page.mdx", "app/terms/page.mdx", "components/Body.tsx", "templates/privacy.njk"])
 })

@@ -8,12 +8,14 @@
 //   every detected CMP / banner file, and any hunk touching a consent call or a CMP API.
 // - No v1 job deletes a file; a deletion is refused.
 // - New files are allowed only where a job lists them in `create`.
+import { isConsentText as isConsentLine } from "./consent-units.js"
+import { isPolicyPath } from "./owner-boundary.js"
 import { GLOBAL_DENY_GLOBS } from "../wizard/contracts/jobs.js"
 import { firstMatchingGlob } from "./glob.js"
 
 /** The global deny as one sentence, for the briefs. */
 export const GLOBAL_DENY_TEXT =
-  "Never touch .git, any .env file, a lockfile, package.json, .infinite, .claude, .codex, build output or node_modules, or a cookie-banner / consent-manager file. No file is ever deleted."
+  "Never touch .git, any .env file, a lockfile, package.json, .infinite, .claude, .codex, build output or node_modules, or a cookie-banner / consent-manager file, privacy policy or terms page. No file is ever deleted."
 
 /** Normalises a repo-relative path, or null when it is absolute, escapes the repo or is empty. */
 export function normalizeRepoPath(path: string): string | null {
@@ -28,12 +30,13 @@ export function normalizeRepoPath(path: string): string | null {
   return segments.length === 0 ? null : segments.join("/")
 }
 
-export type DenyReason = { kind: "global_deny"; glob: string } | { kind: "cmp_file" } | { kind: "invalid_path" }
+export type DenyReason = { kind: "global_deny"; glob: string } | { kind: "cmp_file" } | { kind: "invalid_path" } | { kind: "policy_file" }
 
 /** Why a path may never be touched by any agent job, or null when the global deny does not cover it. */
-export function globalDenyReason(path: string, cmpFiles: readonly string[]): DenyReason | null {
+export function globalDenyReason(path: string, cmpFiles: readonly string[], appRoot = "."): DenyReason | null {
   const normalized = normalizeRepoPath(path)
   if (normalized === null) return { kind: "invalid_path" }
+  if (isPolicyPath(normalized, appRoot)) return { kind: "policy_file" }
   const glob = firstMatchingGlob(normalized, GLOBAL_DENY_GLOBS)
   if (glob !== null) return { kind: "global_deny", glob }
   if (cmpFiles.includes(normalized)) return { kind: "cmp_file" }
@@ -44,30 +47,8 @@ export function globalDenyReason(path: string, cmpFiles: readonly string[]): Den
  * Consent calls and CMP APIs. Any added or removed line matching one makes the hunk a consent hunk: the
  * fence reverts it and the job is `blocked:consent_touched`. Infinite never changes consent wiring.
  */
-export const CONSENT_CALL_PATTERNS: readonly RegExp[] = [
-  /\bgtag\s*\(\s*["'`]consent["'`]/,
-  /\bdataLayer\s*\.\s*push\s*\(\s*\[?\s*["'`]consent["'`]/,
-  /\bfbq\s*\(\s*["'`]consent["'`]/,
-  /\b__tcfapi\s*\(/,
-  /\b__cmp\s*\(/,
-  /\b__uspapi\s*\(/,
-  /\b__gpp\s*\(/,
-  /\bOneTrust\s*\./,
-  /\bOptanon\w*/,
-  /\bCookiebot\s*\./,
-  /\bCookieConsent\s*\./,
-  /\bUC_UI\s*\./,
-  /\bDidomi\w*\s*\./,
-  /\bposthog\s*\.\s*(?:opt_in_capturing|opt_out_capturing|has_opted_in_capturing|has_opted_out_capturing|clear_opt_in_out_capturing)\b/,
-  /\bINFINITE_CONSENT_STORAGE_KEY\b/,
-  /\blocalStorage\s*\.\s*(?:setItem|removeItem)\s*\([^)]*consent/i,
-  /cdn\.cookielaw\.org|otSDKStub\.js|consent\.cookiebot\.com|usercentrics\.eu/
-]
-
-/** True when the line is a consent call / CMP API use. */
-export function isConsentLine(text: string): boolean {
-  return CONSENT_CALL_PATTERNS.some((pattern) => pattern.test(text))
-}
+export { CONSENT_CALL_PATTERNS } from "./consent-units.js"
+export { isConsentText as isConsentLine } from "./consent-units.js"
 
 /** True when any line of the hunk (added or removed) touches consent. */
 export function touchesConsent(lines: ReadonlyArray<string>): boolean {
@@ -83,13 +64,13 @@ export interface AllowSpec {
  * Builds a job's allowlist from candidate paths: normalised, de-duplicated, sorted, and with every
  * globally denied path (and every CMP file) REMOVED, so a list can never include one.
  */
-export function buildAllow(files: readonly string[], create: readonly string[], cmpFiles: readonly string[]): AllowSpec {
+export function buildAllow(files: readonly string[], create: readonly string[], cmpFiles: readonly string[], appRoot = "."): AllowSpec {
   const clean = (paths: readonly string[]): string[] => {
     const out = new Set<string>()
     for (const path of paths) {
       const normalized = normalizeRepoPath(path)
       if (normalized === null) continue
-      if (globalDenyReason(normalized, cmpFiles) !== null) continue
+      if (globalDenyReason(normalized, cmpFiles, appRoot) !== null) continue
       out.add(normalized)
     }
     return [...out].sort()
@@ -109,10 +90,10 @@ export type EditVerdict =
  * Whether one edit is inside an item's allowlist (§3e.2). The global deny wins over the job's own list;
  * no v1 job deletes a file; a new file must be listed in `create`.
  */
-export function checkEdit(allow: AllowSpec, path: string, kind: EditKind, cmpFiles: readonly string[]): EditVerdict {
+export function checkEdit(allow: AllowSpec, path: string, kind: EditKind, cmpFiles: readonly string[], appRoot = "."): EditVerdict {
   const normalized = normalizeRepoPath(path)
   if (normalized === null) return { ok: false, reason: "denied", path, deny: { kind: "invalid_path" } }
-  const deny = globalDenyReason(normalized, cmpFiles)
+  const deny = globalDenyReason(normalized, cmpFiles, appRoot)
   if (deny !== null) return { ok: false, reason: "denied", path: normalized, deny }
   if (kind === "delete") return { ok: false, reason: "deletion_refused", path: normalized }
   if (kind === "create") {
@@ -122,10 +103,11 @@ export function checkEdit(allow: AllowSpec, path: string, kind: EditKind, cmpFil
 }
 
 /** The union of several allowlists (job 15 `build_fix` and job 16 `review_comments` use the run's union). */
-export function unionAllow(specs: readonly AllowSpec[], cmpFiles: readonly string[]): AllowSpec {
+export function unionAllow(specs: readonly AllowSpec[], cmpFiles: readonly string[], appRoot = "."): AllowSpec {
   return buildAllow(
     specs.flatMap((spec) => spec.files),
     specs.flatMap((spec) => spec.create),
-    cmpFiles
+    cmpFiles,
+    appRoot
   )
 }

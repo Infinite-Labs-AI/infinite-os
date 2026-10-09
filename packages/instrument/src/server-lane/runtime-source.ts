@@ -1,10 +1,12 @@
 // The generated Next.js server-lane code, as source text.
 //
-// Two files ship into a Next.js project:
+// Three files ship into a Next.js project:
 //   1. lib/infinite-server-lane.ts — the managed module (WebCrypto, Edge-safe): the document
-//      request recorder, the middleware wrapper, and the outcome sender.
+//      request recorder and the middleware wrapper.
 //   2. middleware.ts (or proxy.ts / src/…) — created when absent, or patched with a fenced block
 //      that wraps the customer's existing middleware. See middleware-patch.ts.
+//   3. lib/infinite-outcome.<ts|js|mjs> — the SAME outcome helper every other target ships
+//      (targets/outcome-helper.ts): reportInfiniteOutcome, adMatchFromRequest, personMatch, …
 //
 // Everything that is a contract value (URL, header names, env names, bucket size, bot list, skip
 // prefixes) is interpolated from helpers.ts / workspace-artifacts.ts so it cannot drift from the
@@ -66,7 +68,7 @@ export function buildServerLaneModuleSource(input: ServerLaneModuleInput = {}): 
     (input.productionHosts ?? []).map((host) => host.trim().toLowerCase().replace(/\.$/, "")).filter(Boolean)
   )
   return String.raw`${managedFileBanner}
-// Infinite server lane — lossless document + outcome analytics.
+// Infinite server lane — lossless document analytics. Outcomes: lib/infinite-outcome (reportInfiniteOutcome).
 // Secrets come from the environment only; infinite-tag never writes them here.
 //   ${SERVER_LANE_SECRET_ENV}  the source's server-event secret (Infinite → Site Analytics → Settings → Conversions → Server events)
 //   ${SERVER_LANE_SOURCE_KEY_ENV}      the public site source key (falls back to the value baked below)
@@ -83,39 +85,17 @@ const AUTOMATION_USER_AGENT = /${AUTOMATION_USER_AGENT_PATTERN.source}/i
 const NON_DOCUMENT_PREFIXES = ${jsStringArray([...NON_DOCUMENT_PATH_PREFIXES])}
 const REFERRER_HOST = /${REFERRER_HOST_PATTERN.source}/
 
-type MiddlewareLike = (request: NextRequest, event: NextFetchEvent) => unknown
-type WaitUntilLike = { waitUntil?: (promise: Promise<unknown>) => void } | undefined
-
-export interface InfiniteServerEventInput {
-  /** The exact outcome name from Infinite → Conversions (e.g. "sign_up", "purchase", "download"). */
-  eventName: string
-  /** Stable per-outcome id (order id, signup id) so retries dedupe. Defaults to a random UUID. */
-  eventId?: string
-  occurredAt?: Date
-  /** Opaque account identifier for account-deduped outcomes; hashed at rest by Infinite. */
-  accountKey?: string
-  properties?: Record<string, string | number | boolean>
-  /**
-   * OPTIONAL ad-match block, for founders who run Meta ads and have no PostHog. When the relay is
-   * on in Infinite, this outcome is forwarded to Meta's Conversions API and the block is then
-   * DISCARDED - never stored. YOUR server hashes: em and external_id are sha256 hex
-   * (crypto.subtle / node:crypto), so a raw email never leaves this process. fbc and fbp are
-   * Meta's own first-party cookies on your domain.
-   */
-  adMatch?: { em?: string; fbc?: string; fbp?: string; external_id?: string }
-  /** Pass the incoming request (or its headers) so the outcome carries the same visitKey as the page view. */
-  request?: { headers: Headers }
-}
+type WaitUntilLike = { waitUntil?: NextFetchEvent["waitUntil"] } | undefined
 
 /**
  * Wrap a Next.js middleware (or none) so every HTML document request is recorded before the
  * wrapped handler runs. Recording is fire-and-forget via event.waitUntil and can never throw
  * into the request path.
  */
-export function ${SERVER_LANE_WRAPPER_EXPORT}<Handler extends MiddlewareLike>(handler?: Handler) {
+export function ${SERVER_LANE_WRAPPER_EXPORT}<Handler>(handler?: Handler) {
   return function infiniteServerLaneMiddleware(request: NextRequest, event: NextFetchEvent) {
     recordInfiniteDocumentRequest(request, event)
-    return handler ? handler(request, event) : NextResponse.next()
+    return typeof handler === "function" ? handler(request, event) : NextResponse.next()
   }
 }
 
@@ -131,34 +111,6 @@ export function recordInfiniteDocumentRequest(request: NextRequest, event?: Wait
     if (event && typeof event.waitUntil === "function") event.waitUntil(task)
   } catch {
     // The lane never affects the response.
-  }
-}
-
-/**
- * Report an outcome (sign-up completed, purchase, download served) from a route handler, server
- * action, or webhook. Resolves true when Infinite acknowledged it; never throws.
- */
-export async function sendInfiniteServerEvent(input: InfiniteServerEventInput): Promise<boolean> {
-  try {
-    const secret = process.env.${SERVER_LANE_SECRET_ENV}
-    if (!secret || !SOURCE_KEY) return false
-    const properties: Record<string, string | number | boolean> = { ...(input.properties ?? {}) }
-    if (input.request && properties.visitKey === undefined) {
-      const visitKey = await infiniteVisitKey(input.request.headers, secret)
-      if (visitKey) properties.visitKey = visitKey
-    }
-    const event = {
-      eventId: input.eventId ?? crypto.randomUUID(),
-      eventName: input.eventName,
-      occurredAt: (input.occurredAt ?? new Date()).toISOString(),
-      ...(input.accountKey ? { accountKey: input.accountKey } : {}),
-      properties,
-      // Inside the SIGNED body: nobody without the secret can inject a match block.
-      ...(input.adMatch ? { adMatch: input.adMatch } : {})
-    }
-    return await postSigned(secret, JSON.stringify(event))
-  } catch {
-    return false
   }
 }
 

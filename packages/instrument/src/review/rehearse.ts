@@ -1,3 +1,5 @@
+import { normalizeEventName } from "../scan/event-inventory.js"
+import { withheldPreviewTools, previewScope } from "./preview-scope.js"
 // The rehearsal (lane O4, §3d.1 step 8, §3h): the PR head's Vercel preview loaded UNDER THE PRODUCTION
 // HOSTNAME in the desktop's hidden window (`rehearsal` mode: every beacon recorded and cancelled, nothing sent),
 // plus a `dry_live` load of the preview's OWN URL (`preview_self`: guarded tools must stay silent there). The
@@ -28,7 +30,7 @@ import { GhError } from "../github/gh.js"
 import { isGitHubAdapter } from "../hosts/github.js"
 import { isUnsupported } from "../hosts/other.js"
 import { checksPassingCell } from "../wizard/report.js"
-import type { TagKeys } from "../wizard/contracts/bridge.js"
+import { SITE_PROOF_PATH, type TagKeys } from "../wizard/contracts/bridge.js"
 import type { RunFacts } from "./context.js"
 import { derivedInPrCells, ga4KeyEventCells, preMergeCells } from "./in-pr-cells.js"
 import { bridgeErrorCode, bridgeStopCode, sub } from "./context.js"
@@ -48,6 +50,8 @@ export type RehearsalUndetermined =
   | "preview_refused"
   | "preview_protected"
   | "no_preview"
+  | "preview_blocked"
+  | "preview_failed"
   | "no_production_host"
   | "not_github"
   | "gh_unavailable"
@@ -94,6 +98,58 @@ export interface RehearsalOutcome {
 const POLL_WAIT_SECONDS = 25
 const PREVIEW_POLL_MS = 15_000
 
+/** P0-2: how long one anonymous request to a preview may take before it counts as "no answer". */
+export const PREVIEW_LOGIN_PROBE_MS = 5_000
+
+/** P0-2: the one line a run says when Vercel's login keeps the wizard off the pull request's preview. */
+export const PREVIEW_LOGIN_LINE = "Your Vercel previews need a Vercel login, so the pull request was not tried before merge."
+
+/** P0-2: how each cell the rehearsal would have measured reads instead (never "unknown"). */
+export const PREVIEW_LOGIN_CELL = "not tried (previews need a login)"
+
+/**
+ * P0-2: whether one anonymous answer is Vercel's deployment protection: a 401, or a redirect to Vercel's login
+ * (`vercel.com/sso-api`, any `*.vercel.com`, or the deployment's own `/_vercel/sso`).
+ */
+export function isVercelLoginAnswer(status: number, location: string | null, requested: string): boolean {
+  if (status === 401) return true
+  if (status < 300 || status >= 400 || !location) return false
+  let target: URL
+  try {
+    target = new URL(location, requested)
+  } catch {
+    return false
+  }
+  const host = normalizeHost(target.hostname)
+  return host === "vercel.com" || host.endsWith(".vercel.com") || target.pathname.startsWith("/_vercel/sso")
+}
+
+/**
+ * P0-2: asks the address and its proof file once each, without credentials, never following a redirect, each cut
+ * after {@link PREVIEW_LOGIN_PROBE_MS}. True only when one of them answers with Vercel's login. A network error, a
+ * timeout or any other answer is false: the desktop then tries the address as before. No fetch = nothing asked.
+ */
+export async function previewNeedsLogin(fetchFn: WizardDeps["fetch"], address: string): Promise<boolean> {
+  if (!fetchFn) return false
+  let origin: string
+  try {
+    origin = new URL(address).origin
+  } catch {
+    return false
+  }
+  const ask = async (url: string): Promise<boolean> => {
+    try {
+      const response = await fetchFn(url, { method: "GET", redirect: "manual", credentials: "omit", signal: AbortSignal.timeout(PREVIEW_LOGIN_PROBE_MS) })
+      await response.body?.cancel().catch(() => undefined)
+      return isVercelLoginAnswer(response.status, response.headers.get("location"), url)
+    } catch {
+      return false
+    }
+  }
+  const answers = await Promise.all([...new Set([address, `${origin}${SITE_PROOF_PATH}`])].map(ask))
+  return answers.some(Boolean)
+}
+
 /** Whether a normalised host is the production host or a registrable-domain sibling (`www.` and subdomains). */
 export function productionMatcher(productionHost: string): (host: string) => boolean {
   const prod = normalizeHost(productionHost).replace(/^www\./, "")
@@ -102,6 +158,9 @@ export function productionMatcher(productionHost: string): (host: string) => boo
     return candidate === prod || candidate.endsWith(`.${prod}`) || prod.endsWith(`.${candidate}`)
   }
 }
+
+/** The Meta event a browser-only commerce click is allowed to send (its own name, normalised): nothing else. */
+const BROWSER_META_EVENT_OF: Readonly<Record<string, string>> = { add_to_cart: "AddToCart", view_item: "ViewContent" }
 
 /** The conversion selector the managed helpers render (`data-infinite-conversion="<name>"`). */
 export function conversionSelector(name: string): string {
@@ -197,9 +256,10 @@ async function pollDesktopTest(
   }
 }
 
-async function waitForPreview(ctx: WizardContext, deps: WizardDeps, step: WizardStepId, head: string): Promise<{ url: string } | { url: null; why: "no_preview" | "gh_unavailable" }> {
+async function waitForPreview(ctx: WizardContext, deps: WizardDeps, step: WizardStepId, head: string): Promise<{ url: string } | { url: null; why: "no_preview" | "gh_unavailable" | "preview_blocked" | "preview_failed" }> {
   const until = deps.clock.now().getTime() + PR_LOOP_LIMITS.previewWaitMs
-  sub(ctx, step, "Waiting for its Vercel preview…", "pending")
+  const fork = ctx.state.get().pushTarget?.kind === "fork"
+  sub(ctx, step, fork ? "Checking for a fork PR preview (Vercel may need the project owner's authorization)…" : "Waiting for its Vercel preview…", "pending")
   for (;;) {
     let url: Awaited<ReturnType<WizardDeps["host"]["previewUrl"]>> | null
     try {
@@ -211,12 +271,21 @@ async function waitForPreview(ctx: WizardContext, deps: WizardDeps, step: Wizard
     }
     if (isUnsupported(url)) return { url: null, why: "no_preview" }
     if (url) return { url }
+    const failure = await deps.host.previewFailure?.(head).catch(() => null)
+    if (failure && !isUnsupported(failure)) {
+      const reason = sanitizeUntrusted(failure.reason, 90)
+      sub(ctx, step, `Vercel ${failure.blocked ? "blocked the preview" : "preview failed"}: ${reason}`, "warn")
+      sub(ctx, step, failure.blocked
+        ? "Ask the repo owner to add you to the Vercel team, or have a team member authorize the deployment; then rerun."
+        : "Fix the deployment in Vercel, then rerun infinite-tag.", "warn")
+      return { url: null, why: failure.blocked ? "preview_blocked" : "preview_failed" }
+    }
     if (ctx.signal.aborted || deps.clock.now().getTime() + PREVIEW_POLL_MS > until) return { url: null, why: "no_preview" }
     await deps.clock.sleep(PREVIEW_POLL_MS, ctx.signal)
   }
 }
 
-function clickResults(result: TestResult, names: readonly string[]): { tested: string[]; ga4: string[]; verdicts: NonNullable<RehearsalOutcome["clickVerdicts"]> } {
+export function clickResults(result: TestResult, names: readonly string[]): { tested: string[]; ga4: string[]; verdicts: NonNullable<RehearsalOutcome["clickVerdicts"]> } {
   const tested: string[] = []
   const ga4: string[] = []
   const verdicts: NonNullable<RehearsalOutcome["clickVerdicts"]> = []
@@ -226,12 +295,16 @@ function clickResults(result: TestResult, names: readonly string[]): { tested: s
       verdicts.push([name, { state: "undetermined", reason: "not_exercised" }])
       continue
     }
-    // A standard Meta conversion fired by a click is on the never-list: such a click never counts as passed.
-    if (click.events.meta.length > 0) {
-      verdicts.push([name, { state: "problem", reason: `fbq_standard_on_click — ${click.events.meta.join(", ")}` }])
+    // A standard Meta conversion fired by a click is on the never-list: such a click never counts as passed. The one
+    // exception is the browser-only commerce event the click IS: a Buy button marked add_to_cart sends Meta AddToCart
+    // (no event id, no server twin), exactly what the plan asked for.
+    const ownMetaEvent = BROWSER_META_EVENT_OF[normalizeEventName(name)]
+    const wrongMeta = click.events.meta.filter((event) => event !== ownMetaEvent)
+    if (wrongMeta.length > 0) {
+      verdicts.push([name, { state: "problem", reason: `fbq_standard_on_click — ${wrongMeta.join(", ")}` }])
       continue
     }
-    const fired = click.events.ga4.includes(name) || click.events.posthog.includes(name) || click.events.infinite.includes(name)
+    const fired = click.events.ga4.includes(name) || click.events.posthog.includes(name) || click.events.infinite.includes(name) || (ownMetaEvent !== undefined && click.events.meta.includes(ownMetaEvent))
     if (!fired) {
       verdicts.push([name, { state: "problem", reason: `click_test — the click did not send ${name}` }])
       continue
@@ -287,6 +360,9 @@ export async function rehearse(
   const waited = await waitForPreview(ctx, deps, input.step, input.head)
   if (waited.url === null) return empty(waited.why)
   const previewUrl = waited.url
+  // P0-2: Vercel's login answers the desktop's proof read with a 302 to vercel.com, so the desktop refuses the origin.
+  // Asked first, without credentials, so the run says the real reason instead of a missing proof file.
+  if (await previewNeedsLogin(deps.fetch, previewUrl)) return empty("preview_protected", previewUrl)
 
   const expect: TestExpect = facts.keys ? testExpectFromKeys(facts.keys, facts.claim ?? null) : {}
   const consentSeed =
@@ -477,6 +553,8 @@ const UNDETERMINED_REASON: Record<RehearsalUndetermined, Reason> = {
   preview_refused: "not_exercised",
   preview_protected: "preview_protected",
   no_preview: "not_exercised",
+  preview_blocked: "not_exercised",
+  preview_failed: "not_exercised",
   no_production_host: "not_exercised",
   not_github: "not_exercised",
   gh_unavailable: "read_failed",
@@ -486,12 +564,17 @@ const UNDETERMINED_REASON: Record<RehearsalUndetermined, Reason> = {
 }
 
 /** Writes the rehearsal's `in_pr` cells for `head` (only the cells the rehearsal measures; other lanes keep theirs). */
-export function rehearsalCells(outcome: RehearsalOutcome, input: { head: string; at: string; runId: string }): Pick<ReportColumnSnapshot, "cells" | "finishLine"> {
+export function rehearsalCells(outcome: RehearsalOutcome, input: { head: string; at: string; runId: string; jobs?: readonly ChecklistItem[] }): Pick<ReportColumnSnapshot, "cells" | "finishLine"> {
   const { at, runId } = input
   const finishLine: Partial<Record<FinishLineId, Cell>> = {}
   const cells: Partial<Record<ReportRowId, Cell>> = {}
   const ids: FinishLineId[] = ["each_tool_once", "ids_match_connections", "previews_silent", "survives_ad_blockers", "spa_page_views", "csp_allows", "no_pii"]
   if (outcome.state === "undetermined") {
+    // P0-2: a preview behind a login was not tried at all; its cells say so instead of seven "unknown"s.
+    if (outcome.reason === "preview_protected") {
+      for (const id of ids) finishLine[id] = makeCell("info", "not_tried", PREVIEW_LOGIN_CELL, at, runId, "preview_protected")
+      return { cells, finishLine }
+    }
     const reason = UNDETERMINED_REASON[outcome.reason ?? "test_error"]
     for (const id of ids) finishLine[id] = makeCell("undetermined", null, NULL_DISPLAY, at, runId, reason)
     return { cells, finishLine }
@@ -510,6 +593,14 @@ export function rehearsalCells(outcome: RehearsalOutcome, input: { head: string;
     Object.keys(preview).length === 0
       ? makeCell("undetermined", null, NULL_DISPLAY, at, runId, "not_exercised", "preview_self_silent")
       : finishCell(aggregate(outcome, preview, ["previews_send_data"], GUARDED), { pass: "preview link sent nothing", problem: "the preview link sends data" }, at, runId, "preview_self_silent")
+  const leftPreview = withheldPreviewTools(input.jobs)
+  if (leftPreview.length > 0 && Object.keys(preview).length > 0) {
+    const scoped = previewScope(preview, leftPreview, [...outcome.expectedTools ?? [], ...outcome.installedTools ?? []])
+    finishLine.previews_silent = scoped.state === "pass" || scoped.state === "info"
+      ? makeCell("info", "not_done", scoped.note, at, runId, undefined, "preview_self_silent")
+      : scoped.state === "problem" ? makeCell("problem", "problem", `A non-withheld tool sends from the preview; ${scoped.note}`, at, runId, undefined, "preview_self_silent")
+      : makeCell("undetermined", null, NULL_DISPLAY, at, runId, "not_exercised", "preview_self_silent")
+  }
   // RH posthog_via_proxy_once: PostHog graded "fires once, right key" AND its beacons went same-origin.
   const posthog = grades.posthog
   if (!posthog || (posthog.state !== "pass" && posthog.state !== "problem") || outcome.facts.posthogSameOrigin === null) {
@@ -632,15 +723,20 @@ export function rehearsalCountWords(count: { passing: number; tested: number }):
  * check id, plus one `click_test` per conversion item (matched by the conversion name after `conversions_to_tools:`).
  * Built from O6's grades and the click facts; nothing here is the agent's word.
  */
-export function rehearsalCheckResults(outcome: RehearsalOutcome, input: { at: string; runId: string }): { shared: CheckResult[]; clicks: Map<string, CheckResult> } {
+export function rehearsalCheckResults(outcome: RehearsalOutcome, input: { at: string; runId: string; jobs?: readonly ChecklistItem[] }): { shared: CheckResult[]; clicks: Map<string, CheckResult> } {
   const shared: CheckResult[] = []
   const clicks = new Map<string, CheckResult>()
   if (outcome.state === "undetermined") return { shared, clicks }
-  const { finishLine } = rehearsalCells(outcome, { head: "", at: input.at, runId: input.runId })
+  const { finishLine } = rehearsalCells(outcome, { head: "", at: input.at, runId: input.runId, jobs: input.jobs })
   for (const cell of Object.values(finishLine)) {
     const checkId = cell?.provenance.checkId
     if (!cell || !checkId || (cell.state !== "pass" && cell.state !== "problem" && cell.state !== "undetermined")) continue
     shared.push({ checkId, tier: "RH", state: cell.state, ...(cell.reason ? { reason: cell.reason } : cell.state === "problem" ? { reason: cell.display } : {}), at: input.at, runId: input.runId })
+  }
+  const left = withheldPreviewTools(input.jobs)
+  if (left.length > 0 && !shared.some(check => check.checkId === "preview_self_silent")) {
+    const scoped = previewScope(outcome.previewGrades, left, [...outcome.expectedTools ?? [], ...outcome.installedTools ?? []])
+    if (scoped.state === "pass") shared.push({ checkId: "preview_self_silent", tier: "RH", state: "pass", reason: "The non-withheld preview guards were read as silent; owner targets excluded", at: input.at, runId: input.runId })
   }
   // The per-tool RH checks of jobs 4 and 5, straight from O6's grade of that tool (an `info` grade, a tool neither
   // connected nor installed, gives no result). GA4's "one page view" is a problem only for a duplicate or a silent
@@ -686,7 +782,7 @@ export function rehearsalCheckResults(outcome: RehearsalOutcome, input: { at: st
  */
 export function recordRehearsalCells(ctx: WizardContext, outcome: RehearsalOutcome, input: { head: string; runId: string; keys?: TagKeys | null }): void {
   const at = ctx.now().toISOString()
-  const fresh = rehearsalCells(outcome, { ...input, at })
+  const fresh = rehearsalCells(outcome, { ...input, at, jobs: ctx.state.get().jobs })
   ctx.state.update((state) => {
     const previous = state.report.in_pr
     // §3i.3 rule 7: in_pr cells are keyed to the head and rebuilt on a new head. Cells that do not depend on the
@@ -743,15 +839,17 @@ function keepHeadIndependent<K extends string>(cells: Partial<Record<K, Cell>> |
 }
 
 /** One line per tool, the design's rehearsal sub-statuses. */
-export function rehearsalLines(outcome: RehearsalOutcome): Array<{ text: string; tone: "ok" | "warn" | "info" }> {
+export function rehearsalLines(outcome: RehearsalOutcome, jobs?: readonly ChecklistItem[]): Array<{ text: string; tone: "ok" | "warn" | "info" }> {
   if (outcome.state === "undetermined") {
     const why: Record<RehearsalUndetermined, string> = {
       not_vercel: "Rehearsal: undetermined (no Vercel preview found for this site)",
       preview_unconfirmed: "Rehearsal: undetermined (Infinite can't confirm the preview is this site's without a Vercel connection)",
-      preview_unserved: "Rehearsal: undetermined (the preview did not serve this pull request's proof file, e.g. it is protected)",
+      preview_unserved: "Rehearsal: undetermined (the preview did not serve this pull request's proof file)",
       preview_refused: "Rehearsal: undetermined (Infinite refused the preview: it is not this site's Vercel project)",
-      preview_protected: "Rehearsal: undetermined (the preview is protected)",
+      preview_protected: PREVIEW_LOGIN_LINE,
       no_preview: "Rehearsal: undetermined (no preview appeared within 10 minutes)",
+      preview_blocked: "Rehearsal: undetermined (Vercel blocked the preview; ask the repo owner to authorize it)",
+      preview_failed: "Rehearsal: undetermined (Vercel preview deployment failed)",
       no_production_host: "Rehearsal: undetermined (no production host known)",
       not_github: "Rehearsal: undetermined (previews are read from GitHub only)",
       gh_unavailable: "Rehearsal: undetermined (gh is not installed or logged in, so the preview cannot be read)",
@@ -759,7 +857,7 @@ export function rehearsalLines(outcome: RehearsalOutcome): Array<{ text: string;
       test_busy: "Rehearsal: undetermined (the desktop's test window was busy)",
       facts_unreadable: "Rehearsal: undetermined (the Infinite app could not read the connections or hosting)"
     }
-    return [{ text: why[outcome.reason ?? "test_error"], tone: "warn" }]
+    return [{ text: why[outcome.reason ?? "test_error"], tone: outcome.reason === "preview_protected" ? "info" : "warn" }]
   }
   const lines: Array<{ text: string; tone: "ok" | "warn" | "info" }> = []
   for (const tool of ["ga4", "posthog", "meta", "infinite"] as const) {
@@ -770,9 +868,10 @@ export function rehearsalLines(outcome: RehearsalOutcome): Array<{ text: string;
     else if (result.state === "undetermined") lines.push({ text: `${TOOL_LABEL[tool]}: undetermined (${reasonCode(result).replace(/_/g, " ") || "unknown"})`, tone: "info" })
   }
   if (outcome.clickTested.length > 0) lines.push({ text: `✓ Conversions fire on the right buttons (${outcome.clickTested.length})`, tone: "ok" })
-  const silent = rehearsalCells(outcome, { head: "", at: "", runId: "" }).finishLine.previews_silent?.state
+  const silent = rehearsalCells(outcome, { head: "", at: "", runId: "", jobs }).finishLine.previews_silent?.state
   if (silent === "problem") lines.push({ text: "The preview link itself sends data", tone: "warn" })
   else if (silent === "pass") lines.push({ text: "✓ Preview links themselves send nothing", tone: "ok" })
+  else if (silent === "info" && withheldPreviewTools(jobs).length) lines.push({ text: previewScope(outcome.previewGrades, withheldPreviewTools(jobs)).note, tone: "info" })
   return lines
 }
 
@@ -794,7 +893,7 @@ export async function applyRehearsalToJobs(
   sha: string,
   step: WizardStepId
 ): Promise<void> {
-  const { shared, clicks } = rehearsalCheckResults(outcome, { at: ctx.now().toISOString(), runId })
+  const { shared, clicks } = rehearsalCheckResults(outcome, { at: ctx.now().toISOString(), runId, jobs: ctx.state.get().jobs })
   // R4-5: the rehearsal's own results, kept whole for the review's triage (a check no job carries still decides).
   ctx.state.update((state) => {
     state.rehearsalChecks = shared

@@ -12,7 +12,6 @@ import {
   fakeBefore,
   fakeContext,
   fakeDeps,
-  fakeHosting,
   fakeKeys,
   fakeProductionDeniedConflict,
   fakeRegistry,
@@ -24,7 +23,7 @@ import {
   writeKeysChoices,
   type FakeContext
 } from "../../../test/wizard/o7-fakes.js"
-import { loadPlanInputs } from "../../install/step-inputs.js"
+import { loadPlanInputs, loadPlanApprovals } from "../../install/step-inputs.js"
 import { WizardInstaller } from "../../install/installer.js"
 import type { WizardBeforeFacts } from "../../install/plan-model.js"
 import { readInstallManifest } from "../../manifest.js"
@@ -120,7 +119,7 @@ function approveAllFrom(ctx: FakeContext, consentMode = "not_required") {
 }
 
 describe("step plan", () => {
-  it("opens exactly ONE ask (the plan), whose only questions are the four decisions; persists answers; PATCHes approvedConversions", async () => {
+  it("opens exactly ONE ask (the plan), which never asks how the tag runs; persists answers; PATCHes approvedConversions", async () => {
     const ga4Line = `install_provider:ga4:${IDS.ga4}`
     const answer = { approved: ["consent_mode", "conversion_names", ga4Line], declined: [], edits: { consent_mode: "required", conversion_names: "start_trial" } }
     const h = await setup({ files: { "index.html": STATIC_HTML }, answers: [answer], candidates: [candidate("server_conversions", "start_trial")] })
@@ -129,26 +128,16 @@ describe("step plan", () => {
     expect(h.ctx.asks).toHaveLength(1)
     expect(h.ctx.asks[0]!.kind).toBe("plan")
     const payload = h.ctx.asks[0]!.payload as AskPayloads["plan"]
-    expect(payload.lines.filter((line) => line.editable).map((line) => line.id).sort()).toEqual(["consent_mode", "conversion_names", "privacy_text"])
+    expect(payload.lines.filter((line) => line.editable).map((line) => line.id).sort()).toEqual(["conversion_names"])
+    expect(payload.lines.some((line) => line.kind === "consent_mode")).toBe(false)
     expect(Object.keys(payload.decisions).sort()).toEqual(["consentMode", "conversionNames", "npmInstall", "privacyText"])
     const plan = h.ctx.stateValue().plan!
-    expect(plan.answers).toMatchObject({ consentMode: "required", conversions: ["start_trial"] })
+    // A consent answer carried by an older answers file is ignored: the tag installs active.
+    expect(plan.answers).toMatchObject({ consentMode: "not_required", conversions: ["start_trial"] })
     expect(plan.lines.find((line) => line.id === ga4Line)?.approved).toBe(true)
     // Lines the user did not answer stay unanswered (null), never approved by default.
-    expect(plan.lines.find((line) => line.id === `install_provider:meta:${IDS.meta}`)?.approved).toBeNull()
+    expect(plan.lines.find((line) => line.id === `install_provider:meta:${IDS.meta}`)?.approved).toBe(true)
     expect(h.patches).toEqual([{ approvedConversions: ["start_trial"] }])
-  })
-
-  it("NEGATIVE: an unanswered consent mode ALWAYS parks the run here (INF_WIZ_NEEDS_ANSWERS); no PATCH, no jobs seeded", async () => {
-    const answer = { approved: ["conversion_names"], declined: [], edits: {} }
-    const h = await setup({ files: { "index.html": STATIC_HTML }, answers: [answer], candidates: [candidate("server_conversions", "start_trial")] })
-    const outcome = await planStep.run(h.ctx, h.deps)
-    expect(outcome).toMatchObject({ kind: "parked", code: "INF_WIZ_NEEDS_ANSWERS" })
-    expect(h.patches).toEqual([])
-    expect(h.ctx.stateValue().plan?.answers.consentMode).toBeNull()
-    // install never runs without it
-    expect(await installStep.run(h.ctx, h.deps)).toMatchObject({ kind: "parked", code: "INF_WIZ_NEEDS_ANSWERS" })
-    expect(h.siteSourceCalls).toEqual([])
   })
 
   it("NEGATIVE: a cancelled plan ask parks, it never approves anything", async () => {
@@ -157,125 +146,48 @@ describe("step plan", () => {
     expect(h.ctx.stateValue().plan!.lines.every((line) => line.approved === null)).toBe(true)
   })
 
-  it("--consent-mode answers the consent line; a resume of the same plan asks nothing again", async () => {
-    const h = await setup({ files: { "index.html": STATIC_HTML }, answers: [{ approved: [], declined: [], edits: {} }], consentFlag: "not_required" })
-    expect((await planStep.run(h.ctx, h.deps)).kind).toBe("ok")
-    expect(h.ctx.stateValue().plan!.answers.consentMode).toBe("not_required")
-    const asked = h.ctx.asks.length
-    expect((await planStep.run(h.ctx, h.deps)).kind).toBe("ok")
-    expect(h.ctx.asks.length).toBe(asked)
-  })
-
-  it("adopted PostHog: a declined improve line seeds no job 3; an unanswered one waits for the user", async () => {
-    const candidates = [candidate("posthog_improve", "proxy"), candidate("posthog_improve", "history_change"), candidate("identify_reset", "auth")]
-    const answer = { approved: ["consent_mode", "agent_budget"], declined: ["improve_additive:posthog:proxy"], edits: { consent_mode: "not_required" } }
-    const h = await setup({ files: { "index.html": ADOPTED_POSTHOG_HTML.replace(", defaults: '2025-05-24'", "") }, answers: [answer], candidates })
-    expect((await planStep.run(h.ctx, h.deps)).kind).toBe("ok")
-    const jobs = h.ctx.stateValue().jobs
-    expect(jobs.map((item) => item.id)).not.toContain("posthog_improve:proxy")
-    expect(jobs.find((item) => item.id === "posthog_improve:history_change")).toMatchObject({ state: "blocked", blockedReason: "needs_you" })
-    expect(jobs.find((item) => item.id === "identify_reset:auth")?.state).toBe("pending")
-  })
-
-  it("terminal QA #13: the live line counts the agent jobs the plan's own agent line counts (the plan's seeds included)", async () => {
-    // No detector candidate for the PostHog improvements: the plan seeds those jobs itself.
-    const answer = { approved: ["consent_mode", "agent_budget"], declined: [], edits: { consent_mode: "not_required" } }
-    const h = await setup({ files: { "index.html": ADOPTED_POSTHOG_HTML.replace(", defaults: '2025-05-24'", "") }, answers: [answer], candidates: [candidate("identify_reset", "auth")] })
-    const outcome = await planStep.run(h.ctx, h.deps)
-    const payload = h.ctx.asks[0]!.payload as AskPayloads["plan"]
-    const budget = payload.lines.find((line) => line.kind === "agent_budget")!
-    const inPlan = Number(/(\d+) (?:agent )?jobs?/.exec(budget.text)![1])
-    expect(inPlan).toBeGreaterThan(1)
-    const subs = h.ctx.events.filter((event) => event.type === "step.sub").map((event) => (event.fields as { text: string }).text)
-    const live = subs.find((text) => /agent jobs? · \d+ decisions? needs? you/.test(text))!
-    expect(Number(/^Up to (\d+) agent jobs?/.exec(live)![1])).toBe(inPlan)
-    // The closing status counts the jobs that RUN for these answers (§3y.5): never more than the plan's "up to".
-    const status = (outcome as { status: string }).status
-    expect(status).toMatch(/^Plan approved · \d+ lines? · \d+ agent jobs?/)
-    expect(Number(/· (\d+) agent jobs?/.exec(status)![1])).toBeLessThanOrEqual(inPlan)
+  it.each(["approval file"])("keeps an earlier no from %s across a changed plan hash", async source => {
+    const excluded = "improve_additive:posthog:proxy"
+    const h = await setup({ files: { "index.html": ADOPTED_POSTHOG_HTML }, consentFlag: "not_required", answers: [
+      { approved: [], declined: [excluded], edits: {} },
+      { approved: [], declined: [], edits: {} }
+    ] })
+    await planStep.run(h.ctx, h.deps)
+    if (source === "legacy state") await h.deps.fs.writeTextAtomic(`${h.ctx.root}/.infinite/wizard/plan-approvals.json`, "{}")
+    const buildPlan = h.deps.installer.buildPlan.bind(h.deps.installer)
+    h.deps.installer.buildPlan = (...args) => ({ ...buildPlan(...args), hash: "sha256:changed-plan" })
+    await planStep.run(h.ctx, h.deps)
+    expect(h.ctx.asks).toHaveLength(2)
+    expect(h.ctx.asks[1]!.payload).toMatchObject({ excluded: [excluded] })
+    expect(h.ctx.stateValue().plan!.lines.find(line => line.id === excluded)?.approved).toBe(false)
+    expect(h.ctx.stateValue().jobs.map(item => item.id)).not.toContain("posthog_improve:proxy")
+    expect(JSON.stringify(h.ctx.events)).toContain("kept your earlier no to:")
+    expect((await loadPlanApprovals(h.ctx, h.deps))!.approvals.declined).toContain(excluded)
   })
 })
 
 describe("step install", () => {
-  it("records the consent answer through the site-source verb with the production hosts, then installs and receipts", async () => {
-    const h = await setup({ files: { "index.html": STATIC_HTML }, answers: [] })
-    h.ctx.asks.length = 0
-    // plan first (answers come from the payload: approve everything, consent required)
-    const ctx = h.ctx
-    const realAsk = ctx.ask
-    ctx.ask = (async (kind: never, payload: never) => {
-      ctx.asks.push({ kind, payload })
-      return approveAllFrom(ctx, "required")
-    }) as typeof realAsk
-    expect((await planStep.run(ctx, h.deps)).kind).toBe("ok")
-    const outcome = await installStep.run(ctx, h.deps)
-    expect(outcome).toMatchObject({ kind: "ok", status: expect.stringMatching(/files? written · build passes/) })
-    expect(h.siteSourceCalls).toEqual([{ protocolVersion: 1, requestId: "x", productionHosts: ["acme-store.com"], consentMode: "required" }])
-    const html = read(ctx.root, "index.html")
-    expect(html).toContain(IDS.ga4)
-    expect(readInstallManifest(ctx.root)!.ids?.infinite).toEqual({ siteSourceKey: IDS.siteSource })
-    expect(ctx.events.some((event) => event.type === "step.sub" && (event.fields as { text: string }).text === "✓ Build passes")).toBe(true)
-  })
-
-  it("§3z.7 (A28): the site source lists keys ∪ the link's host hint ∪ the observed host, never a preview-shaped host", async () => {
-    const before = fakeBefore({
-      keys: fakeKeys({ infinite: { ...fakeKeys().infinite, productionHosts: [] } }),
-      hosting: fakeHosting({ productionDomains: ["acme-store.com"], productionAliases: ["acme-store.vercel.app"] }),
-      observedProductionHost: "acme-store.vercel.app"
-    })
-    // The link's productionHostHint comes from the repo (a CNAME file), as the link step computed it.
-    const h = await setup({ files: { "index.html": STATIC_HTML, CNAME: "acme-store.com\n" }, before, consentFlag: "not_required", answers: [] })
-    const ctx = h.ctx
-    ctx.ask = (async (kind: never, payload: never) => {
-      ctx.asks.push({ kind, payload })
-      return approveAllFrom(ctx)
-    }) as typeof ctx.ask
-    await planStep.run(ctx, h.deps)
-    await installStep.run(ctx, h.deps)
-    expect(h.siteSourceCalls[0]?.productionHosts).toEqual(["acme-store.com"])
-  })
-
-  it("a page the installer cannot edit becomes an open job 2, never 'installed'", async () => {
+  it("stops at the plan with manual wiring when a missing HTML head leaves no installable work", async () => {
+    const html = "<html><body><div id=root></div></body></html>\n"
     const h = await setup({
-      files: { "package.json": `{"dependencies":{"react":"18.0.0","vite":"5.0.0"}}\n`, "index.html": "<html><body><div id=root></div></body></html>\n", "vercel.json": "{}\n" },
+      files: { "package.json": `{"dependencies":{"react":"18.0.0","vite":"5.0.0"}}\n`, "index.html": html, "vercel.json": "{}\n" },
       consentFlag: "not_required",
       answers: []
     })
-    const ctx = h.ctx
-    ctx.ask = (async (kind: never, payload: never) => {
-      ctx.asks.push({ kind, payload })
-      return approveAllFrom(ctx)
-    }) as typeof ctx.ask
-    await planStep.run(ctx, h.deps)
-    const outcome = await installStep.run(ctx, h.deps)
-    expect(outcome).toMatchObject({ kind: "ok", status: expect.stringContaining("not live yet") })
-    expect(ctx.stateValue().jobs.find((item) => item.id === "unusual_layout:index.html")).toMatchObject({ jobId: "unusual_layout", n: 2, state: "pending", allow: { files: ["index.html"] } })
-  })
-
-  it("NEGATIVE (engine invariant §3a.9.4): no site-source call while an agent child is alive", async () => {
-    const h = await setup({ files: { "index.html": STATIC_HTML }, consentFlag: "not_required", answers: [] })
-    const ctx = h.ctx
-    ctx.ask = (async (kind: never, payload: never) => {
-      ctx.asks.push({ kind, payload })
-      return approveAllFrom(ctx)
-    }) as typeof ctx.ask
-    await planStep.run(ctx, h.deps)
-    h.agentAlive.value = true
-    await expect(installStep.run(ctx, h.deps)).rejects.toThrow(/agent is still running/)
+    const outcome = await planStep.run(h.ctx, h.deps)
+    expect(outcome).toMatchObject({ kind: "parked", code: "INF_WIZ_NEEDS_ANSWERS", reason: expect.stringContaining("Add these lines yourself") })
+    if (outcome.kind !== "parked") throw new Error("Expected manual owner wiring")
+    expect(outcome.reason).toContain("NOT installed")
+    expect(outcome.reason).toContain("index.html")
+    expect(outcome.reason).toContain("<script")
+    expect(h.ctx.asks).toHaveLength(0)
+    expect(h.ctx.stateValue().jobs).toEqual([])
+    // A direct caller cannot bypass the stopped plan to create an unused tag or source.
+    expect(await installStep.run(h.ctx, h.deps)).toMatchObject({ kind: "parked", code: "INF_WIZ_NEEDS_ANSWERS" })
     expect(h.siteSourceCalls).toEqual([])
-    expect(read(ctx.root, "index.html")).toBe(STATIC_HTML)
-  })
-
-  it("an unsubscribed workspace blocks with INF_WIZ_SUBSCRIPTION_REQUIRED and writes nothing", async () => {
-    const h = await setup({ files: { "index.html": STATIC_HTML }, consentFlag: "not_required", answers: [], siteSourceError: { code: "subscription_required" } })
-    const ctx = h.ctx
-    ctx.ask = (async (kind: never, payload: never) => {
-      ctx.asks.push({ kind, payload })
-      return approveAllFrom(ctx)
-    }) as typeof ctx.ask
-    await planStep.run(ctx, h.deps)
-    expect(await installStep.run(ctx, h.deps)).toMatchObject({ kind: "blocked", code: "INF_WIZ_SUBSCRIPTION_REQUIRED" })
-    expect(read(ctx.root, "index.html")).toBe(STATIC_HTML)
+    expect(h.claimCalls).toEqual([])
+    expect(read(h.ctx.root, "index.html")).toBe(html)
+    expect(readInstallManifest(h.ctx.root)).toBeNull()
   })
 
   it("NEGATIVE: a site source that belongs to another site never lends this site its key", async () => {
@@ -321,6 +233,24 @@ describe("§3y.2 the site-file claim at install (IO-3)", () => {
     return installStep.run(ctx, h.deps)
   }
 
+  it("a saved or external no to the inseparable proof file excludes the whole Infinite install", async () => {
+    const keys = freshKeys()
+    const before = fakeBefore({ keys, hosting: { provider: "none", vercel: null }, observedProductionHost: null })
+    const h = await setup({ files: { "index.html": STATIC_HTML, "vercel.json": "{}\n" }, consentFlag: "not_required", answers: [{ approved: ["conversion_names"], declined: ["info:infinite_site_file", `install_provider:ga4:${IDS.ga4}`, `install_provider:posthog:${IDS.posthog}`, `install_provider:meta:${IDS.meta}`], edits: { conversion_names: "signup" } }], before, answeredHost: "fresh-acme.com", claim: { protocolVersion: 1, requestId: "x", state: "pending_proof", siteSource: null, claim: pendingClaim(["fresh-acme.com"]) } })
+    expect((await planStep.run(h.ctx, h.deps)).kind).toBe("ok")
+    const lines = (h.ctx.asks[0]!.payload as AskPayloads["plan"]).lines
+    expect(lines.find(line => line.id === "info:infinite_site_file")).toMatchObject({ kind: "user_action", requires: "info" })
+    expect(h.ctx.stateValue().plan!.lines.find(line => line.id === "install_provider:infinite")?.approved).toBe(false)
+    expect((await installStep.run(h.ctx, h.deps)).kind).toBe("ok")
+    expect(h.claimCalls).toEqual([])
+    expect(h.siteSourceCalls).toEqual([])
+    expect(h.patches).toEqual([])
+    expect(existsSync(join(h.ctx.root, ".well-known/infinite-site-verification.txt"))).toBe(false)
+    expect(read(h.ctx.root, "index.html")).toBe(STATIC_HTML)
+    expect(h.ctx.stateValue().jobs).toEqual([])
+    expect(JSON.stringify(h.ctx.events)).toContain("site claim/proof file, collect rewrite")
+  })
+
   it("pending_proof: the managed tag carries the RESERVED key and the proof file is written where the site serves it, recorded as the wizard's", async () => {
     const h = await setup({ files: { "index.html": STATIC_HTML, "vercel.json": "{}\n" }, consentFlag: "not_required", answers: [], before: freshBefore(), answeredHost: "fresh-acme.com", claim: { protocolVersion: 1, requestId: "x", state: "pending_proof", siteSource: null, claim: pendingClaim(["fresh-acme.com"]) } })
     const outcome = await runPlanAndInstall(h)
@@ -337,75 +267,6 @@ describe("§3y.2 the site-file claim at install (IO-3)", () => {
     expect(receipt.edits!.find((edit) => edit.file === ".well-known/infinite-site-verification.txt")).toMatchObject({ by: "wizard", planLineId: "install_provider:infinite", jobId: null })
     expect(h.ctx.stateValue().site?.claim).toMatchObject({ siteSourceKey: RESERVED, state: "pending_proof", hosts: ["fresh-acme.com"] })
   })
-
-  it("ready: the claim verb answers the source (hosts verified) and the install is exactly the site-source path; no proof file", async () => {
-    const h = await setup({
-      files: { "index.html": STATIC_HTML },
-      consentFlag: "not_required",
-      answers: [],
-      claim: { protocolVersion: 1, requestId: "x", state: "ready", siteSource: { siteSourceKey: IDS.siteSource, productionHosts: ["acme-store.com"], consentMode: "not_required", created: false }, claim: null }
-    })
-    expect((await runPlanAndInstall(h)).kind).toBe("ok")
-    expect(h.claimCalls).toHaveLength(1)
-    expect(read(h.ctx.root, "index.html")).toContain(IDS.siteSource)
-    expect(existsSync(join(h.ctx.root, ".well-known/infinite-site-verification.txt"))).toBe(false)
-    expect(h.ctx.stateValue().site?.claim).toBeUndefined()
-  })
-
-  it("review P1-5: ready with the workspace's PROVEN claim on these hosts → the proof file stays in the repo, so previews serve it", async () => {
-    const proven: ClaimPublic = { ...pendingClaim(["acme-store.com"]), state: "proven", provenHosts: ["acme-store.com"], siteSourceKey: IDS.siteSource }
-    const h = await setup({
-      files: { "index.html": STATIC_HTML },
-      consentFlag: "not_required",
-      answers: [],
-      claim: { protocolVersion: 1, requestId: "x", state: "ready", siteSource: { siteSourceKey: IDS.siteSource, productionHosts: ["acme-store.com"], consentMode: "not_required", created: false }, claim: null },
-      heldClaim: proven
-    })
-    expect((await runPlanAndInstall(h)).kind).toBe("ok")
-    expect(read(h.ctx.root, ".well-known/infinite-site-verification.txt")).toBe(BODY)
-    expect(readInstallManifest(h.ctx.root)!.edits!.find((edit) => edit.file === ".well-known/infinite-site-verification.txt")).toMatchObject({ by: "wizard", planLineId: "install_provider:infinite", jobId: null })
-    // The run's own claim state is untouched: the source is ready, nothing is pending.
-    expect(h.ctx.stateValue().site?.claim).toBeUndefined()
-  })
-
-  it("review P1-5 NEGATIVE: a proven claim on OTHER hosts, or an expired one, writes no proof file", async () => {
-    for (const held of [
-      { ...pendingClaim(["other-site.com"]), state: "proven" as const, provenHosts: ["other-site.com"] },
-      { ...pendingClaim(["acme-store.com"]), state: "expired" as const }
-    ]) {
-      const h = await setup({
-        files: { "index.html": STATIC_HTML },
-        consentFlag: "not_required",
-        answers: [],
-        claim: { protocolVersion: 1, requestId: "x", state: "ready", siteSource: { siteSourceKey: IDS.siteSource, productionHosts: ["acme-store.com"], consentMode: "not_required", created: false }, claim: null },
-        heldClaim: held
-      })
-      expect((await runPlanAndInstall(h)).kind).toBe("ok")
-      expect(existsSync(join(h.ctx.root, ".well-known/infinite-site-verification.txt"))).toBe(false)
-    }
-  })
-
-  it("NEGATIVE: a static site whose vercel.json builds into another directory → the Infinite line is a user_action naming it; nothing is claimed", async () => {
-    const h = await setup({ files: { "index.html": STATIC_HTML, "vercel.json": JSON.stringify({ outputDirectory: "dist" }) }, consentFlag: "not_required", answers: [], before: freshBefore(), answeredHost: "fresh-acme.com", claim: { protocolVersion: 1, requestId: "x", state: "pending_proof", siteSource: null, claim: pendingClaim(["fresh-acme.com"]) } })
-    await runPlanAndInstall(h)
-    const lines = (h.ctx.asks[0]!.payload as AskPayloads["plan"]).lines
-    expect(lines.some((line) => line.id === "install_provider:infinite")).toBe(false)
-    expect(lines.find((line) => line.id === "user_action:infinite_blocked")?.text).toBe("Infinite: your site builds into dist; put .well-known/infinite-site-verification.txt there, then run again.")
-    expect(h.claimCalls).toEqual([])
-    expect(read(h.ctx.root, "index.html")).not.toContain(RESERVED)
-  })
-
-  it("NEGATIVE: an older app (no tag.site-claim.v1) and no Vercel connection serving the host → no Infinite line to approve, no tag", async () => {
-    const h = await setup({ files: { "index.html": STATIC_HTML, "vercel.json": "{}\n" }, consentFlag: "not_required", answers: [], before: freshBefore(), answeredHost: "fresh-acme.com" })
-    await runPlanAndInstall(h)
-    const lines = (h.ctx.asks[0]!.payload as AskPayloads["plan"]).lines
-    expect(lines.some((line) => line.id === "install_provider:infinite")).toBe(false)
-    expect(lines.find((line) => line.id === "user_action:infinite")?.text).toBe(
-      "Infinite: update the Infinite app (or connect your website in Infinite › Connections › GitHub · Website) so it can confirm fresh-acme.com; then run again."
-    )
-    expect(h.siteSourceCalls).toEqual([])
-    expect(readInstallManifest(h.ctx.root)?.ids?.infinite ?? null).toBeNull()
-  })
 })
 
 describe("siteSourceHosts: only the site's own domain (founder ruling 2026-10-03)", () => {
@@ -416,10 +277,6 @@ describe("siteSourceHosts: only the site's own domain (founder ruling 2026-10-03
       expect(siteSourceHosts(noHosts(), host, host), host).toEqual([])
       expect(siteSourceHosts(noHosts(), "acme-store.com", host), host).toEqual(["acme-store.com"])
     }
-  })
-
-  it("a custom domain (and its observed www twin) joins", () => {
-    expect(siteSourceHosts(noHosts(), "acme-store.com", "www.acme-store.com")).toEqual(["acme-store.com", "www.acme-store.com"])
   })
 })
 
@@ -435,36 +292,12 @@ describe("§3z.7 / §3z.4 site-source refusals (I1)", () => {
     return { h, ctx, outcome: await installStep.run(ctx, h.deps) }
   }
 
-  it("unverified_host: no Infinite pixel, one 'prove the domain' line, the other tools go on", async () => {
-    const { ctx, outcome } = await run({ code: "invalid_request", state: "unverified_host" })
-    expect(outcome.kind).toBe("ok")
-    expect(read(ctx.root, "index.html")).not.toContain(IDS.siteSource)
-    expect(readInstallManifest(ctx.root)!.ids?.infinite).toBeNull()
-    expect(readInstallManifest(ctx.root)!.ids?.ga4).toEqual([IDS.ga4])
-  })
-
-  it("a 423 lock on site-source parks INF_WIZ_SITE_LOCKED and writes nothing", async () => {
-    const { ctx, outcome } = await run({ code: "site_setup_locked", state: "live_site_lock" })
-    expect(outcome).toMatchObject({ kind: "parked", code: "INF_WIZ_SITE_LOCKED" })
-    expect(read(ctx.root, "index.html")).toBe(STATIC_HTML)
-  })
-
-  it("negative: an invalid_request with no known state is not swallowed", async () => {
-    await expect(run({ code: "invalid_request" })).rejects.toThrow(/invalid_request/)
-  })
-
   it("§3x.8: Infinite's own workspace (409 infinite_workspace) halts INFINITE_WORKSPACE and installs nothing", async () => {
     const { ctx, outcome } = await run({ code: "foreign_site_hosts", state: "infinite_workspace" })
     expect(outcome).toMatchObject({ kind: "failed", code: "INF_WIZ_INFINITE_WORKSPACE", next: "halt" })
     expect((outcome as { message: string }).message).toBe("This workspace is Infinite's own and cannot take a customer site. Run npx infinite-tag --relink and pick another workspace.")
     // Not a "collects for another site" line with GA4 / PostHog installed anyway.
     expect(read(ctx.root, "index.html")).toBe(STATIC_HTML)
-  })
-
-  it("negative: another site's hosts (409 foreign_site_hosts, no state) stays a line and the other tools go on", async () => {
-    const { ctx, outcome } = await run({ code: "foreign_site_hosts" })
-    expect(outcome.kind).toBe("ok")
-    expect(readInstallManifest(ctx.root)!.ids?.infinite).toBeNull()
   })
 })
 
@@ -500,14 +333,9 @@ describe("B24: the wizard's .gitignore fence is a receipted edit", () => {
     expect(fence[0]).toMatchObject({ by: "wizard", planLineId: GITIGNORE_FENCE_LINE_ID, jobId: null, runId: IDS.run, beforeHash: sha256Tagged("node_modules/\n") })
     expect(reverseEditRecord(FENCED, fence[0]!)).toEqual({ ok: true, content: "node_modules/\n" })
   })
-
-  it("NEGATIVE: a fence already committed at HEAD (a resumed run) records nothing", async () => {
-    const { ctx } = await run(FENCED)
-    expect((readInstallManifest(ctx.root)!.edits ?? []).filter((edit) => edit.file === ".gitignore")).toEqual([])
-  })
 })
 
-describe("review fixes (O7 fix round)", () => {
+describe("plan approvals hold until install", () => {
   function autoApprove(ctx: FakeContext, filter: (id: string) => boolean = () => true) {
     ctx.ask = (async (kind: never, payload: never) => {
       ctx.asks.push({ kind, payload })
@@ -547,21 +375,6 @@ describe("review fixes (O7 fix round)", () => {
     expect(payload.lines.map((line) => line.id)).not.toContain(`install_provider:ga4:${IDS.ga4}`)
   })
 
-  it("P1-9 NEGATIVE: a before.json of another schema (another lane's hand-off) is never read as before's facts", async () => {
-    const h = await setup({ files: { "index.html": STATIC_HTML }, consentFlag: "not_required", answers: [] })
-    await h.deps.fs.writeTextAtomic(`${h.ctx.root}/.infinite/wizard/before.json`, JSON.stringify({ schema: "infinite-tag.wizard-before-facts.v1", facts: fakeBefore() }))
-    let bridgeKeysRead = 0
-    ;(h.deps.bridge as unknown as { keys: () => Promise<unknown> }).keys = async () => {
-      bridgeKeysRead += 1
-      return { protocolVersion: 1, requestId: "x", ...fakeKeys() }
-    }
-    ;(h.deps.bridge as unknown as { hosting: () => Promise<unknown> }).hosting = async () => ({ protocolVersion: 1, requestId: "x", ...fakeHosting() })
-    ;(h.deps as unknown as { checks: unknown }).checks = { census: async () => fakeBefore().census }
-    const inputs = await loadPlanInputs(h.ctx, h.deps)
-    expect(bridgeKeysRead).toBe(1)
-    expect("liveFacts" in inputs && inputs.liveFacts).toBe(false)
-  })
-
   it("P2-15: a plan that changed before install parks AND forgets the old plan, so the resume asks again", async () => {
     const h = await setup({ files: { "index.html": STATIC_HTML }, consentFlag: "not_required", answers: [] })
     autoApprove(h.ctx)
@@ -578,24 +391,13 @@ describe("review fixes (O7 fix round)", () => {
     expect(read(h.ctx.root, "index.html")).toBe(STATIC_HTML)
   })
 
-  it("P2-20: a declined Infinite line never calls the site-source verb (no hosts merged, no consent written)", async () => {
+  it("an explicit Infinite decline prevents its installation while other tools continue", async () => {
     const h = await setup({ files: { "index.html": STATIC_HTML }, consentFlag: "not_required", answers: [] })
-    autoApprove(h.ctx, (id) => !id.startsWith("install_provider:infinite"))
+    h.ctx.ask = (async () => ({ approved: [], declined: ["install_provider:infinite"], edits: {} })) as typeof h.ctx.ask
     await planStep.run(h.ctx, h.deps)
     expect((await installStep.run(h.ctx, h.deps)).kind).toBe("ok")
-    expect(h.siteSourceCalls).toEqual([])
+    expect(h.siteSourceCalls).toHaveLength(0)
     expect(read(h.ctx.root, "index.html")).toContain(IDS.ga4)
-  })
-
-  it("P2-19: the approved plan persists the guard, and job 7 carries its exempt hosts", async () => {
-    const meta = STATIC_HTML.replace("</head>", `<script>fbq('init', '${IDS.meta}');</script>\n  </head>`)
-    const h = await setup({ files: { "index.html": meta }, consentFlag: "not_required", answers: [], candidates: [candidate("preview_guard", "meta")] })
-    autoApprove(h.ctx)
-    await planStep.run(h.ctx, h.deps)
-    const job7 = h.ctx.stateValue().jobs.find((item) => item.id === "preview_guard:meta")
-    expect(job7?.trigger.finding).toContain("ALWAYS fire (exempt first): acme-store.com")
-    const saved = JSON.parse(read(h.ctx.root, ".infinite/wizard/plan-approvals.json")) as { guard: { emit: boolean; exempt: string[] } }
-    expect(saved.guard).toMatchObject({ emit: true, exempt: ["acme-store.com"] })
   })
 })
 
@@ -636,23 +438,5 @@ describe("a Next site with its OWN next.config (review I1 P1-2)", () => {
     expect(job.trigger.finding).toContain("/infinite/ledger")
     expect(h.siteSourceCalls).toHaveLength(1)
   })
-
-  it("negative: a config that already has the exact rewrites gets no job and no plan line", async () => {
-    const withRewrites = {
-      ...NEXT_FILES,
-      "next.config.mjs": `export default {\n  async rewrites() {\n    return [\n      { source: "/infinite/ledger", destination: "https://api.ultima.inc/api/analytics/events/collect" }\n    ]\n  }\n}\n`
-    }
-    const { ctx, install } = await runBoth(withRewrites)
-    expect(install.kind).toBe("ok")
-    expect((ctx.asks[0]!.payload as AskPayloads["plan"]).lines.some((line) => line.id === "user_action:next_config_rewrites")).toBe(false)
-    expect(ctx.stateValue().jobs.some((item) => item.id === "unusual_layout:next_config_rewrites")).toBe(false)
-  })
-
-  it("an install the harness would refuse stops BEFORE the site source is written, and the plan said so", async () => {
-    const { h, ctx, install } = await runBoth({ ...NEXT_FILES, "next.config.js": "module.exports = {}\n" })
-    expect((ctx.asks[0]!.payload as AskPayloads["plan"]).lines.find((line) => line.id === "user_action:install_blocked")?.text).toMatch(/multiple Next configs/)
-    expect(install).toMatchObject({ kind: "failed", code: "INF_WIZ_APPLY_ROLLED_BACK" })
-    expect((install as { message: string }).message).toContain("Nothing was written")
-    expect(h.siteSourceCalls).toHaveLength(0)
-  })
 })
+

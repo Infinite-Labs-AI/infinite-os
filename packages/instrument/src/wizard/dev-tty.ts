@@ -1,6 +1,6 @@
 // The prompt the WIZARD opens on the controlling terminal itself (`/dev/tty`), for nested-agent mode's
-// user-only asks (§3d.7, R2-14): consent mode, conversion names, privacy text, the Meta relay, every line
-// that changes an existing tag, teammate comments, uninstall pieces. The parent agent owns stdin and
+// user-only asks (§3d.7, R2-14): consent mode, conversion names, account writes, packages, API costs,
+// the Meta relay, teammate comments, uninstall pieces. The parent agent owns stdin and
 // stdout; it never sees or answers these. With no controlling terminal this returns null and those asks
 // stay unanswered (the run parks NEEDS_ANSWERS: "run npx infinite-tag --resume in your own terminal").
 //
@@ -95,11 +95,21 @@ export function openDevTtyPrompter(path = "/dev/tty", options: { timeoutMs?: num
   const yes = (answer: string) => /^y(es)?$/i.test(answer)
 
   return {
+    async showPlan(payload) {
+      await exchange(async io => {
+        io.say("The plan (repository work is included unless excluded):")
+        for (const line of payload.lines) {
+          io.say(`${payload.excluded?.includes(line.id) ? "Excluded: " : ""}${line.id}`)
+          // Keep handoff lines intact: the normal prompt cap must not truncate code.
+          for (const row of line.text.split("\n")) for (let offset = 0; offset < Math.max(1, row.length); offset += PROMPT_MAX) io.say(row.slice(offset, offset + PROMPT_MAX))
+        }
+      })
+    },
     async planLine(line: PlanLine) {
       const reply = await exchange(async (io) => {
         io.say(`infinite-tag needs your answer (your agent cannot give it): ${line.text}`)
         if (line.kind === "consent_mode") {
-          const answer = await io.question("Consent for this site: [c] collect by default, [a] ask first (consent required), [enter] skip: ")
+          const answer = await io.question("Infinite's tag AND the Meta ad-click cookie: [c] collect by default (other banners are independent), [a] wait for my banner's yes (connect the signal shown), [enter] skip: ")
           if (answer && /^c/i.test(answer)) return { approved: true, edit: "not_required" }
           if (answer && /^a/i.test(answer)) return { approved: true, edit: "required" }
           return null

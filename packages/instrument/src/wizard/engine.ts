@@ -19,6 +19,7 @@ import { WIZARD_EXIT, runExitCode, type WizardCode } from "./contracts/codes.js"
 import type { StepOutcome, WizardContext, WizardDeps, WizardStep, WizardStepRecord } from "./contracts/deps.js"
 import { WIZARD_STEP_IDS, type WizardStepId } from "./contracts/steps.js"
 import { ensureWizardGitignoreFence } from "../harness/marking.js"
+import { prepareResume } from "./prepare-resume.js"
 import { WIZARD_STEPS } from "./steps/index.js"
 
 // ---------------------------------------------------------------------------------------------
@@ -304,7 +305,21 @@ export async function runWizard(ctx: WizardContext, rawDeps: WizardDeps, options
 
   const interrupted = (): EngineResult => ({ exitCode: WIZARD_EXIT.interrupted, interrupted: true, stoppedAt: null, events, haltingCodes })
 
+  const resumingInstalled = initial.steps.install?.outcome === "ok"
+  let resumePrepared = false
   for (const id of WIZARD_STEP_IDS) {
+    if (id !== "link" && !resumePrepared && resumingInstalled && deps.installer.refreshManaged && !options.resumeAt) {
+      resumePrepared = true
+      const outcome = await prepareResume(ctx, deps)
+      if (outcome && (outcome.kind === "parked" || outcome.kind === "failed" || outcome.kind === "blocked")) {
+        ctx.emit.emit("step.start", { step: id })
+        ctx.emit.emit("step.done", { step: id, outcome: outcome.kind, code: outcome.code, reason: outcomeReason(outcome) })
+        events.push({ step: id, outcome, resumedSkip: false })
+        haltingCodes.push(outcome.code)
+        await ctx.state.save()
+        return { exitCode: runExitCode(haltingCodes), interrupted: false, stoppedAt: id, events, haltingCodes }
+      }
+    }
     if (ctx.signal.aborted) return interrupted()
     const step = steps[id] as WizardStep<WizardStepId>
     const hash = step.inputHash(ctx)

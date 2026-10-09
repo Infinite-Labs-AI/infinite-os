@@ -5,10 +5,11 @@
 //
 // NORMATIVE. Item states are COMPUTED by the wizard, never written by the agent: a claim moves an item
 // no further than `claimed`, and `proven` needs a check whose evidence carries THIS run's id.
+import type { EventInventoryEntry, EventSite } from "../../scan/event-inventory.js"
 import type { ManagedTextEdit, WorkspaceInstallArtifacts } from "../../types.js"
 import type { AskAnswers, PlanLine, PlanLineKind } from "./asks.js"
 import type { TagHosting, TagKeys } from "./bridge.js"
-import { arrayOf, oneOf, shapeOf } from "./shape.js"
+import { arrayOf, oneOf, recordOf, shapeOf } from "./shape.js"
 import type { TestExpect, TestMode, TestResult, TestTool } from "./test-engine.js"
 
 // ---------------------------------------------------------------------------------------------
@@ -109,7 +110,7 @@ export const JOB_TABLE: { readonly [J in JobId]: JobSpec & { jobId: J } } = {
     title: "Improve the existing GA4",
     requiresApprovedLine: ["improve_additive"],
     // R4-8: one GA4 page_view per client-side page change, measured by the rehearsal's page change.
-    checks: [c("T1", "ga4_loader_id"), c("RH", "ga4_one_page_view"), c("RH", "ga4_spa_page_view"), c("PV", "ga4_seen_leaving")],
+    checks: [p("S", "ga4_id_applied"), p("S", "spa_page_view_applied"), c("T1", "ga4_loader_id"), c("RH", "ga4_one_page_view"), c("RH", "ga4_spa_page_view"), c("PV", "ga4_seen_leaving")],
     donePath: ["done_in_code", "waiting_deploy", "proven"]
   },
   meta_improve: {
@@ -129,6 +130,7 @@ export const JOB_TABLE: { readonly [J in JobId]: JobSpec & { jobId: J } } = {
       c("RH", "meta_pixel_once"),
       // §3x.3 (F6): one PageView per client-side navigation, measured by the rehearsal's page change.
       c("RH", "meta_spa_page_view"),
+      p("S", "spa_page_view_applied"),
       p("T0", "fbc_capture"),
       c("PV", "meta_seen_leaving")
     ],
@@ -155,7 +157,8 @@ export const JOB_TABLE: { readonly [J in JobId]: JobSpec & { jobId: J } } = {
     n: 7,
     title: "Keep previews silent (existing tags)",
     requiresApprovedLine: ["preview_guard_adopted"],
-    checks: [p("S", "adopted_init_guarded"), c("T0", "host_matrix"), c("RH", "preview_self_silent"), c("T1", "meta_host_matrix")],
+    // Whether the guard really keeps the tool silent off production is a review question (`review/questions.ts`).
+    checks: [c("T0", "host_matrix"), c("RH", "preview_self_silent"), c("T1", "meta_host_matrix")],
     donePath: ["done_in_code", "proven"]
   },
   server_conversions: {
@@ -163,12 +166,15 @@ export const JOB_TABLE: { readonly [J in JobId]: JobSpec & { jobId: J } } = {
     n: 8,
     title: "Report conversions from the server",
     requiresApprovedLine: ["conversion_names"],
+    // Only mechanical rules block here. Whether the report comes after the success point, carries a stable id and the
+    // visitor's match data, and whether the page sends the tracking signal the route reads, are review questions
+    // (`review/questions.ts`): regex got them wrong in both directions.
     checks: [
       // Each fails when there is no reportInfiniteOutcome call in the job's files.
-      p("S", "outcome_after_success"),
       p("S", "outcome_declared"),
-      p("S", "event_id_stable"),
       p("S", "no_pii_in_outcome"),
+      // A purchase carries its value and currency. Passes when nothing applies, so it may only fail the job.
+      c("S", "outcome_value_currency"),
       c("B", "build"),
       c("P", "first_real_outcome")
     ],
@@ -179,28 +185,30 @@ export const JOB_TABLE: { readonly [J in JobId]: JobSpec & { jobId: J } } = {
     n: 9,
     title: "Join visits to accounts",
     requiresApprovedLine: [],
-    checks: [p("S", "identify_on_auth_success"), c("S", "reset_on_every_signout"), c("B", "build"), c("P", "first_identify")],
+    // Identify after a verified login and reset on every sign-out are review questions (`review/questions.ts`).
+    checks: [c("B", "build"), c("P", "first_identify")],
     donePath: ["done_in_code", "waiting_real_event", "proven"]
   },
   conversions_to_tools: {
     jobId: "conversions_to_tools",
     n: 10,
-    // R4-5 (live run 4): the helpers send to GA4 and PostHog only; Infinite counts conversions from the server lane. "to
-    // every tool" promised more, and the reviewer flagged the missing Infinite event as a bug.
-    title: "Send conversions to GA4 and PostHog",
+    // Browser-only Meta events carry no page-built eventID; server-twin Meta conversions still go server first and mirror
+    // only with Infinite's returned id. Review P2: the title says what we do, never "every tool" (a purchase or a lead
+    // reaches Meta from the server, not from this job).
+    title: "Adding conversions to the tools that miss them",
     requiresApprovedLine: ["conversion_names"],
     // T0 click_test for static HTML / Vite, RH click_test for every other framework.
     // §3z.12 §3e.1 (B15): `first_real_conversion` (P) reads baseline(runId, since = the deploy time) on a re-run.
-    // §3x.3: an outcome conversion (signup, lead, booking, purchase, trial) carries `track_after_success` instead of
-    // the click test (its success branch cannot run in a no-send load); a click conversion keeps the click test.
-    // LF4 close round 2 (P1-1): `no_fbq_standard_on_click` passes with nothing of the job in the code, so a click
-    // conversion also carries `conversion_tracked` (its infiniteTrack call is in the job's files).
+    // §3x.3: an outcome conversion (signup, lead, booking, purchase, trial) has no click test (its success branch cannot
+    // run in a no-send load); a click conversion keeps it. `conversion_tracked`: its infiniteTrack call is in the job's
+    // files. Where the call sits (inside the success branch, before the navigation) and that no tool gets the event
+    // twice are review questions (`review/questions.ts`).
     checks: [
       p("T0", "click_test"),
       c("RH", "click_test"),
-      c("S", "no_fbq_standard_on_click"),
       p("S", "conversion_tracked"),
-      p("S", "track_after_success"),
+      // No page-made Meta event id (a hard rule).
+      c("S", "meta_event_id_from_server"),
       c("P", "first_real_conversion")
     ],
     donePath: ["done_in_code", "waiting_real_event", "proven"]
@@ -210,7 +218,8 @@ export const JOB_TABLE: { readonly [J in JobId]: JobSpec & { jobId: J } } = {
     n: 11,
     title: "Fix the setup-check findings",
     requiresApprovedLine: [],
-    checks: [p("S", "setup_rerun_clean"), p("T0", "click_test"), c("RH", "click_test")],
+    // Whether the setup finding is fixed is a review question (`review/questions.ts`).
+    checks: [p("T0", "click_test"), c("RH", "click_test")],
     donePath: ["done_in_code", "proven"]
   },
   csp: {
@@ -232,9 +241,9 @@ export const JOB_TABLE: { readonly [J in JobId]: JobSpec & { jobId: J } } = {
   privacy_paragraph: {
     jobId: "privacy_paragraph",
     n: 14,
-    title: "Add the privacy paragraph",
+    title: "Privacy policy (legacy; owner only)",
     requiresApprovedLine: ["privacy_text"],
-    checks: [p("S", "privacy_names_installed_tools")],
+    checks: [],
     donePath: ["done_in_code", "proven"]
   },
   build_fix: {
@@ -257,11 +266,12 @@ export const JOB_TABLE: { readonly [J in JobId]: JobSpec & { jobId: J } } = {
 
 /**
  * LF4 close round 2 (P1-1): this job's `tier:checkId` PROVES its change is in the code when it passes
- * (`JobCheckSpec.provesChange`). Every other check may only fail the job.
+ * (`JobCheckSpec.provesChange`). Every other check may only fail the job. A job whose change no mechanical check can
+ * see is proven by the review agent's answers instead (`ChecklistItem.review`, `jobs/state-machine.ts`).
  */
 export function checkProvesChange(jobId: string, tier: CheckTier, checkId: CheckId): boolean {
   const spec = (JOB_TABLE as Record<string, JobSpec | undefined>)[jobId]
-  return spec?.checks.some((check) => check.tier === tier && check.checkId === checkId && check.provesChange === true) ?? false
+  return (spec?.checks ?? []).some((check) => check.tier === tier && check.checkId === checkId && check.provesChange === true)
 }
 
 /** The plan-decided topics `ask_user` refuses (`{parked:false, reason:"decided by the plan"}`). */
@@ -271,6 +281,7 @@ export const PLAN_DECIDED_TOPICS = ["consent", "conversion_names", "privacy", "b
 export const NEVER_AGENT_JOBS = [
   "cookie_banner",
   "consent_calls",
+  "privacy_policy_and_terms",
   "conversion_names",
   "gtm_container_edits",
   "meta_domain_settings",
@@ -332,6 +343,7 @@ export const JOB_ITEM_STATES = [
   "waiting_real_event",
   "proven",
   "not_needed",
+  "left_for_you",
   "blocked",
   "failed"
 ] as const
@@ -351,6 +363,44 @@ export type ClaimStatus = "done" | "blocked" | "not_needed"
 export interface EditRef {
   editId: string
   file: string
+}
+
+/**
+ * One question the review agent answers about a job (`review/questions.ts`): a judgement of meaning a static check got
+ * wrong in both directions (is the tracking signal carried with the right polarity, is each event sent once, is the
+ * report after the success point). Its answer never reverts an edit.
+ */
+export interface ItemReviewQuestion {
+  /** Stable within the item (`signal`, `once`, `after_success`, …). */
+  id: string
+  /** The question as the reviewer reads it, with the facts it needs (files, lines, the site's signal reader). */
+  text: string
+  answer: "pass" | "fail" | "cant_tell" | "not_asked"
+  /** The reviewer's words (sanitized, short). */
+  note?: string
+  evidence?: Evidence[]
+}
+
+/**
+ * The review agent's verdict on a job, from the review the jobs step runs right after the agent's turns and before the
+ * edits settle (`wizard/steps/jobs-review.ts`). Every state KEEPS the job's edits:
+ *   pass      — every question passed: the job is proven by the review ("checked by the review agent");
+ *   fail      — a question still failed after one fix round: the job "needs your look", with the reviewer's finding;
+ *   cant_tell — the reviewer could not tell (with why);
+ *   not_run   — no review could run (no reviewer, refused, timed out): the pull request stays a draft.
+ */
+export interface ItemReview {
+  state: "pass" | "fail" | "cant_tell" | "not_run"
+  /** The run whose review produced it (a review from another run never proves). */
+  runId: string
+  at: string
+  /** Who answered; null when no review ran. */
+  reviewer: "claude_code" | "codex" | null
+  /** Plain words: why no review ran, or what the reviewer found / could not tell. */
+  reason?: string
+  questions: ItemReviewQuestion[]
+  /** The failing answers already went back to the agent once (the one fix round). */
+  fixRound?: boolean
 }
 
 export interface ChecklistItemCheck {
@@ -374,6 +424,10 @@ export interface ChecklistItem {
   checks: ChecklistItemCheck[]
   claim?: { status: ClaimStatus; note: string; at: string }
   state: JobItemState
+  /** Set only by deterministic installation; offline consent grants do not prove banner integration. */
+  consentActivation?: "waiting_banner_signal"
+  /** Wizard-derived owner boundary; never accepted from an agent claim or its prose. */
+  ownerBoundary?: { kind: "frozen_unit" | "restored_unit" | "legacy_policy" | "policy_page" | "unproven_wiring"; file?: string; line?: number; unitHash?: string; lineOffset?: number; unitOrdinal?: number; guard?: string; wiring?: string }
   /** Set when state is `blocked`. */
   blockedReason?: BlockedReason
   edits?: EditRef[]
@@ -382,6 +436,20 @@ export interface ChecklistItem {
    * sanitized like claim notes. Shown in the "Not done" line, the PR checklist and the report's job list.
    */
   note?: string
+  /**
+   * The event × tool inventory entries this item fills (`src/scan/event-inventory.ts`): the exact trigger sites, the
+   * sends each tool already has, and the tools still missing the event. Set only by the registry's seeding (from
+   * `JobScan.detections.eventInventory`), never from an agent. Briefs name the files, lines and missing tools from it.
+   */
+  inventory?: EventInventoryEntry[]
+  /** The review agent's answers on this job (set by the jobs step's review, never from the coding agent). */
+  review?: ItemReview
+  /**
+   * An unverified job whose lines stay in the tree because a verified job owns the same block (`shared_lines`) or builds
+   * on them (`needed_by`): the verified jobs' ids and the files. Set only by the jobs step's settlement; the review agent
+   * reads it as "shared with <job>, not verified on its own" (`jobs/settle-edits.ts` `keptForReviewLines`).
+   */
+  keptForReview?: { with: string[]; files: string[]; why: "shared_lines" | "needed_by" }
 }
 
 /** §3x.2 The most a `ChecklistItem.note` keeps. */
@@ -418,7 +486,8 @@ export interface AgentQuestion {
 }
 
 export interface JobListResult {
-  jobs: Array<{ id: string; title: string; allow: { files: string[]; create: string[] }; rules: string[] }>
+  /** `checks`: the wizard's own checks of the job's code, in plain words (a problem can put the job back); `reviewQuestions`: what the review agent will ask. */
+  jobs: Array<{ id: string; title: string; allow: { files: string[]; create: string[] }; rules: string[]; checks: string[]; checkedAfterDeploy: string[]; reviewQuestions: string[] }>
 }
 
 export interface JobClaimInput {
@@ -431,8 +500,23 @@ export interface JobClaimInput {
 /** Never says "verified". */
 export interface JobClaimResult {
   recorded: true
-  next: "the wizard will run its own checks"
+  next: "the wizard will run its own checks" | "fix the static check failures and claim this job again" | typeof CLAIM_UNDECIDED_NEXT
+  /** `undetermined`: the checks the wizard could not decide, with why (live run 2: these were dropped, so the agent read "undetermined, no problems" as acceptable). */
+  staticChecks?: ClaimStaticChecks
 }
+
+/** What the wizard's static checks said at claim time. */
+export interface ClaimStaticChecks {
+  state: "pass" | "problem" | "undetermined" | "not_run"
+  problems: string[]
+  undetermined?: string[]
+}
+
+/** The claim result's next step when some checks could not be decided (and none found a problem). */
+export const CLAIM_UNDECIDED_NEXT = "the wizard could not decide the checks listed under undetermined: fix what they name and claim again; if a reason is something you cannot change (for example a value the site sets in an environment variable), say so in your claim note and go on" as const
+
+/** At most this many claim-time reasons, each at most this long (the agent reads them; a reason is never cut to nothing). */
+export const CLAIM_REASON_LIMITS = { count: 12, chars: 600 } as const
 
 export interface ReportProgressInput {
   job_id: string
@@ -573,12 +657,19 @@ export interface GradeTestRunContext {
    * with no PageView after it graded `meta_spa_page_view_missing`. Absent = not requested.
    */
   spaNavigation?: boolean
+  /**
+   * The site keeps its trackers off until a visitor accepts its own cookie banner (the tag follows the site's own
+   * pixels, or the scan found a consent tool or banner). A visit on which nothing sent is then `held_by_consent`.
+   */
+  siteConsentGate?: boolean
 }
 
 export interface CheckRunner {
   run(checkId: CheckId, input: unknown): Promise<CheckResult | CheckResult[]>
   buildBaseline(): Promise<BuildResult>
   build(): Promise<BuildResult>
+  /** User-approved, sandboxed frozen-lockfile install; only called from `before`. */
+  installDependencies?(onOutput: (line: string) => void): Promise<{ ok: boolean; reason: string | null }>
   t0(scenarios: readonly T0Scenario[], artifacts: WorkspaceInstallArtifacts): Promise<CheckResult[]>
   liveBytes(urls: readonly string[], expect: TestExpect): Promise<CheckResult[]>
   redirectWalk(urls: readonly string[]): Promise<CheckResult[]>
@@ -637,6 +728,12 @@ export interface PlanModel {
     conversionNames: string[]
     privacyText: string | null
     npmInstall: string | null
+    /**
+     * Parity gap 5: hashed email / external id on the browser leg of a Meta conversion (`infiniteMetaAdvancedMatch`,
+     * used by `infiniteMetaMirror(name, id, { identity })`). Absent or true = ON whenever Meta is connected; only an
+     * explicit `false` (the owner turned the plan line off) leaves it out.
+     */
+    metaAdvancedMatching?: boolean
   }
 }
 
@@ -667,6 +764,8 @@ export interface Installer {
    * WITHOUT writing anything. The install step reads it before any cloud write (the site source).
    */
   preflight?(plan: PlanModel, approvals: PlanApprovals): string | null
+  /** Resume-only refresh of whole generated files whose committed ownership hashes still match. */
+  refreshManaged?(plan: PlanModel, approvals: PlanApprovals): Promise<{ changedFiles: string[]; blocked: string[] }>
   npmInstall(pkgs: readonly string[]): Promise<{ ok: boolean; edits: WizardEditRecord[] }>
   recordEdits(edits: readonly WizardEditRecord[]): Promise<void>
   refreshEditReceiptFromHead(): Promise<{ refreshed: boolean }>
@@ -697,6 +796,7 @@ export interface JobRegistry {
  */
 export type PastePlacement =
   | { kind: "after_ga4_config"; measurementId: string }
+  | { kind: "after_meta_pageview" }
   | { kind: "before_meta_init_element" }
   | { kind: "before_meta_init"; pixelId: string }
 
@@ -716,16 +816,29 @@ const EVIDENCE_SHAPE = oneOf(
   shapeOf<{ url: string }>()("UrlEvidence", ["url"], [])
 )
 
+const EVENT_SITE_SHAPE = shapeOf<EventSite>()("EventSite", ["file", "line", "via"], ["navigation", "navigationVia", "leavesBy", "helperAt"], {
+  helperAt: shapeOf<NonNullable<EventSite["helperAt"]>>()("EventSite.helperAt", ["file", "line"], [])
+})
+
 export const CHECKLIST_ITEM_SHAPE = shapeOf<ChecklistItem>()(
   "ChecklistItem",
   ["id", "jobId", "n", "title", "owner", "trigger", "allow", "checks", "state"],
-  ["claim", "blockedReason", "edits", "note"],
+  ["claim", "blockedReason", "edits", "note", "ownerBoundary", "consentActivation", "inventory", "review", "keptForReview"],
   {
     trigger: shapeOf<ChecklistItem["trigger"]>()("ChecklistItem.trigger", ["finding", "evidence"], [], { evidence: arrayOf(EVIDENCE_SHAPE) }),
     allow: shapeOf<ChecklistItem["allow"]>()("ChecklistItem.allow", ["files", "create"], []),
     checks: arrayOf(shapeOf<ChecklistItemCheck>()("ChecklistItemCheck", ["id", "tier", "state"], ["reason", "at", "runId"])),
     claim: shapeOf<NonNullable<ChecklistItem["claim"]>>()("ChecklistItem.claim", ["status", "note", "at"], []),
-    edits: arrayOf(shapeOf<EditRef>()("EditRef", ["editId", "file"], []))
+    edits: arrayOf(shapeOf<EditRef>()("EditRef", ["editId", "file"], [])),
+    inventory: arrayOf(
+      shapeOf<EventInventoryEntry>()("EventInventoryEntry", ["event", "sites", "tools", "missing"], [], {
+        sites: arrayOf(EVENT_SITE_SHAPE),
+        tools: recordOf(arrayOf(EVENT_SITE_SHAPE))
+      })
+    ),
+    review: shapeOf<ItemReview>()("ItemReview", ["state", "runId", "at", "reviewer", "questions"], ["reason", "fixRound"], {
+      questions: arrayOf(shapeOf<ItemReviewQuestion>()("ItemReviewQuestion", ["id", "text", "answer"], ["note", "evidence"], { evidence: arrayOf(EVIDENCE_SHAPE) }))
+    })
   }
 )
 

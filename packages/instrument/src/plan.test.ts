@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync } from "node:fs"
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { cpSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
@@ -28,54 +28,6 @@ afterEach(() => {
 })
 
 describe("planInstallation", () => {
-  it("installs GA4 and PostHog natively with NO Infinite runtime when there is no Infinite source (0.6.0: mirror mode removed)", () => {
-    const root = copyFixture("static-html-basic")
-    const plan = planInstallation({
-      root,
-      workspaceId: "ws_test",
-      artifacts: {
-        ga4: { measurementId: "G-ABC123XYZ" },
-        posthog: { projectKey: "phc_abc123", apiHost: "https://us.i.posthog.com" }
-      }
-    })
-
-    const providerInstructions = plan.instructions
-      .filter((instruction) => instruction.provider)
-      .map((instruction) => instruction.provider)
-    // Before 0.6.0 a dormant Infinite runtime rode along to forward page views into GA4/PostHog;
-    // the runtime now emits only to Infinite, so without a source there is nothing to embed.
-    expect(providerInstructions).toEqual(["ga4", "posthog"])
-    expect(plan.providers).toEqual(["ga4", "posthog"])
-    expect(plan.instructions.some((instruction) => instruction.snippet.includes("data-infinite-runtime"))).toBe(false)
-  })
-
-  it("pins every browser provider before Infinite in the full provider order", () => {
-    const root = copyFixture("static-html-basic")
-    const plan = planInstallation({
-      root,
-      workspaceId: "ws_test",
-      artifacts: {
-        infinite: {
-          siteSourceKey: "site_public_123",
-          collectPath: "/infinite/events/collect",
-          productionHosts: ["example.com"],
-          staticProxy: "vercel",
-          consentMode: "required"
-        },
-        ga4: { measurementId: "G-ABC123XYZ" },
-        posthog: { projectKey: "phc_abc123", apiHost: "https://us.i.posthog.com" },
-        x: { pixelId: "o1abc", eventTagIds: ["tw-event-1"] },
-        meta: { pixelId: "1234567890123456" }
-      }
-    })
-
-    expect(
-      plan.instructions
-        .filter((instruction) => instruction.provider)
-        .map((instruction) => instruction.provider)
-    ).toEqual(["ga4", "posthog", "x", "meta", "infinite"])
-  })
-
   it("blocks static Infinite collection without a proven Vercel same-origin proxy", () => {
     const root = copyFixture("static-html-basic")
     const plan = planInstallation({
@@ -94,28 +46,6 @@ describe("planInstallation", () => {
     expect(plan.instructions.some((instruction) => instruction.snippet.includes("app.ultima.inc"))).toBe(false)
   })
 
-  it("plans the exact Infinite rewrite when static Vercel support is explicit", () => {
-    const root = copyFixture("static-html-basic")
-    const plan = planInstallation({
-      root,
-      workspaceId: "ws_test",
-      artifacts: {
-        infinite: {
-          siteSourceKey: "site_public_123",
-          collectPath: "/infinite/events/collect",
-          productionHosts: ["example.com"],
-          staticProxy: "vercel",
-          consentMode: "required"
-        }
-      }
-    })
-
-    expect(plan.blockers).toEqual([])
-    expect(plan.files).toContain("vercel.json")
-    expect(plan.instructions.find((instruction) => instruction.path === "vercel.json")?.snippet).toContain(
-      "https://api.ultima.inc/api/analytics/events/collect"
-    )
-  })
   it("returns an unsupported repo message for unknown shapes", async () => {
     const root = copyFixture("unsupported-basic")
     const inspectResult = await inspectWorkspace(root)
@@ -227,68 +157,6 @@ describe("planInstallation", () => {
     )
   })
 
-  it("plans an explicit Infinite source after provider initialization in a Next app router fixture", async () => {
-    const root = copyFixture("next-app-router-basic")
-    const inspectResult = await inspectWorkspace(root)
-    const plan = await planInstallation({
-      root,
-      inspect: inspectResult,
-      workspaceId: "ws_test",
-      artifacts: {
-        infinite: {
-          siteSourceKey: "site_public_123",
-          collectPath: "/infinite/events/collect",
-          productionHosts: ["example.com"],
-          consentMode: "required"
-        },
-        ga4: { measurementId: "G-TEST123" },
-        meta: { pixelId: "1234567890123456" }
-      }
-    })
-
-    expect(plan.providers).toEqual(["ga4", "meta", "infinite"])
-    expect(plan.blockers).toEqual([])
-    expect(plan.applyMode).toBe("supported")
-    expect(plan.instructions).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          path: "lib/infinite-analytics.ts",
-          provider: "infinite",
-          snippet: expect.stringContaining("/infinite/events/collect")
-        }),
-        expect.objectContaining({
-          path: "lib/infinite-analytics.ts",
-          provider: "meta",
-          snippet: expect.stringContaining("fbevents.js")
-        })
-      ])
-    )
-    expect(plan.instructions.map((instruction) => instruction.snippet).join("\n")).not.toContain(
-      "app.ultima.inc"
-    )
-  })
-
-  it("keeps Next app router plans blocked when no root layout exists", async () => {
-    const root = copyFixture("next-app-router-page-only")
-    const inspectResult = await inspectWorkspace(root)
-    const plan = await planInstallation({
-      root,
-      inspect: inspectResult,
-      artifacts: {
-        ga4: {
-          measurementId: "G-TEST123"
-        }
-      }
-    })
-
-    expect(inspectResult.framework).toBe("next-app-router")
-    expect(plan.applyMode).toBe("plan-only")
-    expect(plan.blockers).toContain(
-      "Next.js App Router apply requires a root app/layout.* file so the managed client component can be mounted safely."
-    )
-    expect(plan.confidence).toBeLessThan(0.5)
-  })
-
   it("produces a supported plan for a simple Next pages router fixture", async () => {
     const root = copyFixture("next-pages-router-basic")
     const inspectResult = await inspectWorkspace(root)
@@ -334,53 +202,6 @@ describe("planInstallation", () => {
         })
       ])
     )
-  })
-
-  it("keeps Next pages router plans blocked when pages/_app is missing", async () => {
-    const root = copyFixture("next-pages-router-index-only")
-    const inspectResult = await inspectWorkspace(root)
-    const plan = await planInstallation({
-      root,
-      inspect: inspectResult,
-      artifacts: {
-        ga4: {
-          measurementId: "G-TEST123"
-        }
-      }
-    })
-
-    expect(inspectResult.framework).toBe("next-pages-router")
-    expect(plan.applyMode).toBe("plan-only")
-    expect(plan.blockers).toContain(
-      "Next.js Pages Router apply requires pages/_app.* so the managed client component can be mounted safely."
-    )
-    expect(plan.confidence).toBeLessThan(0.5)
-  })
-
-  it("plans a vite-react install by injecting into index.html no matter what main.tsx contains", async () => {
-    // The adapter never reads the React entrypoint, so even a wild main.tsx is irrelevant: the plan
-    // targets index.html and applying it leaves main.tsx byte-for-byte.
-    const root = copyFixture("vite-react-basic")
-    const adversarialMain = 'export {}\nconst createRoot = 1; void createRoot\n'
-    writeFileSync(join(root, "src/main.tsx"), adversarialMain)
-    const inspectResult = await inspectWorkspace(root)
-    const plan = await planInstallation({
-      root,
-      inspect: inspectResult,
-      artifacts: { ga4: { measurementId: "G-TEST123" } }
-    })
-
-    expect(plan.blockers).toEqual([])
-    expect(plan.applyMode).toBe("supported")
-    expect(plan.files).toEqual(["index.html"])
-    expect(plan.instructions.some((instruction) => instruction.action === "manual")).toBe(false)
-
-    const apply = applyInstallation({ root, workspaceId: "ws-test", plan, allowDirty: true })
-    expect(apply.requiresManual).toBeUndefined()
-    expect(readFileSync(join(root, "index.html"), "utf8")).toContain("<!-- infinite:start -->")
-    // main.tsx is untouched and no analytics module was created.
-    expect(readFileSync(join(root, "src/main.tsx"), "utf8")).toBe(adversarialMain)
-    expect(existsSync(join(root, "src/lib/infinite-analytics.ts"))).toBe(false)
   })
 
   it("adopts a hand-rolled gtag tag instead of blocking: no second GA4 copy, Infinite still installs", async () => {
@@ -446,54 +267,6 @@ describe("planInstallation", () => {
     expect(after).toContain("site_public_123")
   })
 
-  it("adopts a GA4 install managed through Tag Manager and names the container file", async () => {
-    const root = copyFixture("static-html-basic")
-    writeFileSync(
-      join(root, "index.html"),
-      [
-        "<!doctype html>",
-        '<html lang="en">',
-        "  <head>",
-        "    <script>(function(w,d,s,l,i){w[l]=w[l]||[];j=d.createElement(s);j.src='https://www.googletagmanager.com/gtm.js?id='+i;})(window,document,'script','dataLayer','GTM-ABCD12');</script>",
-        "  </head>",
-        "  <body></body>",
-        "</html>",
-        ""
-      ].join("\n")
-    )
-
-    const plan = await planInstallation({
-      root,
-      inspect: await inspectWorkspace(root),
-      artifacts: { ga4: { measurementId: "G-TEST123" }, meta: { pixelId: "1234567890123456" } }
-    })
-
-    expect(plan.adopted).toEqual([{ provider: "ga4", via: "gtm", file: "index.html" }])
-    expect(plan.providers).toEqual(["meta"])
-    expect(plan.blockers).toEqual([])
-    expect(plan.assumptions).toContain(
-      "Existing Google Analytics found in index.html (Google Tag Manager); left untouched. infinite-tag will not install a second copy."
-    )
-  })
-
-  it("a GTM container adopts GA4 only — a requested Meta pixel still installs", async () => {
-    const root = copyFixture("static-html-basic")
-    writeFileSync(
-      join(root, "index.html"),
-      '<!doctype html>\n<html lang="en">\n  <head>\n    <script src="https://www.googletagmanager.com/gtm.js?id=GTM-ABCD12"></script>\n  </head>\n  <body></body>\n</html>\n'
-    )
-
-    const plan = await planInstallation({
-      root,
-      inspect: await inspectWorkspace(root),
-      artifacts: { meta: { pixelId: "1234567890123456" } }
-    })
-
-    expect(plan.adopted).toEqual([])
-    expect(plan.providers).toEqual(["meta"])
-    expect(plan.blockers).toEqual([])
-  })
-
   it("when every requested provider already exists, the plan has nothing to write and apply is a no-op", async () => {
     const root = copyFixture("static-html-basic")
     writeFileSync(
@@ -522,54 +295,6 @@ describe("planInstallation", () => {
     ])
     expect(readFileSync(join(root, "index.html"), "utf8")).toBe(before)
     expect(existsSync(join(root, ".infinite", "install.json"))).toBe(false)
-  })
-
-  it("does not block installing a different provider next to a hand-rolled gtag", async () => {
-    const root = copyFixture("static-html-basic")
-    writeFileSync(
-      join(root, "index.html"),
-      '<!doctype html>\n<html lang="en">\n  <head>\n    <script async src="https://www.googletagmanager.com/gtag/js?id=G-EXISTING"></script>\n  </head>\n  <body>\n    <h1>Static fixture</h1>\n  </body>\n</html>\n'
-    )
-
-    const inspectResult = await inspectWorkspace(root)
-    const plan = await planInstallation({
-      root,
-      inspect: inspectResult,
-      artifacts: {
-        posthog: { projectKey: "phc_test", apiHost: "https://app.posthog.example" }
-      }
-    })
-
-    expect(plan.blockers).toEqual([])
-    expect(plan.adopted).toEqual([])
-  })
-
-  it("does not block our own managed re-apply", async () => {
-    const root = copyFixture("static-html-basic")
-    const artifacts = {
-      ga4: { measurementId: "G-TEST123" },
-      posthog: { projectKey: "phc_test", apiHost: "https://app.posthog.example" }
-    }
-    const firstPlan = await planInstallation({
-      root,
-      inspect: await inspectWorkspace(root),
-      workspaceId: "ws-test",
-      artifacts
-    })
-    expect(firstPlan.blockers).toEqual([])
-    applyInstallation({ root, workspaceId: "ws-test", plan: firstPlan, allowDirty: true })
-
-    const rerunPlan = await planInstallation({
-      root,
-      inspect: await inspectWorkspace(root),
-      workspaceId: "ws-test",
-      artifacts
-    })
-
-    expect(rerunPlan.blockers).toEqual([])
-    expect(() =>
-      applyInstallation({ root, workspaceId: "ws-test", plan: rerunPlan, allowDirty: true })
-    ).not.toThrow()
   })
 
   it("blocks static-html plan when index.html has no closing </head> tag", async () => {

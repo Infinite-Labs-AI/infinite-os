@@ -128,7 +128,9 @@ export const metaProviderAdapter: ProviderAdapter = {
       return { assumptions: [], blockers: [guard.error], instructions: [] }
     }
 
-    const consentMode = context?.artifacts.infinite?.consentMode
+    const ownConsentMode = artifact && typeof artifact === "object" && "consentMode" in artifact ? artifact.consentMode : undefined
+    if (ownConsentMode !== undefined && ownConsentMode !== "required" && ownConsentMode !== "not_required") return { assumptions: [], blockers: ["Meta click-id consentMode must be required or not_required."], instructions: [] }
+    const consentMode = ownConsentMode ?? context?.artifacts.infinite?.consentMode
     const captureOnly =
       artifact && typeof artifact === "object" && (artifact as { captureOnly?: unknown }).captureOnly === true
     if (captureOnly) {
@@ -165,8 +167,8 @@ export const metaProviderAdapter: ProviderAdapter = {
           : []),
         "Meta wiring will use only the public pixelId artifact.",
         consentMode === "required"
-          ? "Meta click-id capture is ON: when a visitor who has granted consent lands from a Meta ad, the page saves the ad's click id in Meta's own _fbc cookie, even if the pixel itself is blocked. It sends nothing."
-          : "Meta click-id capture is ON: when a visitor lands from a Meta ad, the page saves the ad's click id in Meta's own _fbc cookie, even if the pixel itself is blocked, so a later conversion can be credited to the ad. It skips visitors who said no on this site or whose browser sends Do Not Track / Global Privacy Control (until they grant), and it sends nothing.",
+          ? "Meta ad-click capture is NOT ACTIVE YET: it waits for your banner's yes signal to Infinite before saving _fbc. Connect the yes/no signal in the owner instructions. Offline capture checks work when consent is granted; they do not test your banner connection."
+          : "Meta ad-click capture starts with Infinite's tag. It saves _fbc on ad landings and sends nothing.",
         advancedMatching
           ? "Manual Advanced Matching is ON: the page will define window.infiniteMetaAdvancedMatch, which hashes the raw email / external id YOUR code passes it. It never reads the page and never runs on its own."
           : "Manual Advanced Matching is OFF (default): the pixel sends no visitor contact details. Turn it on with --meta-advanced-matching on."
@@ -229,6 +231,7 @@ export function buildMetaPixelSnippet(pixelId: string, options: MetaPixelSnippet
     "s.parentNode.insertBefore(t,s)}(window, document,'script',",
     "'https://connect.facebook.net/en_US/fbevents.js');",
     `fbq('set', 'autoConfig', 'false', ${jsLiteral(pixelId)});`,
+    "fbq.disablePushState = true;",
     `fbq('init', ${jsLiteral(pixelId)});`,
     "fbq('track', 'PageView');"
   ].join("\n")
@@ -263,7 +266,7 @@ export const META_SILENCED_FLAG = "__infiniteSilenced"
  * accessor treat it as no pixel. The site's own `fbq('track', …)` on a preview cannot throw and strand a
  * click. One line, so the job-7 recipe can carry it on its guard line.
  */
-export const META_SILENCED_STUB = `if (typeof window.fbq !== 'function') { window.fbq = function () {}; window.fbq.${META_SILENCED_FLAG} = true; }`
+export const META_SILENCED_STUB = `if (typeof window !== 'undefined' && typeof window.fbq !== 'function') { window.fbq = function () {}; window.fbq.${META_SILENCED_FLAG} = true; }`
 
 /** The placeholder the adopted-guard recipe uses for the emitted guard expression. */
 export const GUARD_EXPRESSION_PLACEHOLDER = "<GUARD_EXPRESSION>"
@@ -290,6 +293,24 @@ export function adoptedMetaGuardRecipe(guard: HostGuardSpec): string {
   return ADOPTED_META_GUARD_RECIPE.replace(GUARD_EXPRESSION_PLACEHOLDER, buildHostGuardExpression(guard))
 }
 
+/** Plain modules keep the existing bootstrap (and any consent call inside it) in place. */
+export function adoptedMetaModuleGuardRecipe(expression: string, typeScript: boolean): string {
+  const alias = typeScript
+    ? "var infinitePreviewWindow = window as unknown as { fbq?: ((...args: unknown[]) => void) & { __infiniteSilenced?: boolean } };"
+    : "var infinitePreviewWindow = window;"
+  return [
+    'if (typeof window === "undefined") return;',
+    `if (!(${expression})) {`,
+    `  ${alias}`,
+    '  if (typeof infinitePreviewWindow.fbq !== "function") {',
+    "    infinitePreviewWindow.fbq = function () {};",
+    "    infinitePreviewWindow.fbq.__infiniteSilenced = true;",
+    "  }",
+    "  return;",
+    "}"
+  ].join("\n")
+}
+
 export { META_CLICK_ID_ACCESSOR }
 
 /**
@@ -301,7 +322,7 @@ export { META_CLICK_ID_ACCESSOR }
  * nobody. The emitted source must also stay free of backticks and `${` — for Next it is folded
  * into a String.raw template — and free of a literal `</script>`.
  */
-function buildMetaAdvancedMatchingSnippet(pixelId: string, gate: MetaBrowserGate): string {
+export function buildMetaAdvancedMatchingSnippet(pixelId: string, gate: MetaBrowserGate): string {
   return [
     "(function () {",
     `  if (typeof window.${META_ADVANCED_MATCHING_ACCESSOR} === "function") return;`,

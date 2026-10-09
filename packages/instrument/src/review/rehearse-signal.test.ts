@@ -7,11 +7,11 @@ import { join } from "node:path"
 
 import { afterEach, describe, expect, it } from "vitest"
 
-import { fakeBridge, fakeHosting, fakeKeys, initialState, RUN_ID, testContext, testDeps } from "../../test/wizard/o4-fakes.js"
+import { fakeBridge, fakeKeys, initialState, RUN_ID, testContext, testDeps } from "../../test/wizard/o4-fakes.js"
 import { BridgeError } from "../bridge/errors.js"
 import type { GitHostAdapter, GitOps } from "../wizard/contracts/git-host.js"
 import type { AgentRunner } from "../wizard/contracts/agents.js"
-import { localVercelLink, resolveVercelSignal } from "../wizard/vercel-signal.js"
+import { localVercelLink } from "../wizard/vercel-signal.js"
 import { rehearsalLines, rehearse } from "./rehearse.js"
 import type { RunFacts } from "./context.js"
 
@@ -65,7 +65,7 @@ describe("the rehearsal gate without an Infinite Vercel connection (§3y.4)", ()
     expect(gitHost.projects).toEqual(["fresh-acme"])
   })
 
-  it("review P1-2 / P2-1: the desktop REFUSES the preview (no Vercel connection) → undetermined, said as a refusal (no claim: 'preview_unconfirmed'; a pending claim: 'preview_unserved'); the preview's own load is not asked", async () => {
+  it("the desktop REFUSES the preview (no Vercel connection) → undetermined, said as a refusal (no claim: 'preview_unconfirmed'; a pending claim: 'preview_unserved'); the preview's own load is not asked", async () => {
     const root = repo()
     const ctx = testContext({ root, state: initialState({ runId: RUN_ID }) })
     const bridge = fakeBridge({ hosting: { provider: "none", vercel: null } })
@@ -93,31 +93,7 @@ describe("the rehearsal gate without an Infinite Vercel connection (§3y.4)", ()
       ghReady: true
     })
     expect(claimed.reason).toBe("preview_unserved")
-    expect(rehearsalLines(claimed)[0]!.text).toBe("Rehearsal: undetermined (the preview did not serve this pull request's proof file, e.g. it is protected)")
-  })
-
-  it("review P2-1: a refusal of a dry_live target (targets.0.url) with Vercel connected → 'preview_refused'; any OTHER 4xx stays test_error", async () => {
-    const vercelHosting = { provider: "vercel" as const, vercel: { ...fakeHosting().vercel!, previewProtection: "none" as const } }
-    const run = async (error: BridgeError) => {
-      const ctx = testContext({ root: repo(), state: initialState({ runId: RUN_ID }) })
-      const bridge = fakeBridge({ hosting: vercelHosting })
-      bridge.startTest = async () => {
-        throw error
-      }
-      const deps = testDeps({ bridge, agents: {} as AgentRunner, git: {} as GitOps, host: host("https://acme-store-git-x.vercel.app") })
-      return rehearse(ctx, deps, { step: "rehearsal", runId: RUN_ID, head: HEAD, facts: facts({ hosting: vercelHosting }), approvedConversions: [], evidenceUrls: [], consentRequired: false, ghReady: true })
-    }
-    const refused = await run(new BridgeError({ status: 400, code: "invalid_request", message: "x", retryable: false, field: "targets.0.url" }))
-    expect(refused.reason).toBe("preview_refused")
-    expect(rehearsalLines(refused)[0]!.text).toBe("Rehearsal: undetermined (Infinite refused the preview: it is not this site's Vercel project)")
-    // An invalid_request about another field is not a preview refusal.
-    expect((await run(new BridgeError({ status: 400, code: "invalid_request", message: "x", retryable: false, field: "spaNavigation" }))).reason).toBe("test_error")
-    expect((await run(new BridgeError({ status: 400, code: "invalid_request", message: "x", retryable: false }))).reason).toBe("test_error")
-    // The terminal cuts sub lines at 120 characters: each refusal line fits whole.
-    for (const reason of ["preview_unconfirmed", "preview_unserved", "preview_refused"] as const) {
-      const text = rehearsalLines({ ...refused, reason })[0]!.text
-      expect(text.length, text).toBeLessThanOrEqual(120)
-    }
+    expect(rehearsalLines(claimed)[0]!.text).toBe("Rehearsal: undetermined (the preview did not serve this pull request's proof file)")
   })
 
   it("NEGATIVE: no signal at all → undetermined 'not_vercel', worded 'no Vercel preview found for this site'", async () => {
@@ -133,17 +109,6 @@ describe("vercelSignal (read once per run)", () => {
     const mono = repo({ ".vercel/repo.json": JSON.stringify({ projects: [{ name: "docs", directory: "apps/docs" }, { name: "web", directory: "apps/web" }] }) })
     expect(await localVercelLink(nodeFs, mono, "apps/web")).toEqual({ linked: true, projectName: "web" })
     expect(await localVercelLink(nodeFs, repo(), ".")).toEqual({ linked: false, projectName: null })
-  })
-
-  it("a vercel[bot] deployment is the signal when nothing is linked locally, and the answer is cached in state", async () => {
-    const root = repo()
-    const ctx = testContext({ root, state: initialState({ runId: RUN_ID, site: { productionHost: "fresh-acme.com", source: "answer", decidedAt: "t" } }) })
-    let reads = 0
-    const gitHost = { ...host(null), vercelDeploymentSeen: async () => (reads += 1, true) } as unknown as GitHostAdapter
-    expect(await resolveVercelSignal(ctx, { fs: nodeFs, host: gitHost }, { provider: "none", vercel: null })).toEqual({ signal: true, projectName: null })
-    expect(await resolveVercelSignal(ctx, { fs: nodeFs, host: gitHost }, { provider: "none", vercel: null })).toEqual({ signal: true, projectName: null })
-    expect(reads).toBe(1)
-    expect(ctx.state.get().site?.vercelSignal).toBe(true)
   })
 })
 

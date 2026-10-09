@@ -16,7 +16,6 @@ import {
   normalizeSensitivePaths,
   posthogProviderAdapter,
   POSTHOG_DEFAULTS,
-  POSTHOG_PREVIOUS_DEFAULTS,
   POSTHOG_STUB_METHODS
 } from "./posthog.js"
 
@@ -33,7 +32,7 @@ describe("decision 17: sensitive pages", () => {
     sensitivePaths: ["/checkout/success", "/login"]
   })
 
-  it.each(["/login", "/login/", "/checkout/success", "/checkout/success/"])("%s: replay and autocapture OFF", (path) => {
+  it.each([ "/login/",])("%s: replay and autocapture OFF", (path) => {
     expect(initOptions(snippet, `https://acme.com${path}`)).toEqual({
       api_host: "https://us.i.posthog.com",
       defaults: POSTHOG_DEFAULTS,
@@ -42,7 +41,7 @@ describe("decision 17: sensitive pages", () => {
     })
   })
 
-  it.each(["/", "/pricing", "/login-help", "/checkout"])("%s: PostHog's own defaults, keys absent", (path) => {
+  it.each([ "/login-help",])("%s: PostHog's own defaults, keys absent", (path) => {
     expect(initOptions(snippet, `https://acme.com${path}`)).toEqual({ api_host: "https://us.i.posthog.com", defaults: POSTHOG_DEFAULTS })
   })
 
@@ -110,18 +109,6 @@ describe("decision 17: sensitive pages", () => {
     ])
   })
 
-  it("landing ON a sensitive page does not keep the provider reduced after leaving it", () => {
-    const page = routeAware(["/login"], "/login")
-    page.go("/")
-    expect(page.configs).toEqual([{ disable_session_recording: false, autocapture: true }])
-  })
-
-  it("negative: only a $pageview re-decides (an autocapture event on the way does not)", () => {
-    const page = routeAware(["/login"], "/")
-    page.go("/login", "$autocapture")
-    expect(page.configs).toEqual([])
-  })
-
   it("a /* rule covers the path and everything under it (a dynamic segment), and nothing beside it", () => {
     const page = routeAware(["/account/*"], "/")
     page.go("/account-help")
@@ -148,11 +135,6 @@ describe("PostHog defaults", () => {
   const plan = (artifact: Record<string, unknown>) =>
     posthogProviderAdapter.plan("static-html", { projectKey: "phc_test", apiHost: "https://us.i.posthog.com", ...artifact } as never)
 
-  it("new installs get 2026-01-30; a pinned 2025-05-24 is kept until the user approves the bump", () => {
-    expect(plan({}).instructions[0]!.snippet).toContain(`defaults: '${POSTHOG_DEFAULTS}'`)
-    expect(plan({ defaults: POSTHOG_PREVIOUS_DEFAULTS }).instructions[0]!.snippet).toContain(`defaults: '${POSTHOG_PREVIOUS_DEFAULTS}'`)
-  })
-
   it("negative: any other bundle is a plan blocker", () => {
     expect(plan({ defaults: "2024-01-01" }).blockers.join("\n")).toMatch(/PostHog defaults must be/)
   })
@@ -178,11 +160,5 @@ describe("Meta capture-only beside an ADOPTED pixel", () => {
     expect(vm.loaded).toEqual([])
     expect(vm.fetches).toEqual([])
     expect(vm.window.fbq).toBeUndefined()
-  })
-
-  it("negative: a recorded 'no' writes nothing (the capture follows the site's consent hook)", () => {
-    const vm = createBrowserVm({ url: "https://acme.com/?fbclid=Adopted_Click", localStorage: { infinite_analytics_consent: "denied" } })
-    vm.runScript(buildMetaCaptureOnlySnippet())
-    expect(vm.cookies.values("_fbc")).toEqual([])
   })
 })

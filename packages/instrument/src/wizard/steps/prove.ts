@@ -1,3 +1,8 @@
+import { buildScanner, runPublicIds } from "../../review/context.js"
+import { safeDisplayText } from "../../review/display.js"
+import { loadPlanApprovals } from "../../install/step-inputs.js"
+import type { ChecklistItem } from "../contracts/jobs.js"
+import { withheldPreviewTools, previewScope } from "../../review/preview-scope.js"
 // Step 11 `prove` (§3d.1): after the merge is deployed, ONE real test visit and the best proof each tool
 // can give, from THIS run.
 //
@@ -42,7 +47,7 @@ import {
 import { bridgeErrorCode, bridgeErrorState } from "../bridge-errors.js"
 import { gradeReasonCode, gradeWords } from "../before-column.js"
 import { buildColumn, type ColumnFact, type RowCellInput } from "../report.js"
-import { PREVIEW_REFUSED, productionMatcher, rehearsalTargets, runDesktopTest } from "../../review/rehearse.js"
+import { PREVIEW_REFUSED, previewNeedsLogin, productionMatcher, rehearsalTargets, runDesktopTest } from "../../review/rehearse.js"
 import { GhError } from "../../github/gh.js"
 import { testPageUrls } from "./rehearsal.js"
 import { readBeforeFactsFile } from "../handoff/before-facts.js"
@@ -52,6 +57,9 @@ import type { VerdictToolFact } from "../contracts/report.js"
 import type { CensusResult } from "../contracts/jobs.js"
 import { verdictFactsFor } from "../verdict-facts.js"
 import { proofStateOf } from "../verdict.js"
+import { proveCommerce, type CommerceProofLine } from "./prove-commerce.js"
+import { readEventInventory } from "../../checks/commerce-inventory.js"
+import { loadRepoSnapshot } from "../../jobs/repo-files.js"
 
 /** How often the deploy status is read, and how long `prove` waits before parking (the desktop watcher continues). */
 export const PROVE_LIMITS = {
@@ -114,17 +122,20 @@ async function descends(deps: WizardDeps, mergeSha: string, serving: string, pro
 }
 
 /** §3y.4: what one GitHub read says about the merge's production deploy. */
-export type GithubDeployRead = { deployed: true; sha: string; how: "github_deployment" | "serving_descends" } | { failed: true } | { waiting: "building" | "not_found" }
+export type GithubDeployRead = { deployed: true; sha: string; how: "github_deployment" | "serving_descends" } | { failed: true; reason?: string; blocked?: boolean } | { waiting: "building" | "not_found" } | { unavailable: true; reason: string }
 
 export async function githubDeployRead(deps: WizardDeps, reader: DeploymentReader, mergeSha: string, productionBranch: string | null): Promise<GithubDeployRead> {
-  const own = await reader.productionDeployment(mergeSha).catch(() => ({ state: "not_found" as const }))
-  if (own.state === "ready") return { deployed: true, sha: mergeSha, how: "github_deployment" }
+  const own = await reader.productionDeployment(mergeSha).catch(() => null)
+  if (own?.state === "ready") return { deployed: true, sha: mergeSha, how: "github_deployment" }
   // A later successful production deployment that contains the merge serves it too (a canceled or failed merge build).
-  const latest = await reader.latestProductionDeployment().catch(() => null)
+  const latest = await reader.latestProductionDeployment().catch(() => undefined)
   if (latest && latest.sha === mergeSha) return { deployed: true, sha: mergeSha, how: "github_deployment" }
   if (latest && (await descends(deps, mergeSha, latest.sha, productionBranch))) return { deployed: true, sha: latest.sha, how: "serving_descends" }
-  if (own.state === "failed") return { failed: true }
-  return { waiting: own.state === "building" ? "building" : "not_found" }
+  if (own?.state === "failed") return { failed: true, ...(own.reason ? { reason: own.reason } : {}), ...(own.blocked ? { blocked: true } : {}) }
+  if (own?.state === "building") return { waiting: "building" }
+  if (own === null || latest === undefined) return { unavailable: true, reason: "GitHub's production deployment status could not be read; whether this merge is live is unknown." }
+  if (latest === null) return { unavailable: true, reason: "GitHub shows no production deployment status for this merge and no earlier successful production deployment; whether this merge is live is unknown." }
+  return { waiting: "not_found" }
 }
 
 /** The signals `prove` can wait on this run (§3y.4). With none, it asks instead of waiting. */
@@ -138,10 +149,10 @@ export interface DeploySignals {
 }
 
 /**
- * `no_signal`: the claim was proven, but it says nothing about THIS merge's deploy (the file was already served before
- * it), and no other signal exists; the step then asks, as it does with no signal at all.
+ * `no_signal`: no remaining source can report THIS merge's deploy. GitHub may have no visible production history,
+ * or a proven claim's file was already served before this merge. The step asks rather than guessing success.
  */
-export type DeployOutcome = (DeployWait & { deployed: true }) | { deployed: false; why: "timeout" | "failed" | "no_signal" | "claim_gone" }
+export type DeployOutcome = (DeployWait & { deployed: true }) | { deployed: false; why: "timeout" | "failed" | "no_signal" | "claim_gone"; reason?: string; blocked?: boolean }
 
 /**
  * Review P3-1: the cloud reading the proof file shows THIS merge deployed only when the merge brought that file:
@@ -212,8 +223,10 @@ async function waitForDeploy(
   const say = waitLines(ctx, deps)
   let lastClaimPoll = -Infinity
   let claimLive = signals.claim
+  let unavailableReason: string | undefined
   ctx.emit.emit("step.sub", { step: "prove", text: `Waiting for the deploy of ${mergeSha.slice(0, 7)}…`, tone: "pending" })
   for (;;) {
+    let githubLive = signals.github !== null
     if (signals.infinite) {
       const result = await mergeIsDeployed(deps, mergeSha, input.productionBranch)
       if (result.deployed) return result
@@ -221,8 +234,14 @@ async function waitForDeploy(
     if (signals.github) {
       const read = await githubDeployRead(deps, signals.github, mergeSha, input.productionBranch)
       if ("deployed" in read) return read
-      if ("failed" in read) return { deployed: false, why: "failed" }
-      say(read.waiting === "building" ? `GitHub: Vercel is building ${mergeSha.slice(0, 7)}…` : `GitHub shows no production deployment for ${mergeSha.slice(0, 7)} yet`)
+      if ("failed" in read) return { deployed: false, why: "failed", reason: read.reason, blocked: read.blocked }
+      if ("unavailable" in read) {
+        githubLive = false
+        if (unavailableReason !== read.reason) ctx.emit.emit("step.sub", { step: "prove", text: read.reason, tone: "warn" })
+        unavailableReason = read.reason
+      } else {
+        say(read.waiting === "building" ? `GitHub: Vercel is building ${mergeSha.slice(0, 7)}…` : `GitHub shows no production deployment for ${mergeSha.slice(0, 7)} yet`)
+      }
     }
     const now = deps.clock.now().getTime()
     if (claimLive && now - lastClaimPoll >= PROVE_LIMITS.claimPollMs) {
@@ -239,14 +258,15 @@ async function waitForDeploy(
           text: `The proof file was already on ${input.host ?? "your site"} before this merge, so it does not show that ${mergeSha.slice(0, 7)} deployed`,
           tone: "info"
         })
-        if (!signals.infinite && !signals.github) return { deployed: false, why: "no_signal" }
+        if (!signals.infinite && !githubLive) return { deployed: false, why: "no_signal", reason: unavailableReason }
       } else if (answer?.state === "none") {
         // Review P1-1: the claim is gone (expired, or another source took the site); waiting on it can never prove.
         claimLive = false
         input.onGone()
-        if (!signals.infinite && !signals.github) return { deployed: false, why: "claim_gone" }
+        if (!signals.infinite && !githubLive) return { deployed: false, why: "claim_gone" }
       } else if (input.host) say(`Checking ${input.host}/.well-known/infinite-site-verification.txt…`)
     }
+    if (!signals.infinite && !githubLive && !claimLive) return { deployed: false, why: "no_signal", reason: unavailableReason }
     if (deps.clock.now().getTime() - started >= PROVE_LIMITS.deployWaitMs) return { deployed: false, why: "timeout" }
     await deps.clock.sleep(PROVE_LIMITS.deployPollMs, ctx.signal)
   }
@@ -518,6 +538,9 @@ export type PostDeployLoad =
   /** `said`: what stopped the load in words (review P1-5: a refused address is said as refused, never a "test error"). */
   | { kind: "none"; reason: Reason; said?: string }
 
+/** P0-2: how the previews check after the deploy reads when the merge's own address needs a Vercel login. */
+export const MERGE_ADDRESS_NEEDS_LOGIN = "not tried (the deployment address needs a Vercel login)"
+
 /** Review P1-5: a post-deploy load that returned no result, as what really happened (runDesktopTest's own error). */
 export function unloaded(error: string | null, what: string): Extract<PostDeployLoad, { kind: "none" }> {
   if (error === PREVIEW_REFUSED) return { kind: "none", reason: "not_exercised", said: `the Infinite app refused to load ${what}: it could not tie that address to this site` }
@@ -528,6 +551,7 @@ export function unloaded(error: string | null, what: string): Extract<PostDeploy
 }
 
 export interface ProvenColumnInput {
+  jobs?: readonly ChecklistItem[]
   runId: string
   mergeSha: string
   at: string
@@ -636,7 +660,7 @@ export function buildProvenColumn(input: ProvenColumnInput): ReportColumnSnapsho
       facts.push({ input: "t1.redirect_walk", state: result.state, at: result.at, checkId: result.checkId, display: t1Words(result) })
     }
   }
-  if (input.postDeploy) facts.push(...postDeployFacts(input.postDeploy, input.installed, expect, at))
+  if (input.postDeploy) facts.push(...postDeployFacts(input.postDeploy, input.installed, expect, at, input.jobs))
 
   // §3x.6 Receipts, per tool under test: a beacon with a receipt, a receipt problem, or an installed tool that sent
   // NOTHING (the cloud cannot know it is installed, so only the visit can say it was silent; run 3's Meta pixel).
@@ -650,7 +674,10 @@ export function buildProvenColumn(input: ProvenColumnInput): ReportColumnSnapsho
     const lane = receipts.lanes.posthog
     const viaProxy = posthogViaProxy(visit)
     const fact = receiptFact(lane, "receipts.posthog", at, "PostHog")
-    if (fact.state === "pass" && viaProxy === false) facts.push({ ...fact, state: "problem", display: "PostHog: sent directly (ad blockers drop it)" })
+    // No receipt because the grader could not grade PostHog on the visit (the site's banner held it): unknown, not a problem.
+    if (fact.state === "problem" && visit !== null && viaProxy === null && ungradedOn(visit, "posthog")) {
+      facts.push({ ...fact, state: "undetermined", display: "PostHog: route not observed by this run", reason: reportReason(gradeReasonCode(visit.grades.posthog)) })
+    } else if (fact.state === "pass" && viaProxy === false) facts.push({ ...fact, state: "problem", display: "PostHog: sent directly (ad blockers drop it)" })
     else if (fact.state === "pass" && viaProxy === null) facts.push({ ...fact, state: "undetermined", display: "PostHog: route not observed by this run" })
     else facts.push(fact)
   }
@@ -658,7 +685,7 @@ export function buildProvenColumn(input: ProvenColumnInput): ReportColumnSnapsho
 
   facts.push({
     input: "keys.consent_mode",
-    state: input.keys.infinite.consentMode ? "pass" : "problem",
+    state: "info",
     display: input.keys.infinite.consentMode ? consentWords(input.keys.infinite.consentMode) : "not recorded",
     at
   })
@@ -666,14 +693,11 @@ export function buildProvenColumn(input: ProvenColumnInput): ReportColumnSnapsho
   // Rows.
   const rows: Parameters<typeof buildColumn>[1]["rows"] = {}
   rows.consent_setting = input.keys.infinite.consentMode
-    ? { value: input.keys.infinite.consentMode, display: consentWords(input.keys.infinite.consentMode), state: "pass", source: "cloud_read", at }
-    : { value: "not recorded", display: "not recorded", state: "problem", source: "cloud_read", at }
+    ? { value: input.keys.infinite.consentMode, display: consentWords(input.keys.infinite.consentMode), state: "info", source: "cloud_read", at }
+    : { value: "not recorded", display: "not recorded", state: "info", source: "cloud_read", at }
   rows.preview_share = { value: null, state: "not_measured", source: "cloud_read", at, reason: "needs_7_days" }
   rows.ga4_key_events = { value: null, state: "pending", source: "cloud_read", at, reason: "needs_7_days" }
-  rows.server_conversions =
-    input.conversionsWaiting > 0
-      ? { value: "waiting", display: `${input.conversionsWaiting} wired · waits for a real conversion`, state: "pending", source: "wizard_check", at }
-      : { value: null, state: "not_measured", source: "wizard_check", at, reason: "not_exercised" }
+  rows.server_conversions = serverConversionsRow(input, at)
   rows.live_test_per_tool = liveTestRow(proofLanes, receipts, at)
   if (visit) {
     rows.ga4_page_views_per_visit = ga4PageViewsRow(visit, expect, input.installed, at, receipts.lanes.ga4)
@@ -695,6 +719,16 @@ export function buildProvenColumn(input: ProvenColumnInput): ReportColumnSnapsho
 }
 
 /**
+ * The "Conversions sent from the server" cell after the deploy. While the site has no server-event secret yet, the
+ * owner's setup steps are undone and nothing can arrive: it says so, never "waits for a real conversion".
+ */
+function serverConversionsRow(input: Pick<ProvenColumnInput, "conversionsWaiting" | "keys">, at: string): RowCellInput {
+  if (input.conversionsWaiting <= 0) return { value: null, state: "not_measured", source: "wizard_check", at, reason: "not_exercised" }
+  const setUp = input.keys.serverLane?.laneState !== undefined && input.keys.serverLane.laneState !== "no_secret"
+  return { value: "waiting", display: setUp ? `${input.conversionsWaiting} wired · waits for a real conversion` : `${input.conversionsWaiting} wired · sends nothing until you do the setup steps`, state: "pending", source: "wizard_check", at }
+}
+
+/**
  * R2-2: the column when nothing on the live site was measured. `measuredAt` stays null (the headline then says "not
  * checked live yet" with the reason), every cell is "—" with the run's unmeasured reason, and only the by-design
  * pending cells (a real conversion, the day-7 key events) keep their own reasons. Never a pass, never a problem.
@@ -707,10 +741,7 @@ function unmeasuredProvenColumn(input: ProvenColumnInput, receipts: ReceiptsResp
     consent_setting: dash("cloud_read"),
     preview_share: { value: null, state: "not_measured", source: "cloud_read", at, reason: "needs_7_days" },
     ga4_key_events: { value: null, state: "pending", source: "cloud_read", at, reason: "needs_7_days" },
-    server_conversions:
-      input.conversionsWaiting > 0
-        ? { value: "waiting", display: `${input.conversionsWaiting} wired · waits for a real conversion`, state: "pending", source: "wizard_check", at }
-        : { value: null, state: "not_measured", source: "wizard_check", at, reason: "not_exercised" },
+    server_conversions: serverConversionsRow(input, at),
     live_test_per_tool:
       tools.length === 0 && !input.serverLaneInstalled ? { value: null, state: "not_measured", source: "cloud_receipt", at, reason: "not_connected" } : dash("cloud_receipt"),
     ga4_page_views_per_visit: expect.ga4 ? dash("desktop_test") : { value: null, state: "not_measured", source: "desktop_test", at, reason: "not_connected" },
@@ -748,7 +779,10 @@ function toolReceiptFact(tool: TestTool, visit: ProvenColumnInput["visit"], lane
   const installed = (input.installed ?? []).includes(tool)
   const fired = visit !== null && beaconsOf(visit.result, tool) > 0
   if (visit !== null && !fired && installed) {
-    if (ungradedOn(visit, tool)) return { input: "receipts.per_tool", state: "undetermined", display: `${label}: could not be graded on the real visit`, at, reason: reportReason(gradeReasonCode(visit.grades[tool])) }
+    if (ungradedOn(visit, tool)) {
+      const reason = reportReason(gradeReasonCode(visit.grades[tool]))
+      return { input: "receipts.per_tool", state: "undetermined", display: `${label}: ${reason === "held_by_consent" ? "not measured, kept off by your cookie banner" : "could not be graded on the real visit"}`, at, reason }
+    }
     return { input: "receipts.per_tool", state: "problem", display: `${label}: sent nothing`, at }
   }
   if (lane.state === "no_receipt" && (lane.reason ?? "").startsWith("unmarked:")) return { input: "receipts.per_tool", state: "problem", display: `${label}: ${UNMARKED_WORDS}`, at }
@@ -761,7 +795,7 @@ function toolReceiptFact(tool: TestTool, visit: ProvenColumnInput["visit"], lane
 }
 
 /** §3x.6 The post-deploy measurements as facts: production's own bytes, the merge's own deployment, a page change. */
-function postDeployFacts(post: NonNullable<ProvenColumnInput["postDeploy"]>, installed: readonly TestTool[] | null, expect: TestExpect, at: string): ColumnFact[] {
+function postDeployFacts(post: NonNullable<ProvenColumnInput["postDeploy"]>, installed: readonly TestTool[] | null, expect: TestExpect, at: string, jobs?: readonly ChecklistItem[]): ColumnFact[] {
   const facts: ColumnFact[] = []
   for (const check of post.byteCensus.filter((entry) => entry.checkId === "byte_census")) {
     facts.push({
@@ -772,10 +806,17 @@ function postDeployFacts(post: NonNullable<ProvenColumnInput["postDeploy"]>, ins
       checkId: check.checkId
     })
   }
-  if (post.mergePreview.kind === "none") {
+  const leftPreview = withheldPreviewTools(jobs)
+  if (post.mergePreview.kind === "none" && post.mergePreview.reason === "preview_protected") {
+    // P0-2: an address behind a login was not tried: said as such, never "unknown".
+    facts.push({ input: "merge_preview.graded", state: "info", display: MERGE_ADDRESS_NEEDS_LOGIN, at, reason: "preview_protected" })
+  } else if (post.mergePreview.kind === "none") {
     facts.push({ input: "merge_preview.graded", state: "undetermined", display: post.mergePreview.said ?? "the merge's own deployment address was not loaded", at, reason: post.mergePreview.reason })
   } else {
+    const scoped = leftPreview.length ? previewScope(post.mergePreview.grades, leftPreview) : null
+    if (scoped && (scoped.state === "pass" || scoped.state === "info")) facts.push({ input: "merge_preview.graded", state: "info", display: scoped.note, at, checkId: "preview_self_silent" })
     for (const tool of ["ga4", "posthog", "meta"] as const) {
+      if (leftPreview.includes(tool) || (scoped && (scoped.state === "pass" || scoped.state === "info"))) continue
       const grade = post.mergePreview.grades[tool]
       if (!grade || grade.state === "info") continue
       const code = gradeReasonCode(grade)
@@ -817,7 +858,7 @@ function spaFacts(result: TestResult, grades: Record<TestTool, CheckResult>, ins
 }
 
 function consentWords(mode: "not_required" | "required"): string {
-  return mode === "required" ? "ask first (consent required)" : "collect by default"
+  return mode === "required" ? "waits for your banner's yes" : "starts with your site's own analytics, or on page load if it has none"
 }
 
 function liveTestRow(lanes: Array<[ReceiptLane, string]>, receipts: ReceiptsResponseFields, at: string): RowCellInput {
@@ -846,6 +887,8 @@ function ga4PageViewsRow(visit: NonNullable<ProvenColumnInput["visit"]>, expect:
   // §3x.6: an installed GA4 with no connection is measured too (its ID just cannot be compared).
   if (!expect.ga4) {
     if (!(installed ?? []).includes("ga4") && visit.result.ga4.events.length === 0) return { value: null, state: "not_measured", source: "desktop_test", at, reason: "not_connected" }
+    // Silent because the grader could not grade it here (the site's banner held it, a bot-flagged window): unknown.
+    if (visit.result.ga4.events.length === 0 && ungradedOn(visit, "ga4")) return { value: null, state: "undetermined", source: "desktop_test", at, checkId: "ga4_seen_leaving", reason: reportReason(gradeReasonCode(visit.grades.ga4)) }
     const views = visit.result.ga4.events.filter((event) => event.en === "page_view" && !event.afterNav)
     const sent = views.some((event) => typeof event.status === "number" && event.status >= 200 && event.status < 300)
     return {
@@ -909,6 +952,7 @@ function metaPixelRow(visit: NonNullable<ProvenColumnInput["visit"]>, expect: Te
   const sent = tr.some((event) => typeof event.status === "number" && event.status >= 200 && event.status < 300)
   if (blocked) return { value: "blocked", display: `blocked on ${visit.result.loads[0]?.finalUrl ? new URL(visit.result.loads[0].finalUrl).host : "the site"}`, state: "problem", source: "desktop_test", at, checkId: "meta_seen_leaving" }
   if (sent) return { value: "sending", display: "sending · domain allowed", state: "pass", source: "desktop_test", at, checkId: "meta_seen_leaving" }
+  if (tr.length === 0 && ungradedOn(visit, "meta")) return { value: null, state: "undetermined", source: "desktop_test", at, checkId: "meta_seen_leaving", reason: reportReason(gradeReasonCode(visit.grades.meta)) }
   return { value: "not seen", display: "no Meta event seen leaving", state: tr.length > 0 ? "problem" : "undetermined", source: "desktop_test", at, checkId: "meta_seen_leaving" }
 }
 
@@ -990,6 +1034,7 @@ async function writeOwnClaim(ctx: WizardContext, deps: WizardDeps, record: Prove
 
 
 async function runProve(ctx: WizardContext, deps: WizardDeps): Promise<StepOutcome> {
+  if ((await loadPlanApprovals(ctx, deps))?.ownerWiring?.canWire === false) return { kind: "skipped", reason: "Infinite’s tag was NOT installed by this run. Add the owner wiring before testing it live." }
   if (ctx.options.noProve) {
     return { kind: "skipped", reason: "--no-prove: the Infinite app proves the site after the deploy and shows it in Site Settings." }
   }
@@ -1015,7 +1060,10 @@ async function runProve(ctx: WizardContext, deps: WizardDeps): Promise<StepOutco
   // §3y.4: every signal this run can wait on. GitHub counts only when it shows Vercel deploying this repo.
   const reader = deploymentReader(deps.host)
   let github: DeploymentReader | null = null
-  if (reader && hosting.provider !== "vercel") {
+  if (reader && hosting.provider === "vercel") {
+    reader.setPreviewProject?.(hosting.vercel?.projectName ?? null)
+    github = reader
+  } else if (reader) {
     const vercel = await resolveVercelSignal(ctx, deps, hosting)
     reader.setPreviewProject?.(vercel.projectName)
     if (vercel.signal || (await reader.latestProductionDeployment().catch(() => null)) !== null) github = reader
@@ -1036,12 +1084,12 @@ async function runProve(ctx: WizardContext, deps: WizardDeps): Promise<StepOutco
   }
 
   // No way to see the deploy: ONE question instead of a 20-minute wait (never under --yes / --json).
-  const askDeployed = async (): Promise<Extract<DeployWait, { deployed: true }> | null> => {
+  const askDeployed = async (reason?: string): Promise<Extract<DeployWait, { deployed: true }> | null> => {
     const asked =
       ctx.options.yes || ctx.options.json || ctx.options.nested
         ? false
         : await ctx.ask("confirm", {
-            question: `Infinite can't see when ${productionHost ?? "your site"} deploys (no Vercel connection, no GitHub deployments). Is pull request #${state.pr?.number ?? "?"} live on ${productionHost ?? "your site"} now?`,
+            question: `${reason ?? `Infinite can't see when ${productionHost ?? "your site"} deploys (no Vercel connection, no GitHub deployments).`} Is pull request #${state.pr?.number ?? "?"} live on ${productionHost ?? "your site"} now?`,
             defaultYes: false
           })
     return asked === true ? { deployed: true, sha: mergeSha, how: "you_said" } : null
@@ -1071,16 +1119,20 @@ async function runProve(ctx: WizardContext, deps: WizardDeps): Promise<StepOutco
     }
     if (!waited.deployed && waited.why === "no_signal") {
       await ctx.state.save()
-      const said = await askDeployed()
-      if (!said) return cannotSee
+      const said = await askDeployed(waited.reason)
+      if (!said) return waited.reason ? { ...cannotSee, reason: waited.reason, resumeHint: "Check this merge's production deployment in the hosting dashboard, then run npx infinite-tag again once it is live." } : cannotSee
       deploy = said
     } else if (!waited.deployed) {
       if (waited.why === "failed") {
+        const scanner = buildScanner(ctx, deps, await runPublicIds(ctx, deps))
+        const reason = waited.reason ? safeDisplayText(scanner, waited.reason) : null
         return {
           kind: "parked",
           code: "INF_WIZ_DEPLOY_FAILED",
-          reason: `The deploy of ${mergeSha.slice(0, 7)} failed (GitHub shows the Vercel production deployment failed).`,
-          resumeHint: "Fix it and run npx infinite-tag again."
+          reason: reason ? `The deploy of ${mergeSha.slice(0, 7)} ${waited.blocked ? "is blocked" : "failed"}: ${reason}${/[.!?]$/.test(reason) ? "" : "."}` : `The deploy of ${mergeSha.slice(0, 7)} failed (GitHub shows the Vercel production deployment failed).`,
+          resumeHint: waited.blocked
+            ? "A member of the hosting team must redeploy this merge in the hosting dashboard, or merge a follow-up change to trigger a permitted deployment. Once it is live, run npx infinite-tag again."
+            : "Fix it and run npx infinite-tag again."
         }
       }
       return {
@@ -1186,13 +1238,21 @@ async function runProve(ctx: WizardContext, deps: WizardDeps): Promise<StepOutco
   const deployed = await installedAtMerge(ctx, deps, mergeSha, productionBranch)
   // Review P1-6: the cause is said and carried into THE verdict (at best unconfirmed), never swallowed.
   if (deployed.unknown !== null) ctx.emit.emit("step.sub", { step: "prove", text: `! ${deployed.unknown}: a tool that is installed but sent nothing cannot be named, so this run cannot be called proper`, tone: "warn" })
+  const consentMode = state.plan?.answers.consentMode ?? keys.infinite.consentMode
+  // The site keeps its trackers behind its own banner: the test window never accepts it, so a silent visit is not measured.
+  const siteConsentGate = keepsTrackersBehindBanner({
+    census: deployed.census,
+    consentMode,
+    staticCmp: (await readBeforeFactsFile(deps.fs, ctx.root, ctx.runId).catch(() => null))?.cmpDetected ?? null
+  })
   const gradeCtx = (result: TestResult) => ({
     ...gradeContextFrom({
       census: deployed.census ?? EMPTY_CENSUS,
       installed: deployed.installed ?? [],
-      consentMode: state.plan?.answers.consentMode ?? keys.infinite.consentMode,
+      consentMode,
       cmpDetected: result.environment.cmpDetected
     }),
+    ...(siteConsentGate ? { siteConsentGate: true } : {}),
     now: () => new Date(result.startedAt)
   })
   const installed = deployed.census === null ? null : (gradeCtx(EMPTY_FACTS_FOR_CONTEXT).installedTools ?? [])
@@ -1262,12 +1322,16 @@ async function runProve(ctx: WizardContext, deps: WizardDeps): Promise<StepOutco
   for (const tool of toolsUnderTest(expect, installed, visit?.result ?? null)) {
     const lane = receipts.lanes[TOOL_LANES[tool]]
     const fired = lane.state === "verified" || lane.state === "delivering"
-    ctx.emit.emit("step.sub", { step: "prove", text: `${fired ? "✓" : "·"} ${TOOL_LABELS[tool]} · ${receiptWords(tool, lane, expect[tool] !== undefined)}`, tone: fired ? "ok" : "warn" })
+    const conditional = tool === "infinite" && keys.infinite.consentMode === "required" && !!keys.infinite.consentStorageKey
+    ctx.emit.emit("step.sub", { step: "prove", text: conditional && fired ? `· ${TOOL_LABELS[tool]} · receipt under a test grant; waiting on your banner signal (not verified)` : `${fired ? "✓" : "·"} ${TOOL_LABELS[tool]} · ${receiptWords(tool, lane, expect[tool] !== undefined)}`, tone: conditional && fired ? "info" : fired ? "ok" : "warn" })
   }
 
   // Review I1 P1-1: once this run holds the claim, nothing between here and the PATCH may leave the cloud run
   // `proving` for 24 h. An unexpected error building the column still settles the proof as undetermined.
   let proofState: "proven" | "problem" | "undetermined" | null = null
+  let commerce: CommerceProofLine[] = []
+  // ONE read of Infinite's record since the merge, shared by the shop-event proof and the passive checks.
+  const readBaseline = baselineOnce(ctx, deps, runId, deployedSince(state, deps))
   try {
     // T1 after the deploy (read-only).
     const t1: CheckResult[] = []
@@ -1279,6 +1343,8 @@ async function runProve(ctx: WizardContext, deps: WizardDeps): Promise<StepOutco
       if (visit !== null || Object.values(receipts.lanes).some(laneFired)) {
         postDeploy = await measureAfterDeploy(ctx, deps, { runId, mergeSha, productionHost, expect, keys, gradeCtx, reader })
       }
+      // Review r3: the shop events the plan promised Meta and Infinite, measured where the engine can, said where not.
+      commerce = await commerceProof(ctx, deps, { runId, mergeSha, productionHost, expect, reader, since: deployedSince(state, deps), readBaseline })
     }
 
     // Live run 6: per-tool grades are not job check ids. Derive the PV checks from this
@@ -1335,10 +1401,11 @@ async function runProve(ctx: WizardContext, deps: WizardDeps): Promise<StepOutco
     await ctx.state.save()
 
     // §3z.12 §3e.1 (B15): the passive checks read real events AFTER the deploy (baseline since = deploy time).
-    await applyPassiveChecks(ctx, deps, runId, deployedSince(state, deps))
+    await applyPassiveChecks(ctx, deps, runId, deployedSince(state, deps), readBaseline)
 
     const at = deps.clock.now().toISOString()
     const column = buildProvenColumn({
+      jobs: ctx.state.get().jobs,
       runId,
       mergeSha,
       at,
@@ -1399,11 +1466,55 @@ async function runProve(ctx: WizardContext, deps: WizardDeps): Promise<StepOutco
     return { kind: "failed", code: "INF_WIZ_PROOF_INCOMPLETE", message: `The real visit could not run: ${visitError}.`, next: "continue" }
   }
   const tail = won || ownClaim ? "" : " (receipts from the Infinite app's visit)"
-  return { kind: "ok", status: `${passed} of ${lanes.length} tools passed the live test${tail}${proofState === "problem" ? " · problems found" : ""}` }
+  const missingShop = commerce.filter((line) => line.state === "missing").length
+  const shop = missingShop > 0 ? ` · ${missingShop} shop event${missingShop === 1 ? "" : "s"} not reaching Meta` : ""
+  return { kind: "ok", status: `${passed} of ${lanes.length} tools passed the live test${tail}${proofState === "problem" ? " · problems found" : ""}${shop}` }
+}
+
+/**
+ * Review r3: the shop-event proof (`prove-commerce.ts`) with this run's inventory and code, each line said as a
+ * sub-line. A crash is said as "could not run", never a pass, and never stops the proof.
+ */
+async function commerceProof(
+  ctx: WizardContext,
+  deps: WizardDeps,
+  input: { runId: string; mergeSha: string; productionHost: string; expect: TestExpect; reader: DeploymentReader | null; since: string | null; readBaseline: () => Promise<BridgeBaseline> }
+): Promise<CommerceProofLine[]> {
+  let lines: CommerceProofLine[]
+  try {
+    const before = await readBeforeFactsFile(deps.fs, ctx.root, ctx.runId)
+    const inventory = readEventInventory((before as unknown as { eventInventory?: unknown } | null)?.eventInventory)
+    let files: ReadonlyMap<string, string> | null = null
+    try {
+      files = inventory ? loadRepoSnapshot(ctx.root, ctx.appRoot).files : null
+    } catch {
+      files = null
+    }
+    lines = await proveCommerce(ctx, deps, { ...input, inventory, files })
+  } catch (error) {
+    lines = [{ id: "shop_events", state: "not_measured", words: `Meta's shop events: the live check could not run (${errorWords(error)}).` }]
+  }
+  const mark = { seen: "✓", missing: "!", not_measured: "·" } as const
+  const tone = { seen: "ok", missing: "warn", not_measured: "info" } as const
+  for (const line of lines) ctx.emit.emit("step.sub", { step: "prove", text: `${mark[line.state]} ${line.words}`, tone: tone[line.state] })
+  return lines
 }
 
 /** No census entries: the grader then knows only what this run installed. */
 const EMPTY_CENSUS: CensusResult = { entries: [], envSourcedIds: [], identify: { identifyCalls: [], resetCalls: [] } }
+/**
+ * The site keeps its trackers off until a visitor accepts its own cookie banner: the tag follows the site's own pixels
+ * (the site runs GA4, PostHog or a Meta pixel of its own and Infinite's consent mode is not_required, exactly when the
+ * install turns follow mode on), or the scan found a consent tool or banner. The proof visit never accepts a banner
+ * (the desktop test engine has no way to; it may only seed Infinite's own key), so on such a site a visit where
+ * nothing sent is "not measured", never a failure.
+ */
+export function keepsTrackersBehindBanner(input: { census: CensusResult | null; consentMode: "required" | "not_required" | null; staticCmp: TestResult["environment"]["cmpDetected"] }): boolean {
+  if (input.staticCmp !== null) return true
+  const sitePixels = (input.census?.entries ?? []).some((entry) => entry.owner === "adopted" && (entry.tool === "ga4" || entry.tool === "posthog" || entry.tool === "meta"))
+  return input.consentMode === "not_required" && sitePixels
+}
+
 /** gradeContextFrom reads only the facts' cmpDetected; this stands in when no visit facts exist yet. */
 const EMPTY_FACTS_FOR_CONTEXT = { environment: { cmpDetected: null } } as unknown as TestResult
 
@@ -1499,7 +1610,12 @@ async function measureAfterDeploy(
       ctx.emit.emit("step.sub", { step: "prove", text: `! The merge's own deployment address could not be read from GitHub (${kind}); previews are not re-checked after the deploy`, tone: "warn" })
     }
   }
-  if (deploymentUrl && !isProd(new URL(deploymentUrl).hostname) && isDeniedHost(new URL(deploymentUrl).hostname)) {
+  // P0-2: Vercel's login answers the desktop's proof read with a 302 to vercel.com, so the desktop would refuse the
+  // address. Asked first, without credentials: a login is said as a login, never as a refusal.
+  if (deploymentUrl && !isProd(new URL(deploymentUrl).hostname) && isDeniedHost(new URL(deploymentUrl).hostname) && (await previewNeedsLogin(deps.fetch, deploymentUrl))) {
+    mergePreview = { kind: "none", reason: "preview_protected", said: MERGE_ADDRESS_NEEDS_LOGIN }
+    ctx.emit.emit("step.sub", { step: "prove", text: "The merge's own deployment address needs a Vercel login, so previews were not loaded after the deploy", tone: "info" })
+  } else if (deploymentUrl && !isProd(new URL(deploymentUrl).hostname) && isDeniedHost(new URL(deploymentUrl).hostname)) {
     ctx.emit.emit("step.sub", { step: "prove", text: `Loading the merge's own address ${new URL(deploymentUrl).host} (nothing sent)…`, tone: "pending" })
     const loaded = await runDesktopTest(ctx, deps, "prove", {
       mode: "dry_live",
@@ -1538,7 +1654,9 @@ async function measureAfterDeploy(
       : unloaded(loaded.error, "the page change after the deploy")
   }
   if (mergePreview.kind === "graded") {
-    liveChecks.push(...(await deps.checks.gradeTestRunChecks(mergePreview.result, expect, "dry_live", input.gradeCtx(mergePreview.result))).filter((check) => check.checkId === "preview_self_silent").map((check) => ({ ...check, tier: "RH" as const })))
+    const left = withheldPreviewTools(ctx.state.get().jobs)
+    const scoped = left.length ? previewScope(mergePreview.grades, left) : null
+    liveChecks.push(...(await deps.checks.gradeTestRunChecks(mergePreview.result, expect, "dry_live", input.gradeCtx(mergePreview.result))).filter(check => check.checkId === "preview_self_silent").map(check => ({ ...check, ...(scoped ? { state: scoped.state, reason: scoped.state === "pass" ? "Non-withheld preview guards were read as silent" : scoped.state === "info" ? scoped.note : scoped.state === "problem" ? "previews_send_data — A non-withheld tool sends from the preview" : "not_exercised — A non-withheld preview tool could not be graded" } : {}), tier: "RH" as const })))
   }
   if (deployedDry.kind === "graded") {
     for (const fact of spaFacts(deployedDry.result, deployedDry.grades, input.gradeCtx(deployedDry.result).installedTools, expect, deployedDry.result.startedAt)) {
@@ -1645,12 +1763,24 @@ function deployedSince(state: Readonly<WizardRunState>, deps: WizardDeps): strin
  * P-tier results with THIS run's id, applied through the registry (the one state machine). `first_identify`
  * (job 9) has no v1 source and stays `waiting_real_event`. A failed read leaves them unknown, never 0.
  */
-async function applyPassiveChecks(ctx: WizardContext, deps: WizardDeps, runId: string, since: string | null): Promise<void> {
+type BridgeBaseline = Awaited<ReturnType<WizardDeps["bridge"]["baseline"]>>
+
+/** One baseline read since `since`, made on first use and shared by every reader of this prove run. */
+function baselineOnce(ctx: WizardContext, deps: WizardDeps, runId: string, since: string | null): () => Promise<BridgeBaseline> {
+  let read: Promise<BridgeBaseline> | null = null
+  return () => {
+    if (since === null) return Promise.reject(new Error("the merge time is not known"))
+    read ??= deps.bridge.baseline(runId, { since, signal: ctx.signal })
+    return read
+  }
+}
+
+async function applyPassiveChecks(ctx: WizardContext, deps: WizardDeps, runId: string, since: string | null, readBaseline: () => Promise<BridgeBaseline>): Promise<void> {
   const waiting = ctx.state.get().jobs.filter((item) => item.state === "waiting_real_event" && item.checks.some((check) => check.tier === "P"))
   if (waiting.length === 0 || since === null || !deps.bridge.has("tag.baseline.v1")) return
   let baseline: Awaited<ReturnType<WizardDeps["bridge"]["baseline"]>>
   try {
-    baseline = await deps.bridge.baseline(runId, { since, signal: ctx.signal })
+    baseline = await readBaseline()
   } catch (error) {
     if (isTransientBridgeFailure(error) || bridgeErrorCode(error) !== null) return
     throw error

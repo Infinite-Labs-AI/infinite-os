@@ -8,6 +8,9 @@
 // tarpit (comments, templates, type-only imports, aliases, lexical shadows), and index.html injection
 // has no entrypoint surface to get wrong.
 import { join } from "node:path"
+import { ownerWiringRequirement, policyWiringRequirement, policyUninstallWarning } from "./owner-boundary.js"
+import { recordGeneratedApi } from "../jobs/generated-api.js"
+import { managedBlockFor } from "./entry-wiring.js"
 
 import type { FrameworkAdapter, InstallInstruction, ManualRequirement } from "../types.js"
 import { infiniteProxySpec } from "../workspace-artifacts.js"
@@ -41,13 +44,6 @@ function indexHtmlCanInject(html: string): boolean {
 }
 
 /** The provider `<script>…</script>` snippets targeting index.html, assembled into the managed block. */
-function managedBlockFor(instructions: InstallInstruction[]): string {
-  const providerSnippets = instructions
-    .filter((instruction) => (instruction.provider || instruction.helpers) && instruction.path.endsWith(INDEX_HTML))
-    .map((instruction) => instruction.snippet.trim())
-    .filter((snippet) => snippet.length > 0)
-  return buildManagedHtmlBlock(providerSnippets)
-}
 
 export const viteReactAdapter: FrameworkAdapter = {
   id: "vite-react",
@@ -138,6 +134,8 @@ export const viteReactAdapter: FrameworkAdapter = {
 
     const managedBlock = managedBlockFor(context.plan.instructions)
     const indexRootRelative = normalizeAppRelativePath(context.appRoot, INDEX_HTML)
+    const policy = policyWiringRequirement(indexRootRelative, managedBlock, context.appRoot)
+    if (policy) return { changedFiles: [], warnings: [policy.reason], requiresManual: [policy] }
 
     if (!fileExists(appRoot, INDEX_HTML)) {
       requiresManual.push({
@@ -149,8 +147,11 @@ export const viteReactAdapter: FrameworkAdapter = {
       const html = readRequiredFile(appRoot, INDEX_HTML)
       if (indexHtmlCanInject(html)) {
         const nextHtml = upsertManagedHtmlBlock(html, managedBlock)
-        if (writeFileIfChanged(appRoot, INDEX_HTML, nextHtml)) {
-          changedFiles.push(indexRootRelative)
+        const manual = ownerWiringRequirement(indexRootRelative, html, nextHtml, managedBlock, context.appRoot)
+        if (manual) { requiresManual.push(manual); warnings.push(manual.reason) }
+        else {
+          recordGeneratedApi(context.root, indexRootRelative, managedBlock)
+          if (writeFileIfChanged(appRoot, INDEX_HTML, nextHtml)) changedFiles.push(indexRootRelative)
         }
       } else {
         // Genuine edge: no </head> to inject into. Fail closed with the exact block to add by hand.
@@ -196,6 +197,8 @@ export const viteReactAdapter: FrameworkAdapter = {
     const warnings: string[] = []
 
     const indexRootRelative = normalizeAppRelativePath(context.appRoot, INDEX_HTML)
+    const policyWarning = policyUninstallWarning(indexRootRelative, context.appRoot)
+    if (policyWarning) return { removedFiles: [], restoredFiles: [], warnings: [policyWarning] }
     if (context.manifest.files.includes(indexRootRelative)) {
       if (!fileExists(appRoot, INDEX_HTML)) {
         warnings.push(`Managed file already absent: ${indexRootRelative}`)

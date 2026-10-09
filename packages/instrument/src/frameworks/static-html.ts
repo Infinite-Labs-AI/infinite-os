@@ -1,8 +1,11 @@
 import { readFileSync, readdirSync, type Dirent } from "node:fs"
 import { join } from "node:path"
 
-import type { FrameworkAdapter, InstallInstruction } from "../types.js"
+import type { FrameworkAdapter, InstallInstruction, ManualRequirement } from "../types.js"
 import { infiniteProxySpec } from "../workspace-artifacts.js"
+import { ownerWiringRequirement, policyWiringRequirement, policyUninstallWarning } from "./owner-boundary.js"
+import { recordGeneratedApi } from "../jobs/generated-api.js"
+import { staticManagedBlockFor } from "./entry-wiring.js"
 
 import {
   fileExists,
@@ -68,6 +71,7 @@ export const staticHtmlAdapter: FrameworkAdapter = {
       // A single missing tag anywhere blocks the whole plan so no page is silently skipped.
       // (Domain-verification token files are not pages: findHtmlPages never lists them.)
       for (const page of pages) {
+        if (policyWiringRequirement(page, "")) continue
         if (!readRequiredFile(root, page).includes("</head>")) {
           blockers.push(missingHeadMessage(page))
         }
@@ -92,7 +96,7 @@ export const staticHtmlAdapter: FrameworkAdapter = {
     const pageAssumptions = [
       ...(pages.length > 1
         ? [
-            `Static HTML wiring injects the managed analytics block into every discovered page: ${pages.join(", ")}.`
+            `Static HTML wiring targets discovered pages; privacy/terms pages and consent-bearing source stay owner-only: ${pages.join(", ")}.`
           ]
         : [
             "Static HTML wiring uses direct public snippets rather than framework-specific runtime hooks."
@@ -135,36 +139,41 @@ export const staticHtmlAdapter: FrameworkAdapter = {
     }
 
     // Provider snippets are page-agnostic — every page receives the same managed block.
-    const providerSnippets = context.plan.instructions
-      .filter((instruction) => (instruction.provider || instruction.helpers) && isHtmlPath(instruction.path))
-      .map((instruction) => instruction.snippet.trim())
-      .filter((snippet) => snippet.length > 0)
-
-    const managedBlock = buildManagedHtmlBlock(providerSnippets)
+    const managedBlock = staticManagedBlockFor(context.plan.instructions)
 
     const changedFiles: string[] = []
     const configOwnership = {}
+    const requiresManual: ManualRequirement[] = []
     for (const page of pages) {
+      const path = normalizeAppRelativePath(context.appRoot, page)
+      const policy = policyWiringRequirement(path, managedBlock, context.appRoot)
+      if (policy) { requiresManual.push(policy); continue }
       const html = readRequiredFile(appRoot, page)
       if (!html.includes("</head>")) {
         throw new Error(missingHeadMessage(page))
       }
 
       const nextHtml = upsertManagedHtmlBlock(html, managedBlock)
-
-      if (writeFileIfChanged(appRoot, page, nextHtml)) {
-        changedFiles.push(normalizeAppRelativePath(context.appRoot, page))
+      const manual = ownerWiringRequirement(path, html, nextHtml, managedBlock, context.appRoot)
+      if (manual) requiresManual.push(manual)
+      else {
+        recordGeneratedApi(context.root, path, managedBlock)
+        if (writeFileIfChanged(appRoot, page, nextHtml)) changedFiles.push(path)
       }
     }
 
     // vercel.json is written exactly ONCE, outside the per-page loop.
-    const warnings: string[] = []
+    const warnings: string[] = requiresManual.map(requirement => requirement.reason)
     const proxy = {
       posthog: context.plan.artifacts.posthog?.proxy,
       infinite: infiniteProxySpec(context.plan.artifacts.infinite)
     }
-    if (proxy.posthog || proxy.infinite) {
-      const rootRelativeConfig = normalizeAppRelativePath(context.appRoot, VERCEL_CONFIG_FILE)
+    const rootRelativeConfig = normalizeAppRelativePath(context.appRoot, VERCEL_CONFIG_FILE)
+    const configPolicy = policyWiringRequirement(rootRelativeConfig, buildVercelJson(proxy), context.appRoot)
+    if ((proxy.posthog || proxy.infinite) && configPolicy) {
+      requiresManual.push(configPolicy)
+      warnings.push(configPolicy.reason)
+    } else if (proxy.posthog || proxy.infinite) {
       const appliedConfig = applyManagedVercelJson({
         appRootAbsolute: appRoot,
         proxy,
@@ -184,7 +193,8 @@ export const staticHtmlAdapter: FrameworkAdapter = {
     return {
       changedFiles,
       warnings,
-      configOwnership
+      configOwnership,
+      ...(requiresManual.length ? { requiresManual } : {})
     }
   },
   uninstall(context) {
@@ -194,6 +204,8 @@ export const staticHtmlAdapter: FrameworkAdapter = {
     const warnings: string[] = []
 
     for (const page of pages) {
+      const policyWarning = policyUninstallWarning(normalizeAppRelativePath(context.appRoot, page), context.appRoot)
+      if (policyWarning) { warnings.push(policyWarning); continue }
       if (!fileExists(appRoot, page)) {
         warnings.push(`Managed file already absent: ${page}`)
         continue
@@ -212,7 +224,8 @@ export const staticHtmlAdapter: FrameworkAdapter = {
     }
 
     // Reverse the once-written vercel.json (outside the per-page loop).
-    const vercelReversal = reverseManagedVercelJson({
+    const configPolicyWarning = policyUninstallWarning(normalizeAppRelativePath(context.appRoot, VERCEL_CONFIG_FILE), context.appRoot)
+    const vercelReversal = configPolicyWarning ? { removedFiles: [], restoredFiles: [], warnings: [configPolicyWarning] } : reverseManagedVercelJson({
       manifestFiles: context.manifest.files,
       ownership:
         context.manifest.configOwnership?.[
@@ -284,11 +297,12 @@ const ignoredDirNames = new Set([
  * discovery inside the workspace root. index.html is hoisted to the front; the
  * remaining pages are sorted for deterministic plans, manifests, and output.
  */
-function findHtmlPages(appRoot: string): string[] {
+export function findHtmlPages(appRoot: string): string[] {
   return walkHtmlFiles(appRoot).filter(
     (page) => page === "index.html" || !isVerificationTokenFile(join(appRoot, page))
   )
 }
+
 
 /** The .html files under the app root that are domain-verification tokens, not pages. */
 function findVerificationFiles(appRoot: string): string[] {

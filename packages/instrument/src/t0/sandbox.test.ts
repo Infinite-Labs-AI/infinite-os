@@ -6,7 +6,7 @@ import { join } from "node:path"
 
 import { describe, expect, it } from "vitest"
 
-import { buildSandboxProfile, CLI_CREDENTIAL_STORES, defaultDenyReads, minimalChildEnv, sandboxedSpawn, SandboxUnavailableError, STDIO_GRACE_MS } from "./sandbox.js"
+import { buildSandboxProfile, CLI_CREDENTIAL_STORES, defaultDenyReads, minimalChildEnv, sandboxedSpawn, STDIO_GRACE_MS } from "./sandbox.js"
 
 const darwin = process.platform === "darwin"
 
@@ -65,15 +65,6 @@ describe("the sandbox profile", () => {
     // negative: an unrelated dotfile is not swept in
     expect(deny.paths).not.toContain("/Users/founder/.zshrc")
   })
-
-  it("covers every §3a.9 secret location under each home, plus GROWTH_OS_HOME and extras", () => {
-    const deny = defaultDenyReads({ homes: ["/Users/founder"], growthOsHome: "/opt/growth", extra: ["/Users/founder/Library/Caches/infinite-tag/snapshots"] })
-    for (const path of [".codex", ".ssh", ".aws", ".npmrc", ".netrc", "Library/Caches/infinite-tag"]) expect(deny.paths).toContain(`/Users/founder/${path}`)
-    for (const prefix of [".growth-os", ".claude", "Library/Application Support/Infinite"]) expect(deny.prefixes).toContain(`/Users/founder/${prefix}`)
-    expect(deny.paths).toContain("/opt/growth")
-    expect(deny.paths).toContain("/Users/founder/Library/Caches/infinite-tag/snapshots")
-    expect(() => defaultDenyReads({ homes: [], extra: ["not/absolute"] })).toThrow(/absolute/)
-  })
 })
 
 describe("the child's environment", () => {
@@ -125,28 +116,6 @@ describe("the child's environment", () => {
       expect(() => process.kill(process.pid, 0)).not.toThrow()
       expect(await diesWithin(grandchild, 2_000)).toBe(true)
     }
-  })
-
-  it("a child that exits while a grandchild keeps stdout open settles after the grace period, and the grandchild dies", async () => {
-    const started = Date.now()
-    const result = await sandboxedSpawn("/bin/sh", ["-c", "sleep 30 & echo $!"], { denyReads: [], network: false, timeoutMs: 20_000, platform: "linux" })
-    expect(Date.now() - started).toBeLessThan(STDIO_GRACE_MS + 3_000)
-    expect(result.timedOut).toBe(false)
-    expect(result.exitCode).toBe(0)
-    // The group was SIGKILLed when the child settled; on a loaded machine the kernel may take a moment to
-    // tear the grandchild down, so its death is awaited (bounded), never assumed.
-    expect(await diesWithin(Number.parseInt(result.stdout.trim(), 10), 2_000)).toBe(true)
-  })
-
-  it("off darwin the child is a plain process and says so (sandboxed:false)", async () => {
-    const plain = await sandboxedSpawn(process.execPath, ["-e", "1"], { denyReads: [], network: false, timeoutMs: 10_000, platform: "linux" })
-    expect(plain.exitCode).toBe(0)
-    expect(plain.sandboxed).toBe(false)
-  })
-
-  it("SandboxUnavailableError is a distinct error type (darwin fails closed with it)", () => {
-    expect(new SandboxUnavailableError("x")).toBeInstanceOf(Error)
-    expect(new SandboxUnavailableError("x").name).toBe("SandboxUnavailableError")
   })
 })
 

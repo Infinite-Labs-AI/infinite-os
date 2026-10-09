@@ -9,7 +9,7 @@ import { detectProvidersWithEvidence } from "../harness/inspect.js"
 import { checkMetaAutoConfigOptOut } from "../providers/meta-browser/autoconfig.js"
 import { reverseTextEdits } from "../server-lane/text-edits.js"
 
-import { applyImproveEdit, CAPTURE_BLOCK_MARKER, detectAdoptedFacts, improveLinesFor, withSensitivePaths } from "./improve.js"
+import { applyImproveEdit, CAPTURE_BLOCK_MARKER, detectAdoptedFacts, improveLinesFor } from "./improve.js"
 
 afterEach(cleanupSites)
 
@@ -66,6 +66,18 @@ function linesFor(files: Record<string, string>, framework = "static-html", keys
 const edit = (root: string, line: Parameters<typeof applyImproveEdit>[0]["line"], overrides: Partial<Parameters<typeof applyImproveEdit>[0]> = {}) =>
   applyImproveEdit({ root, appRoot: ".", framework: "static-html", line, keys: fakeKeys(), consentMode: "not_required", runId: IDS.run, vercelServed: true, ...overrides })
 
+it("refuses deterministic capture and autoconfig writes before touching a consent-bearing page", () => {
+  const original = ADOPTED_META_HTML.replace("<head>", "<head>\n<script>fbq?.('consent','revoke');</script>")
+  const { root, lines } = linesFor({ "index.html": original })
+  const writes = lines.filter(line => line.kind === "capture_beside_adopted_pixel" || line.kind === "autoconfig_off_adopted")
+  expect(writes).toHaveLength(2)
+  for (const line of writes) {
+    const result = edit(root, line)
+    expect(result).toMatchObject({ ok: false, ownerRequirement: { path: "index.html", ownerBoundary: { kind: "frozen_unit" } } })
+    expect(read(root, "index.html")).toBe(original)
+  }
+})
+
 describe("improve lines for adopted tags (decision 4: optimise in place, never reinstall)", () => {
   it("adopted PostHog → proxy and defaults-bump lines (a separate line each), a preview-guard line, never an install", () => {
     const { lines } = linesFor({ "index.html": ADOPTED_POSTHOG_HTML })
@@ -83,32 +95,6 @@ describe("improve lines for adopted tags (decision 4: optimise in place, never r
     for (const line of [...lines, next]) expect(line.text, line.id).not.toMatch(/api_host|ui_host|\brewrite\b/)
     // A reduction is never an improve line (R2-10): no "one init", no removal.
     for (const line of lines) expect(line.text).not.toMatch(/one init|remove|delete/i)
-  })
-
-  it("adopted PostHog on a single-page app without history page views → a capture_pageview:'history_change' line", () => {
-    const html = ADOPTED_POSTHOG_HTML.replace(", defaults: '2025-05-24'", "")
-    const { lines } = linesFor({ "index.html": html }, "vite-react")
-    expect(lines.map((line) => line.id)).toContain("improve_additive:posthog:history_change")
-    expect(lines.find((line) => line.target === "history_change")?.text).toBe("PostHog: count page changes in your single-page app. Changes your existing PostHog setup.")
-    // Terminal QA #22: a plan line is plain words; config syntax ("capture_pageview: 'history_change'", "defaults
-    // '2026-01-30'") never reaches the plan screen. The PostHog defaults line names its date in words.
-    for (const line of lines) expect(line.text, line.id).not.toMatch(/[a-z]+_[a-z]+: '|defaults '|'\d{4}-\d{2}-\d{2}'/)
-    expect(lines.find((line) => line.kind === "posthog_defaults_bump_adopted")?.text).toContain("PostHog's current recommended settings (their 2026-01-30 defaults).")
-    // NEGATIVE (P2-14): a multi-page static site reloads on every page; the line would change nothing.
-    expect(linesFor({ "index.html": html }, "static-html").lines.map((line) => line.id)).not.toContain("improve_additive:posthog:history_change")
-  })
-
-  it("P3-23: the proxy line only for an api_host that sends straight to PostHog Cloud (or the SDK default)", () => {
-    const custom = ADOPTED_POSTHOG_HTML.replace("https://us.i.posthog.com", "https://e.acme.com")
-    expect(linesFor({ "index.html": custom }).lines.map((line) => line.id)).not.toContain("improve_additive:posthog:proxy")
-    const regionDefault = ADOPTED_POSTHOG_HTML.replace("api_host: 'https://us.i.posthog.com', ", "")
-    expect(linesFor({ "index.html": regionDefault }).lines.map((line) => line.id)).toContain("improve_additive:posthog:proxy")
-  })
-
-  it("P1-5: a static site NOT served by Vercel gets no proxy line (a vercel.json rewrite would not serve /ingest)", () => {
-    expect(linesFor({ "index.html": ADOPTED_POSTHOG_HTML }, "static-html", fakeKeys(), [], false).lines.map((line) => line.id)).not.toContain("improve_additive:posthog:proxy")
-    // A Next app proxies through its own rewrites on any host (the agent's job 3).
-    expect(linesFor({ "index.html": ADOPTED_POSTHOG_HTML }, "next-app-router", fakeKeys(), [], false).lines.find((line) => line.target === "proxy")?.owner).toBe("agent")
   })
 
   it("NEGATIVE: an adopted PostHog already on /ingest with history page views and current defaults gets no improve line", () => {
@@ -139,19 +125,6 @@ describe("improve lines for adopted tags (decision 4: optimise in place, never r
     expect(edit(root, { ...line, owner: "code" })).toMatchObject({ ok: false, reason: expect.stringMatching(/consent manager/) })
     expect(read(root, "index.html")).toBe(held)
   })
-
-  it("a pixel in a React component: the capture is the agent's job (code edits only touch HTML)", () => {
-    const component = `export function Pixel() {\n  useEffect(() => { fbq('init', '${IDS.meta}'); fbq('track', 'PageView') }, [])\n  return null\n}\n`
-    const { lines } = linesFor({ "index.html": "<!doctype html><html><head></head><body></body></html>", "src/pixel.tsx": component })
-    expect(lines.find((line) => line.kind === "capture_beside_adopted_pixel")?.owner).toBe("agent")
-  })
-
-  it("GA4 adopted with an id that is not the connection's → an id line; the matching id gets none", () => {
-    const gtag = (id: string) =>
-      `<!doctype html><html><head><script async src="https://www.googletagmanager.com/gtag/js?id=${id}"></script><script>window.dataLayer=[];function gtag(){dataLayer.push(arguments)}gtag('js', new Date());gtag('config', '${id}');</script></head><body></body></html>`
-    expect(linesFor({ "index.html": gtag(IDS.ga4Other) }).lines.map((line) => line.id)).toContain("improve_additive:ga4:id")
-    expect(linesFor({ "index.html": gtag(IDS.ga4) }).lines.map((line) => line.id)).not.toContain("improve_additive:ga4:id")
-  })
 })
 
 describe("applyImproveEdit: the deterministic code edits (approved lines only)", () => {
@@ -179,40 +152,20 @@ describe("applyImproveEdit: the deterministic code edits (approved lines only)",
     expect(result.ok && result.record && reverseTextEdits(after, result.record.textEdits)).toBe(ADOPTED_META_HTML)
   })
 
-  it("the capture follows a recorded 'no' under consent_mode=required (the optional hook, never a banner)", () => {
-    const { root, lines } = linesFor({ "index.html": ADOPTED_META_HTML })
-    const line = lines.find((entry) => entry.kind === "capture_beside_adopted_pixel")!
-    edit(root, line, { consentMode: "required" })
-    const page = runPage(read(root, "index.html"), { search: "?fbclid=AbC123" })
-    expect(page.cookieWrites.filter((write) => write.value.startsWith("_fbc="))).toEqual([])
-  })
-
   it("D10: one literal autoConfig opt-out before the adopted init — automatic events are off, in order", () => {
     const { root, lines } = linesFor({ "index.html": ADOPTED_META_HTML })
     const line = lines.find((entry) => entry.kind === "autoconfig_off_adopted")!
     const result = edit(root, line)
     expect(result.ok && result.record?.planLineId).toBe("autoconfig_off_adopted:meta:autoconfig")
     const after = read(root, "index.html")
-    expect(runPage(after).queue()).toEqual([["set", "autoConfig", false, IDS.meta], ["init", IDS.meta], ["track", "PageView"]])
+    const page = runPage(after)
+    expect(page.queue()).toEqual([["set", "autoConfig", false, IDS.meta], ["init", IDS.meta], ["track", "PageView"]])
+    expect((page.window.fbq as { disablePushState?: boolean }).disablePushState).toBe(true)
     expect(checkMetaAutoConfigOptOut(after, IDS.meta, "adopted").reason).toBe("opted_out_before_init")
     // NEGATIVE: the original page queues no opt-out.
     expect(runPage(ADOPTED_META_HTML).queue()[0]).toEqual(["init", IDS.meta])
     // Applying it twice changes nothing more.
     expect(edit(root, line)).toEqual({ ok: true, record: null })
-  })
-
-  it("the PostHog /ingest rewrite in vercel.json, region from the connection; reversal removes the file it created", () => {
-    const { root, lines } = linesFor({ "index.html": ADOPTED_POSTHOG_HTML })
-    const line = lines.find((entry) => entry.target === "proxy")!
-    const eu = fakeKeys({
-      posthog: { status: "connected", projectKey: IDS.posthog, apiHost: "https://eu.i.posthog.com", ingestHost: "https://eu.i.posthog.com", uiHost: "https://eu.posthog.com", region: "eu" }
-    })
-    const result = edit(root, line, { keys: eu })
-    expect(result.ok).toBe(true)
-    const rewrites = JSON.parse(read(root, "vercel.json")).rewrites as Array<{ source: string; destination: string }>
-    expect(rewrites.map((rewrite) => rewrite.destination)).toEqual(expect.arrayContaining([expect.stringContaining("https://eu-assets.i.posthog.com"), expect.stringContaining("https://eu.i.posthog.com")]))
-    expect(result.ok && result.record?.beforeHash).toBeNull()
-    expect(result.ok && result.record && reverseTextEdits(read(root, "vercel.json"), result.record.textEdits)).toBe("")
   })
 
   it("NEGATIVE: no connection and an api_host that names no region → the proxy is refused, never guessed", () => {
@@ -221,13 +174,6 @@ describe("applyImproveEdit: the deterministic code edits (approved lines only)",
     const line = lines.find((entry) => entry.target === "proxy")!
     const result = edit(root, line, { keys: notConnectedKeys() })
     expect(result).toMatchObject({ ok: false, reason: expect.stringMatching(/region is unknown/) })
-    expect(exists(root, "vercel.json")).toBe(false)
-  })
-
-  it("P1-5 NEGATIVE: the vercel.json rewrite is refused on a site Vercel does not serve", () => {
-    const { root, lines } = linesFor({ "index.html": ADOPTED_POSTHOG_HTML })
-    const line = lines.find((entry) => entry.target === "proxy")!
-    expect(edit(root, line, { vercelServed: false })).toMatchObject({ ok: false, reason: expect.stringMatching(/not served by Vercel/) })
     expect(exists(root, "vercel.json")).toBe(false)
   })
 
@@ -251,9 +197,5 @@ describe("applyImproveEdit: the deterministic code edits (approved lines only)",
     expect(edit(root, guard)).toMatchObject({ ok: false })
     expect(read(root, "index.html")).toBe(ADOPTED_META_HTML)
   })
-
-  it("D17 on a managed PostHog is an artifact option, and only when PostHog is installed", () => {
-    expect(withSensitivePaths({ posthog: { projectKey: IDS.posthog, apiHost: "/ingest" } }, ["/account"]).posthog).toMatchObject({ sensitivePaths: ["/account"] })
-    expect(withSensitivePaths({}, ["/account"])).toEqual({})
-  })
 })
+

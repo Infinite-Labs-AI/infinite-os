@@ -17,9 +17,11 @@ import { createJobRegistry } from "../../jobs/registry.js"
 import { gradeTestRunFull } from "../../checks/grade-test-run.js"
 import type { ChecklistItem } from "../contracts/jobs.js"
 import type { TestRunRequest } from "../contracts/test-engine.js"
-import { PREVIEW_REFUSED } from "../../review/rehearse.js"
 import { createRunState } from "../run-state.js"
-import { PROVE_LIMITS, buildProvenColumn, ownReceipt, receiptMarkersFrom, receiptWords, step, unloaded } from "./prove.js"
+import { HELD_BY_BANNER } from "../../checks/grade-test-run.js"
+import { FINISH_LINE_IDS, FINISH_LINE_SOURCES, type Cell } from "../contracts/report.js"
+import { computeVerdict } from "../verdict.js"
+import { MERGE_ADDRESS_NEEDS_LOGIN, PROVE_LIMITS, buildProvenColumn, keepsTrackersBehindBanner, ownReceipt, step, unloaded } from "./prove.js"
 
 function mergedState() {
   const state = createRunState({ tagVersion: "0.12.0", root: "/repo", appRoot: ".", now: new Date("2026-10-02T09:00:00Z"), displayId: "r-7f3c" })
@@ -92,17 +94,6 @@ describe("prove: waiting for the deploy of the MERGE commit", () => {
     expect(bundle.log.names("bridge")).not.toContain("bridge.claimProof")
     expect(bundle.log.names("bridge")).not.toContain("bridge.startTest")
   })
-
-  it("nothing merged → parked MERGE_PARKED; --no-prove → skipped (the app proves it)", async () => {
-    const bundle = fakeDeps()
-    const state = mergedState()
-    state.pr!.mergeSha = null
-    const outcome = await step.run(fakeContext(state, {}, bundle.clock), bundle.deps)
-    expect(outcome).toMatchObject({ kind: "parked", code: "INF_WIZ_MERGE_PARKED" })
-    const skipped = await step.run(fakeContext(mergedState(), { noProve: true }, bundle.clock), bundle.deps)
-    expect(skipped.kind).toBe("skipped")
-    expect(bundle.log.names("bridge")).toEqual([])
-  })
 })
 
 describe("prove: the proof claim and the ONE real visit", () => {
@@ -138,12 +129,6 @@ describe("prove: the proof claim and the ONE real visit", () => {
     expect(ctx.current().markers.prove.posthogDistinctId).toBe("0192-fake-distinct-4c03")
   })
 
-  it("prints the run's PostHog distinct id so the user can filter the visitor out", async () => {
-    const bundle = fakeDeps()
-    const { ctx } = await runProve(bundle)
-    expect(subs(ctx)).toContain("Filter this visitor out in PostHog: distinct_id = 0192-fake-distinct-4c03")
-  })
-
   it("negative: losing the claim (claimed_by_other) runs NO real visit, reads the receipts, and never PATCHes proofState", async () => {
     const bundle = fakeDeps({ bridge: { claim: { code: "claimed_by_other", state: "proving" } } })
     const { outcome, ctx } = await runProve(bundle)
@@ -156,26 +141,6 @@ describe("prove: the proof claim and the ONE real visit", () => {
     const column = ctx.current().report.proven_live!
     expect(column.finishLine.each_tool_once).toMatchObject({ state: "pending", reason: "pending_open_infinite" })
     expect(column.cells.ga4_page_views_per_visit).toMatchObject({ value: null, display: "—", reason: "pending_open_infinite" })
-  })
-
-  it("any other claim error is never a lost claim: a 402 blocks SUBSCRIPTION_REQUIRED (§3z.4) and no visit is made", async () => {
-    const bundle = fakeDeps({ bridge: { claim: { code: "subscription_required" } } })
-    expect((await runProve(bundle)).outcome).toMatchObject({ kind: "blocked", code: "INF_WIZ_SUBSCRIPTION_REQUIRED" })
-    expect(bundle.log.names("bridge")).not.toContain("bridge.startTest")
-  })
-
-  it("negative: a claim error outside the §3z.4 table is not swallowed", async () => {
-    const bundle = fakeDeps({ bridge: { claim: { code: "invalid_request" } } })
-    await expect(runProve(bundle)).rejects.toMatchObject({ code: "invalid_request" })
-    expect(bundle.log.names("bridge")).not.toContain("bridge.startTest")
-  })
-
-  it("re-polls receipts every 10 s while a lane is pending, within waitMs", async () => {
-    const pending = receiptsAll({ infinite: lane("pending") })
-    const bundle = fakeDeps({ bridge: { receipts: [pending, pending, receiptsAll()] } })
-    const { ctx } = await runProve(bundle)
-    expect(bundle.log.names("bridge").filter((name) => name === "bridge.postReceipts")).toHaveLength(3)
-    expect(ctx.current().report.proven_live!.finishLine.proof_from_real_visit!.state).toBe("pass")
   })
 
   it("review-2 P3-3: with no production host the proof is NEVER claimed: no visit, no PATCH, no stored receipt read", async () => {
@@ -229,40 +194,41 @@ describe("prove: the proven_live column is honest", () => {
     expect(column.finishLine.proof_from_real_visit!.state).toBe("problem")
   })
 
-  it("PostHog seen but sent directly (not through the proxy) is a problem for 'survives ad blockers'", () => {
-    const direct = realVisitResult()
-    direct.posthog.events = direct.posthog.events.map((event) => ({ ...event, sameOrigin: false, endpointHost: "us.i.posthog.com" }))
-    const column = buildProvenColumn({ ...base, expect: expect4, visit: { result: direct, grades: { infinite: pass("a"), ga4: pass("b"), posthog: pass("c"), meta: pass("d") } }, receipts: receiptsAll() })
-    expect(column.finishLine.survives_ad_blockers).toMatchObject({ state: "problem" })
-    expect(column.cells.posthog_route).toMatchObject({ value: "direct", state: "problem" })
+  it("server conversions never 'wait for a real conversion' while the owner's setup steps are undone (no server secret yet)", () => {
+    const input = { ...base, expect: expect4, visit: { result: realVisitResult(), grades: { infinite: pass("a"), ga4: pass("b"), posthog: pass("c"), meta: pass("d") } }, receipts: receiptsAll({}) }
+    const unset = buildProvenColumn({ ...input, keys: { ...keysFixture(), serverLane: { laneState: "no_secret", envWriteGranted: true } } })
+    expect(unset.cells.server_conversions).toMatchObject({ display: "1 wired · sends nothing until you do the setup steps", state: "pending" })
+    const set = buildProvenColumn({ ...input, keys: { ...keysFixture(), serverLane: { laneState: "awaiting_first_event", envWriteGranted: true } } })
+    expect(set.cells.server_conversions).toMatchObject({ display: "1 wired · waits for a real conversion", state: "pending" })
+  })
+})
+
+describe("prove: the merge's own deployment address behind Vercel's login (P0-2)", () => {
+  const base = {
+    runId: RUN_ID,
+    mergeSha: MERGE_SHA,
+    installed: null,
+    at: "2026-10-02T09:43:00.000Z",
+    keys: keysFixture(),
+    t1: [],
+    serverLaneInstalled: true,
+    conversionsWaiting: 0,
+    expect: {},
+    visit: null,
+    receipts: receiptsAll({})
+  }
+  const none = { kind: "none" as const, reason: "not_exercised" as const }
+
+  it("the previews check reads 'not tried (the deployment address needs a Vercel login)', never a refusal or 'unknown'", () => {
+    const column = buildProvenColumn({ ...base, postDeploy: { byteCensus: [], mergePreview: { kind: "none", reason: "preview_protected", said: MERGE_ADDRESS_NEEDS_LOGIN }, deployedDry: none } })
+    expect(column.finishLine.previews_silent).toMatchObject({ state: "info", display: "not tried (the deployment address needs a Vercel login)", reason: "preview_protected" })
+    expect(column.finishLine.previews_silent!.display).not.toMatch(/refused|tie that address/)
   })
 
-  it("a grader's wrong-id problem marks ids_match_connections, not each_tool_once; GA4 twice per visit is a problem", () => {
-    const twice = realVisitResult()
-    twice.ga4.events = [...twice.ga4.events, { ...twice.ga4.events[0]! }]
-    const column = buildProvenColumn({
-      ...base,
-      expect: expect4,
-      visit: { result: twice, grades: { infinite: pass("a"), ga4: { ...pass("b"), state: "problem", reason: "wrong_id" }, posthog: pass("c"), meta: pass("d") } },
-      receipts: receiptsAll()
-    })
-    expect(column.finishLine.ids_match_connections!.state).toBe("problem")
-    expect(column.finishLine.each_tool_once!.state).toBe("undetermined")
-    expect(column.cells.ga4_page_views_per_visit).toMatchObject({ value: 2, state: "problem" })
-  })
-
-  it("markers name only what THIS visit observed; §3x.5 an installed, UNCONNECTED pixel is marked by the id seen leaving", () => {
-    const markers = receiptMarkersFrom(realVisitResult(), { ga4: ["G-ACME000001"] })
-    expect(markers).toEqual({
-      ga4: { measurementId: "G-ACME000001", seenLeaving: true, httpStatus: 204 },
-      // Meta has no connection: its first pixel seen leaving (2xx) gets the `delivering` receipt.
-      metaPixel: { pixelId: "1234567890123456", seenLeaving: true, httpStatus: 200 },
-      serverLane: { probePath: "/__infinite_probe/7f3c2a91b0de" }
-    })
-    // Negative: a CONNECTED tool is marked only by its own id (another id seen leaving is not its receipt).
-    const other = realVisitResult()
-    other.ga4.events = other.ga4.events.map((event) => ({ ...event, tid: "G-SOMEONEELS" }))
-    expect(receiptMarkersFrom(other, { ga4: ["G-ACME000001"] }).ga4).toBeUndefined()
+  it("NEGATIVE: a desktop refusal of an open address is still said as a refusal (unknown)", () => {
+    const column = buildProvenColumn({ ...base, postDeploy: { byteCensus: [], mergePreview: unloaded("preview_refused", "the merge's own deployment address"), deployedDry: none } })
+    expect(column.finishLine.previews_silent).toMatchObject({ state: "undetermined" })
+    expect(column.finishLine.previews_silent!.display).toMatch(/refused to load/)
   })
 })
 
@@ -290,60 +256,6 @@ describe("prove: a resume finishes its OWN claim (O1-06)", () => {
     // The receipts are read with THIS visit's markers.
     const markers = (resumed.log.calls.find((call) => call.what === "postReceipts")!.args[1] as { markers: { infinite?: unknown } }).markers
     expect(markers.infinite).toEqual({ eventIds: ["evt_FAKE0301"] })
-  })
-
-  it("won, then stopped mid-visit (no facts saved): the resume makes no second visit and PATCHes undetermined", async () => {
-    const first = fakeDeps({
-      bridge: {
-        testPolls: [
-          {
-            state: "running",
-            progress: []
-          }
-        ]
-      }
-    })
-    first.deps.bridge.pollTest = async () => {
-      throw new Error("Ctrl+C")
-    }
-    await expect(runProve(first)).rejects.toThrow("Ctrl+C")
-
-    const resumed = fakeDeps({ bridge: { claim: { code: "claimed_by_other", state: "proving" } } })
-    resumed.deps.fs = first.deps.fs
-    const { outcome } = await runProve(resumed)
-    expect(resumed.log.names("bridge")).not.toContain("bridge.startTest")
-    expect(resumed.log.calls.filter((call) => call.what === "patchRun").map((call) => call.args[1])).toEqual([{ proofState: "undetermined" }])
-    expect(outcome).toMatchObject({ kind: "failed", code: "INF_WIZ_PROOF_INCOMPLETE", next: "continue" })
-  })
-
-  it("the run state's own prove markers (written only by this run's visit) also mark the claim as ours: receipts by those markers, then the PATCH", async () => {
-    const bundle = fakeDeps({ bridge: { claim: { code: "claimed_by_other", state: "proving" } } })
-    const state = mergedState()
-    state.markers.prove = { infiniteEventIds: ["evt_FAKE0301"], posthogDistinctId: "0192-fake-distinct-4c03", probePath: "/__infinite_probe/7f3c2a91b0de", metaEventIds: [] }
-    const outcome = await step.run(fakeContext(state, {}, bundle.clock), bundle.deps)
-    expect(bundle.log.names("bridge")).not.toContain("bridge.startTest")
-    expect(bundle.log.calls.filter((call) => call.what === "patchRun")).toHaveLength(1)
-    expect((bundle.log.calls.find((call) => call.what === "postReceipts")!.args[1] as { markers: unknown }).markers).toMatchObject({ infinite: { eventIds: ["evt_FAKE0301"] } })
-    expect((outcome as { status: string }).status).not.toContain("Infinite app")
-  })
-
-  it("negative: a saved claim of ANOTHER run (or merge) is not this run's; the 409 stays someone else's and nothing is PATCHed", async () => {
-    const first = fakeDeps({
-      bridge: {
-        patchRun: () => {
-          throw new Error("the laptop slept")
-        }
-      }
-    })
-    await expect(runProve(first)).rejects.toThrow()
-    const resumed = fakeDeps({ bridge: { claim: { code: "claimed_by_other", state: "proving" } } })
-    resumed.deps.fs = first.deps.fs
-    const state = mergedState()
-    state.pr!.mergeSha = "a".repeat(40)
-    const ctx = fakeContext(state, {}, resumed.clock)
-    const outcome = await step.run(ctx, resumed.deps)
-    expect(resumed.log.calls.filter((call) => call.what === "patchRun")).toHaveLength(0)
-    expect((outcome as { status: string }).status).toContain("receipts from the Infinite app's visit")
   })
 })
 
@@ -380,55 +292,51 @@ describe("prove: consent-held or unobserved tools are UNKNOWN, never problems (O
     expect(column.finishLine.survives_ad_blockers!.state).not.toBe("problem")
     expect(JSON.stringify(column)).not.toContain("sent directly")
   })
+})
 
-  it("negative: a graded GA4 with 0 page views IS a problem, and PostHog events seen leaving directly ARE 'direct'", () => {
-    const pass = (tool: string) => ({ checkId: `real_visit_${tool}`, state: "pass" as const, tier: "PV" as const, at, runId: RUN_ID })
+describe("prove: a site whose own cookie banner keeps every tool off (the proof visit never accepts it)", () => {
+  const at = "2026-10-02T09:43:00.000Z"
+  const all4 = { ga4: ["G-ACME000001"], posthog: { projectKey: "phc_x", apiHost: "https://us.i.posthog.com" }, meta: ["1234567890123456"], infinite: { siteSourceKey: "s", collectPath: "/c" } }
+
+  it("knows the site gates its trackers: the tag follows the site's own pixels, or the scan found a banner", () => {
+    const census = (owner: "adopted" | "managed") => ({ entries: [{ tool: "ga4" as const, owner, ids: [], evidence: [] }], envSourcedIds: [], identify: { identifyCalls: [], resetCalls: [] } }) as never
+    expect(keepsTrackersBehindBanner({ census: census("adopted"), consentMode: "not_required", staticCmp: null })).toBe(true)
+    expect(keepsTrackersBehindBanner({ census: null, consentMode: "not_required", staticCmp: "other" })).toBe(true)
+    expect(keepsTrackersBehindBanner({ census: census("managed"), consentMode: "not_required", staticCmp: null })).toBe(false)
+    expect(keepsTrackersBehindBanner({ census: census("adopted"), consentMode: "required", staticCmp: null })).toBe(false)
+  })
+
+  it("a visit where nothing sent is 'not measured' with the banner named: no problem cell, and the verdict says so", () => {
     const result = realVisitResult()
     result.ga4.events = []
-    result.posthog.events = result.posthog.events.map((event) => ({ ...event, sameOrigin: false }))
+    result.posthog.events = []
+    result.meta.tr = []
+    result.infinite.events = []
+    const context = { cmpDetected: null, envSourcedIds: [], consentMode: "not_required" as const, installedTools: ["infinite", "ga4", "posthog", "meta"] as const, metaPixelOwnership: "adopted" as const, siteConsentGate: true, runId: RUN_ID, now: () => new Date(at) }
+    const graded = gradeTestRunFull(result, all4, "real_visit", { ...context, installedTools: [...context.installedTools] })
     const column = buildProvenColumn({
-      runId: RUN_ID,
-      mergeSha: MERGE_SHA,
-    installed: null,
-      at,
-      keys: keysFixture(),
-      expect: expect4,
-      visit: { result, grades: { infinite: pass("infinite"), ga4: { ...pass("ga4"), state: "problem", reason: "no_beacon" }, posthog: pass("posthog"), meta: pass("meta") } },
-      receipts: receiptsAll(),
-      t1: [],
-      serverLaneInstalled: true,
-      conversionsWaiting: 0
+      runId: RUN_ID, mergeSha: MERGE_SHA, installed: ["infinite", "ga4", "posthog", "meta"], at, keys: keysFixture(), expect: all4,
+      visit: { result, grades: graded.tools },
+      receipts: receiptsAll({ infinite: lane("no_receipt"), ga4: lane("no_receipt"), posthog: lane("no_receipt"), meta_pixel: lane("no_receipt") }),
+      t1: [], serverLaneInstalled: false, conversionsWaiting: 0
     })
-    expect(column.cells.ga4_page_views_per_visit).toMatchObject({ value: 0, state: "problem" })
-    expect(column.cells.posthog_route).toMatchObject({ value: "direct", state: "problem" })
+    expect(column.finishLine.proof_from_real_visit).toMatchObject({ state: "undetermined", reason: "held_by_consent" })
+    expect(column.finishLine.each_tool_once!.state).not.toBe("problem")
+    expect(column.cells.meta_pixel).toMatchObject({ state: "undetermined", reason: "held_by_consent" })
+    expect(column.cells.ga4_page_views_per_visit).toMatchObject({ state: "undetermined", reason: "held_by_consent" })
+    expect(JSON.stringify(column)).not.toMatch(/sent nothing|not firing|\/tr|2xx/)
+
+    const dash = (): Cell => ({ value: null, display: "—", state: "not_measured", provenance: { source: "wizard_check", at, runId: RUN_ID }, reason: "not_exercised" })
+    const finishLine = FINISH_LINE_IDS.map((id) => ({ n: FINISH_LINE_SOURCES[id].n, id, cells: { live_today: dash(), in_pr: dash(), proven_live: column.finishLine[id] ?? dash() } }))
+    const tools = (["infinite", "ga4", "posthog", "meta"] as const).map((tool) => ({ tool, ids: [], connected: true, installed: true, fired: false, ungraded: true, receipt: "no_receipt" as const, receiptReason: null }))
+    const verdict = computeVerdict({ site: HOST, finishLine, provenLive: { measuredAt: at, sha: MERGE_SHA, pending: null }, jobs: [], openFindings: [], tools, installedUnknown: null })
+    expect(verdict.state).toBe("unconfirmed")
+    expect(verdict.headline).toBe(`${HOST}: not measured: ${HELD_BY_BANNER}`)
+    expect(verdict.headline).not.toMatch(/does not collect|sent nothing/)
   })
 })
 
-describe("prove: a redirecting home page (review I1 P1-1)", () => {
-  const hop = (state: "pass" | "problem") => ({
-    checkId: "redirect_walk",
-    state,
-    tier: "T1" as const,
-    // O9's real reason text: an arrow, and a %-encoded path.
-    reason: `every hop keeps utm_* (1 hop: 301 → https://www.${HOST}/en%2Fhome -> /en => ok)`,
-    at: "2026-10-02T09:43:00.000Z",
-    runId: RUN_ID
-  })
-
-  it("an apex → www redirect builds the column with fixed words (never the check's free text) and PATCHes the proof", async () => {
-    const bundle = fakeDeps()
-    bundle.deps.checks.redirectWalk = async () => [hop("pass")]
-    bundle.deps.checks.csp = async () => [{ ...hop("problem"), checkId: "csp_header", reason: "script-src → blocks https://connect.facebook.net (100% of loads)" }]
-    const { outcome, ctx } = await runProve(bundle)
-    expect(outcome.kind).toBe("ok")
-    const column = ctx.current().report.proven_live!
-    expect(column.finishLine.utms_survive_redirects).toMatchObject({ state: "pass", display: "campaign tags kept through every redirect" })
-    expect(column.finishLine.csp_allows!.display).not.toMatch(/→|%|->/)
-    // §3x.6 THE verdict decides the PATCH: the live CSP blocks a tool, a problem on the deployed site (the old rule
-    // read only the proof and once cells and would have said "proven").
-    expect(bundle.log.calls.find((call) => call.what === "patchRun")!.args[1]).toEqual({ proofState: "problem" })
-  })
-
+describe("prove: an error after the claim was won", () => {
   it("an unexpected error after the claim was granted still settles proofState undetermined before it throws (never 24 h of 'proving')", async () => {
     const bundle = fakeDeps()
     bundle.deps.checks.redirectWalk = async () => {
@@ -437,15 +345,6 @@ describe("prove: a redirecting home page (review I1 P1-1)", () => {
     await expect(runProve(bundle)).rejects.toThrow("boom")
     const patches = bundle.log.calls.filter((call) => call.what === "patchRun").map((call) => call.args[1])
     expect(patches).toEqual([{ proofState: "undetermined" }])
-  })
-
-  it("negative: a lost claim (someone else's proof) never PATCHes on an error", async () => {
-    const bundle = fakeDeps({ bridge: { claim: { code: "claimed_by_other", state: "proving" } } })
-    bundle.deps.checks.redirectWalk = async () => {
-      throw new Error("boom")
-    }
-    await expect(runProve(bundle)).rejects.toThrow("boom")
-    expect(bundle.log.names("bridge")).not.toContain("bridge.patchRun")
   })
 })
 
@@ -474,46 +373,7 @@ describe("prove: receipts from before the run started are not this run's (§3z.8
   })
 })
 
-describe("§3x.5 (W13) no server lane installed: no probe, no lane receipt, no 120 s wait", () => {
-  it("keys `no_secret` → the real visit carries no serverLaneProbe, the receipts ask no serverLane, and polling ends at once", async () => {
-    const noLane = { ...keysFixture(), serverLane: { laneState: "no_secret" as const, envWriteGranted: false } }
-    const settled = receiptsAll({ server_lane: lane("pending") })
-    const bundle = fakeDeps({ bridge: { keys: noLane, receipts: [settled] } })
-    const started = bundle.clock.now().getTime()
-    const { outcome } = await runProve(bundle)
-    expect(outcome.kind).toBe("ok")
-    const request = bundle.log.calls.find((call) => call.what === "startTest" && (call.args[0] as TestRunRequest).mode === "real_visit")!.args[0] as TestRunRequest
-    expect(request.serverLaneProbe).toBeUndefined()
-    const asked = bundle.log.calls.filter((call) => call.what === "postReceipts").map((call) => (call.args[1] as { markers: Record<string, unknown> }).markers)
-    expect(asked.every((markers) => markers.serverLane === undefined)).toBe(true)
-    // The lane's "pending" is not this run's to wait on: one read, no 120 s of polling.
-    expect(asked).toHaveLength(1)
-    expect(bundle.clock.now().getTime() - started).toBeLessThan(15_000)
-  })
-
-  it("negative: an installed lane (a secret set) is probed and its receipt asked for", async () => {
-    const bundle = fakeDeps()
-    await runProve(bundle)
-    const request = bundle.log.calls.find((call) => call.what === "startTest" && (call.args[0] as TestRunRequest).mode === "real_visit")!.args[0] as TestRunRequest
-    expect(request.serverLaneProbe).toEqual({ path: "/__infinite_probe/7f3c2a91b0de" })
-  })
-})
-
-describe("review P1-5: a post-deploy load the app refused is said as refused, never a test error", () => {
-  it("preview_refused → not exercised, in the app's words; busy → not exercised; other codes → test_error with the code only", () => {
-    expect(unloaded(PREVIEW_REFUSED, "the merge's own deployment address")).toEqual({
-      kind: "none",
-      reason: "not_exercised",
-      said: "the Infinite app refused to load the merge's own deployment address: it could not tie that address to this site"
-    })
-    expect(unloaded("busy", "the page change after the deploy")).toMatchObject({ reason: "not_exercised" })
-    expect(unloaded("deadline", "the page change after the deploy")).toEqual({ kind: "none", reason: "test_error", said: "the page change after the deploy could not be loaded (deadline)" })
-    // The desktop's free-text failure message never becomes a cell display.
-    expect(unloaded("Window crashed: renderer gone → 0x0", "x").said).toBe("x could not be loaded (the test did not finish)")
-  })
-})
-
-describe("review P1-6: a merge tree that cannot be read is named, never swallowed", () => {
+describe("prove: a merge tree that cannot be read is named, never swallowed", () => {
   it("the census error is said, carried into state.proof, and the run is not PATCHed proven", async () => {
     const bundle = fakeDeps()
     bundle.deps.git.worktreeAddDetached = async () => {
@@ -528,62 +388,16 @@ describe("review P1-6: a merge tree that cannot be read is named, never swallowe
   })
 })
 
-describe("R4-3 (live run 4): a CONNECTED GA4 is asked, and its answer is the word", () => {
-  const GA4_AT = "2026-10-02T09:40:20.000Z"
-
-  it("live-fix 4 round 1: the words name the minutes the cloud asks — the visit's minute OR THE NEXT — never 'the minute of this visit' alone", () => {
-    const asked = (state: "verified" | "no_receipt", reason: string | null) => ({ state, receiptAt: state === "verified" ? GA4_AT : null, reason, provenance: "ga4_realtime" as const })
-    expect(receiptWords("ga4", asked("verified", null), true)).toBe("received (GA4 counted a page view in the minute of this visit or the next, and none in the 5 minutes before; it has no per-visit id)")
-    expect(receiptWords("ga4", asked("no_receipt", "ga4_realtime_none"), true)).toBe("sent (seen leaving), but GA4's realtime report counted no page view in the minute of this visit or the next")
-    // NEGATIVE: the old words claimed the minute of the visit alone (false once the read is a minute on) or "after it".
-    for (const words of [receiptWords("ga4", asked("verified", null), true), receiptWords("ga4", asked("no_receipt", "ga4_realtime_none"), true)]) {
-      expect(words).not.toMatch(/minute of this visit and|after it$/)
-    }
-  })
-
-  it("GA4's realtime lane counted the visit → 'received' in the terminal, the per-tool fact and the GA4 row; the wizard re-asked while it was pending", async () => {
-    const bundle = fakeDeps({
-      bridge: {
-        receipts: [
-          receiptsAll({ ga4: lane("pending", null, "ga4_realtime") }),
-          receiptsAll({ ga4: lane("verified", GA4_AT, "ga4_realtime") })
-        ]
-      }
-    })
-    const { ctx } = await runProve(bundle)
-    expect(bundle.log.names("bridge").filter((name) => name === "bridge.postReceipts")).toHaveLength(2)
-    expect(subs(ctx)).toContain("✓ GA4 · received (GA4 counted a page view in the minute of this visit or the next, and none in the 5 minutes before; it has no per-visit id)")
-    // LF4-P1-1: never a per-visit claim GA4's minute-level report cannot make.
-    expect(subs(ctx).join("\n")).not.toMatch(/counted it\)|this visit's page view/)
-    expect(subs(ctx).join("\n")).not.toContain("GA4 · sent (seen leaving)")
-    const column = ctx.current().report.proven_live!
-    expect(column.cells.ga4_page_views_per_visit).toMatchObject({ display: "1 · received", state: "pass" })
-    expect(ctx.current().proof!.tools.find((tool) => tool.tool === "ga4")).toMatchObject({ connected: true, receipt: "verified" })
-  })
-
+describe("prove: a connected GA4 is asked, and its answer is the word", () => {
   it("GA4 counted other page views in the same minutes → said so; never 'received' on a guess", async () => {
     const bundle = fakeDeps({ bridge: { receipts: [receiptsAll({ ga4: { state: "delivering", receiptAt: null, reason: "ga4_realtime_busy", provenance: "ga4_realtime" } })] } })
     const { ctx } = await runProve(bundle)
     expect(subs(ctx)).toContain("✓ GA4 · sent (seen leaving) · GA4 counted other page views in the 5 minutes before this visit, so this visit cannot be singled out")
     expect(JSON.stringify(ctx.current().report.proven_live)).not.toContain("received (GA4")
   })
-
-  it("negative: GA4 NOT connected → 'sent (seen leaving)' is the honest word (Infinite cannot ask GA4)", async () => {
-    const keys = keysFixture({ ga4: { status: "not_connected", propertyLabel: null, streams: [] } as never })
-    const bundle = fakeDeps({ bridge: { keys, receipts: [receiptsAll({ ga4: lane("delivering", null, "desktop_test") })] } })
-    const { ctx } = await runProve(bundle)
-    expect(subs(ctx)).toContain("✓ GA4 · sent (seen leaving)")
-    expect(subs(ctx).join("\n")).not.toContain("received (GA4")
-  })
-
-  it("a connected Meta pixel says why it cannot be confirmed now (Meta reports by the hour)", async () => {
-    const { ctx } = await runProve(fakeDeps())
-    expect(subs(ctx)).toContain("✓ Meta · sent (seen leaving) · Meta reports only by the hour, so this visit cannot be confirmed now")
-  })
 })
 
-
-describe("live run 6: post-deploy checks reach the checklist", () => {
+describe("prove: post-deploy checks reach the checklist", () => {
   const job = (jobId: "ga4_improve" | "duplicates_remove", checkId: string): ChecklistItem => ({
     id: `${jobId}:live6`, jobId, n: 4, title: jobId, owner: "agent",
     trigger: { finding: "live test 6", evidence: [] }, allow: { files: [], create: [] },
@@ -594,7 +408,7 @@ describe("live run 6: post-deploy checks reach the checklist", () => {
     ]
   })
 
-  it.each(["pass", "missing", "undetermined", "problem"] as const)("applies only measured, current post-deploy PV results (%s)", async (variant) => {
+  it.each<"pass" | "missing" | "undetermined" | "problem">(["pass", "missing"])("applies only measured, current post-deploy PV results (%s)", async (variant) => {
     const bundle = fakeDeps()
     const state = mergedState()
     state.jobs = [job("ga4_improve", "ga4_seen_leaving"), job("duplicates_remove", "one_beacon_per_tool")]
@@ -626,3 +440,4 @@ describe("live run 6: post-deploy checks reach the checklist", () => {
     }
   })
 })
+

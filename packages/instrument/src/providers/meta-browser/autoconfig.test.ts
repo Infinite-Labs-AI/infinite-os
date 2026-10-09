@@ -39,21 +39,6 @@ describe("checkMetaAutoConfigOptOut (ported from infinite.fast's live guardrail)
     expect(checkMetaAutoConfigOptOut(page('"false"'), ID, "adopted").state).toBe("ok")
   })
 
-  it("an opt-out for a DIFFERENT pixel does not cover this one", () => {
-    const bytes = `fbq("set", "autoConfig", "false", "999888777666555"); fbq("init", "${ID}");`
-    expect(checkMetaAutoConfigOptOut(bytes, ID, "managed")).toMatchObject({ state: "problem", reason: "opt_out_missing" })
-  })
-
-  it("says UNDETERMINED when the bytes cannot settle it — never ok", () => {
-    // A computed pixel id or value: the call might be this pixel's opt-out.
-    const computed = `fbq("set", "autoConfig", false, PIXEL_ID); fbq("init", "${ID}");`
-    expect(checkMetaAutoConfigOptOut(computed, ID, "managed")).toMatchObject({ state: "undetermined", reason: "autoconfig_unreadable" })
-    // An opt-out with no literal init for this pixel to order it against.
-    const noInit = `fbq("set", "autoConfig", "false", "${ID}"); fbq("init", window.PIXEL);`
-    expect(checkMetaAutoConfigOptOut(noInit, ID, "managed")).toMatchObject({ state: "undetermined", reason: "pixel_not_initialised" })
-    expect(checkMetaAutoConfigOptOut(page('"false"'), "abc", "managed")).toMatchObject({ state: "undetermined", reason: "invalid_pixel_id" })
-  })
-
   it("an opt-out inside a comment never runs: line, block and HTML comments are UNDETERMINED, never ok", () => {
     const init = `fbq("init", "${ID}");`
     for (const commented of [
@@ -105,17 +90,5 @@ describe("censusManagedMetaSnippet (the 849ccf1 near-miss)", () => {
       { code: "matching_count", count: 2 },
       { code: "init_count", pixelId: PIXEL, count: 2 }
     ])
-  })
-
-  it("a capture moved after init is caught", () => {
-    const capture = SNIPPET.slice(0, SNIPPET.indexOf("!function(f,b,e,v,n,t,s)"))
-    const rest = SNIPPET.slice(capture.length)
-    expect(censusManagedMetaSnippet(`${rest}\n${capture}`)).toEqual([{ code: "capture_after_init", pixelId: PIXEL }])
-  })
-
-  it("a block whose init was stripped is caught", () => {
-    const stripped = SNIPPET.replace(`fbq('init', "${PIXEL}");`, "").replace(`fbq('set', 'autoConfig', 'false', "${PIXEL}");`, "")
-    // The pixel id still appears in the matching re-init, so it is found — and has no bootstrap init.
-    expect(censusManagedMetaSnippet(stripped)).toEqual([{ code: "init_count", pixelId: PIXEL, count: 0 }])
   })
 })

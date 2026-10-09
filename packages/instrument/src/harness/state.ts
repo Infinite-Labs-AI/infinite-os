@@ -1,3 +1,4 @@
+import { OWNER_BOUNDARY_INSTRUCTION } from "../jobs/owner-boundary.js"
 import {
   HARNESS_PROVIDER_ORDER,
   type HarnessMode,
@@ -18,10 +19,11 @@ export const HARNESS_HANDOFF_LINE =
 export const HARNESS_REPORT_RELATIVE_PATH = ".infinite/REPORT.md"
 
 export const IMPLEMENTATION_CHECKLIST = [
+  OWNER_BOUNDARY_INSTRUCTION,
   "Map editable source, build-time injection, generated output and deployed routes before editing. Update the existing owner; never patch generated output or install a second bootstrap just to get a green check.",
   "Compare the project's pinned tag and adopted custom bootstraps with the running installer. Adoption does not upgrade dependencies or apply newer provider settings; preserve existing consent and sensitive-page exclusions.",
   "Write an event matrix for each relevant view, attempt, confirmed success, failure, retry and exit. Use bounded names and properties in each independent provider; a click or animation is not a server-confirmed conversion. Keep outcomes on the server that owns them.",
-  "Test the real handlers: one observation per action, keyboard and pointer submission, async errors, retries, consent denial/revocation, and navigation before delivery. Preserve identity correlation across browser, authentication and server outcomes without logging identifiers or secrets.",
+  "Test the real handlers: one observation per action, keyboard and pointer submission, async errors, retries, and navigation before delivery. Preserve identity correlation across browser, authentication and server outcomes without logging identifiers or secrets.",
   "Inspect provider-added URL metadata as well as custom properties. OAuth callbacks, emails, verification codes and handoff secrets must not leak through page URLs, DOM autocapture or replay. Exercise success and failure callbacks.",
   "Build and inspect every affected deployed route for the intended runtime/configuration and duplicate bootstraps. Then trigger representative actions in a real browser and read back a receipt per provider. Static HTTP inspection does not run JavaScript; record manual or unavailable checks as incomplete.",
   "When a CLI or app is distributed, repeat the audit using the actual packaged executable outside the checkout and through its installed launcher. Source tests alone do not prove the shipped package layout works."
@@ -218,8 +220,8 @@ export function renderReportTable(report: HarnessReport): string {
  * must never claim a state it did not read. So the line reports the LOCAL half by name and says
  * plainly that the toggle is elsewhere. Anything else would be a fabricated "on".
  *
- * WHY IT IS WORTH A LINE AT ALL. A founder running Meta ads without PostHog has no server-side
- * conversion path: Meta's optimiser never learns about the purchase their own server confirmed. The
+ * WHY IT IS WORTH A LINE AT ALL. Infinite is the Meta path for server conversions, PostHog or not:
+ * without it Meta's optimiser never learns about the purchase the site's own server confirmed. The
  * pieces are already installed at this point; all that is missing is one switch nobody mentioned.
  */
 export function metaRelayNote(report: HarnessReport): string | null {
@@ -234,7 +236,7 @@ export function metaRelayNote(report: HarnessReport): string | null {
   if (!laneReady) {
     return "Meta relay: off — a Meta pixel is installed but no server lane reports outcomes, so there is nothing to forward. Install the server lane first (`--server-lane`)."
   }
-  return "Meta relay: on locally — a Meta pixel is installed and the server lane can carry outcomes. Forwarding still needs the cloud toggle (Infinite → Site → Settings → “Send outcomes to Meta Conversions API”), which this command cannot read or set. Only turn it on if you do NOT use PostHog: PostHog ships its own Meta destination, and two senders for one conversion is a double count."
+  return "Meta relay: on locally — a Meta pixel is installed and the server lane can carry outcomes. Forwarding still needs the cloud toggle (Infinite → Site → Settings → “Send outcomes to Meta Conversions API”), which this command cannot read or set. Turn it on whether or not you use PostHog; if PostHog also sends to Meta, turn PostHog's Meta destination off for these events, since two senders count each conversion twice."
 }
 
 function markdownCell(value: string): string {

@@ -145,6 +145,7 @@ const FORBIDDEN_ANYWHERE = ["--no-verify", "--no-gpg-sign", "--amend", "--force"
 export interface GitGuardContext {
   /** The base branch: never pushed to. */
   base?: string | null
+  pushRemote?: string | null
 }
 
 /**
@@ -196,9 +197,11 @@ export function assertSafeGitArgv(args: readonly string[], context: GitGuardCont
         if (arg.startsWith("-")) throw new GitSafetyError(`push ${arg} is not allowed`)
         positional.push(arg)
       }
-      if (positional.length !== 2 || positional[0] !== "origin") throw new GitSafetyError("push must be `push -u origin <branch>`")
-      const branch = positional[1]!
-      if (branch.includes(":") || branch.startsWith("+")) throw new GitSafetyError(`push refspec ${branch} is never used`)
+      if (positional.length !== 2 || (positional[0] !== "origin" && positional[0] !== context.pushRemote)) throw new GitSafetyError("push must target origin or the approved fork")
+      const ref = positional[1]!
+      const pinned = /^[a-f0-9]{40}:refs\/heads\/([A-Za-z0-9._/-]+)$/.exec(ref)
+      const branch = pinned?.[1] ?? ref
+      if (branch.includes(":") || branch.startsWith("+")) throw new GitSafetyError(`push refspec ${ref} is never used`)
       if (context.base && (branch === context.base || branch === `refs/heads/${context.base}`)) {
         throw new GitSafetyError(`never push to the base branch ${context.base}`)
       }
@@ -216,8 +219,10 @@ export function assertSafeGitArgv(args: readonly string[], context: GitGuardCont
       if (!rest.includes("--ff-only")) throw new GitSafetyError("merge is used only with --ff-only")
       return
     case "worktree":
-      if (rest[0] !== "add" && rest[0] !== "remove" && rest[0] !== "prune") throw new GitSafetyError(`worktree ${rest[0] ?? ""} is not allowed`)
+      if (!["add", "remove", "prune", "list"].includes(rest[0] ?? "")) throw new GitSafetyError(`worktree ${rest[0] ?? ""} is not allowed`)
       if (rest[0] === "add" && !rest.includes("--detach")) throw new GitSafetyError("worktree add is always --detach")
+      return
+    case "check-ignore":
       return
     case "config":
       if (rest[0] !== "--get") throw new GitSafetyError("config is read-only (--get)")

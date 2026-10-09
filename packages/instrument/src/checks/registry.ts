@@ -22,6 +22,7 @@
 // grader input `{result, expect, mode, ctx}` or a T0 input `{params, artifacts}` — and the tier-qualified
 // ids `T0:click_test` / `RH:click_test` (and `PV:` / `T1:` for the other grader ids) name the tier
 // explicitly. Every built-in validates its input and throws `CheckInputError`, never a TypeError.
+import { relative, resolve } from "node:path"
 import type { WorkspaceInstallArtifacts } from "../types.js"
 import type { TagHosting } from "../wizard/contracts/bridge.js"
 import type {
@@ -39,7 +40,8 @@ import type {
 import type { TestExpect, TestMode, TestResult, TestTool } from "../wizard/contracts/test-engine.js"
 import type { DenyReadSet, SandboxedSpawnFn } from "../t0/sandbox.js"
 import { runT0Scenarios, T0_SCENARIO_IDS, type RunT0ScenariosOptions } from "../t0/scenarios.js"
-import { gradeBuild, runBuild, type BuildRun } from "./build.js"
+import { gradeBuild, installSiteDependencies, runBuild, type BuildRun } from "./build.js"
+import { BaselineUnavailableError } from "./baseline-tree.js"
 import { censusChecks, runCensus } from "./census.js"
 import { gradeTestRunFull, type GradeContext } from "./grade-test-run.js"
 import type { PackageManager } from "../types.js"
@@ -120,6 +122,8 @@ export class CheckNotRegisteredError extends Error {
 }
 
 export interface CheckRunnerOptions {
+  /** A detached copy of the recorded base, with the site's installed dependencies available. */
+  baselineTree?: () => Promise<{ root: string; dispose(): Promise<void> }>
   /** Absolute repo root. */
   root: string
   /** The app root, absolute or relative to `root`. */
@@ -221,12 +225,28 @@ export function createCheckRunner(options: CheckRunnerOptions): O6CheckRunner {
     builtIn(`T0:${id}`, scenarioCheck(id))
     if (id !== "click_test") builtIn(id, scenarioCheck(id))
   }
+  const takeBaseline = async (): Promise<BuildRun> => {
+    let tree: { root: string; dispose(): Promise<void> } | undefined
+    try { tree = await options.baselineTree?.() }
+    catch (error) {
+      if (!(error instanceof BaselineUnavailableError)) throw error
+      const result: BuildRun = { signatureVersion: 3, ok: false, failureSignature: [], durationMs: 0, skipped: null, exitCode: null, timedOut: false, error: error.message, sandboxed: false, packageManager: null, outputTail: [] }
+      baseline = result
+      return result
+    }
+    try {
+      const result = await runBuild({ ...buildOptions(), ...(tree ? { root: tree.root, appRoot: relative(options.root, resolve(options.root, options.appRoot)) || "." } : {}) })
+      baseline = result
+      return result
+    } finally {
+      await tree?.dispose()
+    }
+  }
   const buildCheck = (checkId: string) => async () => gradeBuild(checkId, await runBuild(buildOptions()), baseline, ctx())
   builtIn("build", buildCheck("build"))
   builtIn("build_green_or_baseline", buildCheck("build_green_or_baseline"))
   builtIn("build_baseline", async () => {
-    const run = await runBuild(buildOptions())
-    baseline = run
+    const run = await takeBaseline()
     // The baseline is reported, never blamed: a red baseline is `info`, not a problem of this run.
     const graded = gradeBuild("build_baseline", run, null, ctx())
     return run.ok || graded.state === "undetermined" ? graded : { ...graded, state: "info", reason: `baseline_red — ${run.failureSignature.slice(0, 3).join("; ")}` }
@@ -279,10 +299,9 @@ export function createCheckRunner(options: CheckRunnerOptions): O6CheckRunner {
     },
     registered: () => [...registry.keys()].sort(),
     baseline: () => baseline,
-    async buildBaseline() {
-      const result = await runBuild(buildOptions())
-      baseline = result
-      return result
+    buildBaseline: takeBaseline,
+    installDependencies(onOutput) {
+      return installSiteDependencies({ ...buildOptions(), onOutput })
     },
     async build(): Promise<BuildRun> {
       return runBuild(buildOptions())

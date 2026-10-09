@@ -3,15 +3,14 @@
 // the step pushes plainly and prints the link. Every other method is unsupported, and the review goes to
 // `.infinite/wizard/REVIEW.md`.
 import type { GitHostAdapter } from "../wizard/contracts/git-host.js"
-import { gitlabMergeRequestPushOptions } from "../git/push.js"
 import type { WizardGitOps } from "../git/index.js"
 import { unsupportedAdapter } from "./other.js"
 
-export function createGitLabAdapter(git: Pick<WizardGitOps, "pushWithOptions">): GitHostAdapter {
+export function createGitLabAdapter(_git: Pick<WizardGitOps, "pushWithOptions">): GitHostAdapter {
   return {
     ...unsupportedAdapter("gitlab"),
-    async createDraftPr(input) {
-      await git.pushWithOptions(input.head, gitlabMergeRequestPushOptions(input.base, input.title))
+    async createDraftPr() {
+      // Merge-request push options run only at the measured, SHA-pinned shipping boundary.
       return { unsupported: true }
     }
   }

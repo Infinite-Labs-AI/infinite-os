@@ -10,13 +10,14 @@
 // Agent-written `next.config.*` and page modules are evaluated by the build, which is why O9's post-turn
 // gate runs BEFORE any build (§3a.9 item 5) and why the build never runs in the wizard's own process.
 import { createHash } from "node:crypto"
-import { existsSync, readFileSync } from "node:fs"
+import { existsSync, readFileSync, unlinkSync, writeFileSync } from "node:fs"
 import { join, resolve } from "node:path"
 
 import { detectPackageManager } from "../package-manager.js"
 import type { PackageManager } from "../types.js"
 import type { BuildResult, CheckResult } from "../wizard/contracts/jobs.js"
-import { defaultDenyReads, sandboxedSpawn, SandboxUnavailableError, type DenyReadSet, type SandboxedSpawnFn } from "../t0/sandbox.js"
+import { defaultDenyReads, sandboxedSpawn, SandboxUnavailableError, type DenyReadSet, type SandboxedSpawnFn, type SandboxedSpawnResult } from "../t0/sandbox.js"
+import { createBunLockfile, stablePackageCache } from "./package-cache.js"
 
 export const BUILD_DEFAULT_TIMEOUT_MS = 10 * 60_000
 
@@ -24,6 +25,7 @@ export type BuildSkipReason = "no_package_json" | "no_build_script" | "ambiguous
 
 /** A `BuildResult` with what the wizard needs to explain it. */
 export interface BuildRun extends BuildResult {
+  signatureVersion: 3
   skipped: BuildSkipReason | null
   exitCode: number | null
   timedOut: boolean
@@ -48,6 +50,65 @@ export interface BuildOptions {
   now?: () => number
 }
 
+export function frozenInstallCommand(manager: PackageManager, frozen = true): { command: string; args: string[] } {
+  const args: Record<PackageManager, string[]> = {
+    npm: ["ci"],
+    pnpm: ["install", "--frozen-lockfile"],
+    yarn: ["install", "--frozen-lockfile"],
+    bun: ["install", "--frozen-lockfile"]
+  }
+  return { command: manager, args: frozen ? args[manager] : ["install"] }
+}
+
+export async function dependencyInstallPlan(root: string, appRoot: string, manager: PackageManager, exists: (path: string) => Promise<boolean> = async path => existsSync(path), readText: (path: string) => Promise<string | null> = async path => { try { return readFileSync(path, "utf8") } catch { return null } }) {
+  const names = { npm: ["package-lock.json", "npm-shrinkwrap.json"], pnpm: ["pnpm-lock.yaml"], yarn: ["yarn.lock"], bun: ["bun.lock", "bun.lockb"] }[manager]
+  let workspace = manager === "pnpm" && await exists(join(root, "pnpm-workspace.yaml"))
+  try { workspace ||= !!(JSON.parse(await readText(join(root, "package.json")) ?? "{}") as { workspaces?: unknown }).workspaces } catch { /* Invalid manifests fail in the manager with its own message. */ }
+  const cwd = workspace ? root : resolve(root, appRoot)
+  for (const name of names) if (await exists(join(cwd, name))) return { ...frozenInstallCommand(manager), cwd, lockfile: join(cwd, name), createsLockfile: false }
+  return { ...frozenInstallCommand(manager, false), cwd, lockfile: join(cwd, names[0]!), createsLockfile: true }
+}
+
+/** A user-approved install, under the same process sandbox as the site's build. */
+export async function installSiteDependencies(options: BuildOptions & { onOutput?: (line: string) => void }): Promise<{ ok: boolean; reason: string | null }> {
+  const root = resolve(options.root)
+  const appRoot = resolve(root, options.appRoot)
+  const manager = buildPackageManager(root, appRoot, options.packageManager)
+  if (manager === "ambiguous") return { ok: false, reason: "several lockfiles name different package managers" }
+  const plan = await dependencyInstallPlan(root, appRoot, manager)
+  const { command, args } = plan
+  const deny = options.denyReads ?? defaultDenyReads()
+  try {
+    const spawn = options.spawn ?? sandboxedSpawn
+    const cache = await stablePackageCache({ manager, root, appRoot: plan.cwd, spawn, deny, platform: options.platform, signal: options.signal })
+    if (manager === "bun" && plan.createsLockfile) await createBunLockfile({ appRoot: plan.cwd, lockfile: plan.lockfile, spawn, deny, env: cache.env, writableCache: cache.writable, signal: options.signal, platform: options.platform, onOutput: options.onOutput })
+    if (manager === "yarn" && plan.createsLockfile) writeFileSync(plan.lockfile, "", { flag: "wx", mode: 0o644 })
+    const result = await spawn(command, [...(manager === "bun" ? ["install", "--frozen-lockfile", "--no-save"] : args), ...cache.args], {
+      denyReads: deny.paths,
+      denyReadPrefixes: deny.prefixes,
+      network: true,
+      allowWrites: [...cache.writable, ...(plan.createsLockfile ? [plan.lockfile] : []), ...buildAllowedWrites(root, appRoot), ...[...new Set([root, appRoot])].flatMap((path) => [join(path, "node_modules"), join(path, ".yarn"), join(path, ".pnp.cjs"), join(path, ".pnp.loader.mjs")])],
+      packageManagerTempDirs: [...new Set([root, appRoot])],
+      denyWrites: [...buildDeniedWrites(root, appRoot), join(root, "package.json"), join(appRoot, "package.json"), ...(!plan.createsLockfile || manager === "bun" ? [plan.lockfile] : [])],
+      cwd: plan.cwd,
+      env: { ...cache.env, ...(manager === "yarn" ? { YARN_ENABLE_IMMUTABLE_INSTALLS: plan.createsLockfile ? "false" : "true" } : {}), CI: "1", NO_UPDATE_NOTIFIER: "1", npm_config_update_notifier: "false", npm_config_fund: "false", npm_config_audit: "false" },
+      timeoutMs: options.timeoutMs ?? BUILD_DEFAULT_TIMEOUT_MS,
+      signal: options.signal,
+      platform: options.platform,
+      onOutput: (chunk) => options.onOutput?.(chunk)
+    })
+    return result.exitCode === 0 && !result.timedOut && !result.aborted
+      ? { ok: true, reason: null }
+      : { ok: false, reason: result.timedOut ? "installation timed out" : result.aborted ? "installation was cancelled" : `installation exited ${result.exitCode ?? "without a status"}` }
+  } catch (error) {
+    return { ok: false, reason: error instanceof Error ? error.message : String(error) }
+  } finally {
+    if (manager === "yarn" && plan.createsLockfile) {
+      try { if (readFileSync(plan.lockfile, "utf8") === "") unlinkSync(plan.lockfile) } catch { /* Keep any completed lock; never erase a nonempty file. */ }
+    }
+  }
+}
+
 const ANSI = /\u001b\[[0-9;?]*[ -/]*[@-~]/g
 
 const ERROR_LINE =
@@ -58,6 +119,7 @@ export const FAILURE_SIGNATURE_MAX_LINES = 200
 
 /** Lines a package manager prints about the run itself (where its log went), never about the failure. */
 const RUN_BOOKKEEPING = /complete log of this run can be found|^npm (?:error|ERR!) A complete log|^npm (?:error|ERR!) +\/|_logs\/.*-debug(?:-\d+)?\.log/i
+const DIAGNOSTIC_SUMMARY = /^(?:[✖×]\s*)?\d+\s+problems?\s*\(|^\d+\s+(?:errors?|warnings?)(?:\s+and\s+\d+\s+(?:errors?|warnings?))?\s+potentially fixable\b|^Found\s+\d+\s+errors?\b|^\d+\s+errors?(?:\s+and\s+\d+\s+warnings?)?\.?$/i
 
 /** The per-run throwaway HOME `sandboxedSpawn` creates, wherever it appears (`/private/var/…/infinite-tag-sbx-Qz98Lk`). */
 const SANDBOX_HOME = /(?:\/private)?\/[^\s'"`]*?infinite-tag-sbx-[A-Za-z0-9]+/g
@@ -88,9 +150,41 @@ export function failureSignature(output: string, root: string, options: { home?:
       if (homePattern) out = out.replace(homePattern, "<home>")
       return out.replace(SANDBOX_HOME, "<home>").replace(rootPattern, "<root>").trim()
     })
-  const signature = new Set<string>()
+  const structured = new Map<string, number>()
+  const opaque = new Set<string>()
+  let file: string | null = null
+  const sourceFile = (value: string): string | null => {
+    const path = value.replace(/^<root>\//, "").replace(/^\.\//, "")
+    return /^[^:\r\n]+\.(?:[cm]?[jt]sx?|vue|svelte|astro)$/.test(path) ? path : null
+  }
+  const add = (path: string, code: string, message: string) => {
+    const key = `${path} | ${code} | ${message.trim().replace(/\s+/g, " ")}`
+    structured.set(key, (structured.get(key) ?? 0) + 1)
+  }
   for (const line of lines) {
-    if (!ERROR_LINE.test(line) || RUN_BOOKKEEPING.test(line)) continue
+    if (DIAGNOSTIC_SUMMARY.test(line)) continue
+    if (/^(?:(?:.+?\.\w+):)?\s*\d+:\d+\s+warning\b:?/i.test(line)) continue
+    const header = /^(.*?)(?::\d+(?::\d+)?)?$/.exec(line)?.[1]
+    const fileHeader = header ? sourceFile(header) : null
+    if (fileHeader) { file = fileHeader; continue }
+    const tsc = /^(.+?)(?:\(\d+,\d+\):|:\d+:\d+\s*-?)\s*error\s+(TS\d+):\s*(.+)$/i.exec(line)
+    if (tsc && sourceFile(tsc[1]!)) { add(sourceFile(tsc[1]!)!, tsc[2]!, tsc[3]!); continue }
+    const parsing = /^(?:(.+?\.\w+):)?\s*\d+:\d+\s+(?:Error:|error)\s+(Parsing error:\s*.+)$/i.exec(line)
+    if (parsing && (sourceFile(parsing[1] ?? "") ?? file)) { add((sourceFile(parsing[1] ?? "") ?? file)!, "parse-error", parsing[2]!); continue }
+    const eslint = /^(?:(.+?\.\w+):)?\s*\d+:\d+\s+(?:Error:|error)\s+(.+?)\s+([@\w/-]+)$/.exec(line)
+    if (eslint) {
+      const path = sourceFile(eslint[1] ?? "") ?? file
+      if (path) { add(path, eslint[3]!, eslint[2]!); continue }
+    }
+    const nextType = /^Type error:\s*(.+)$/.exec(line)
+    if (nextType && file) { add(file, "Type error", nextType[1]!); continue }
+    const nextModule = /^Module not found:\s*(.+)$/.exec(line)
+    if (nextModule && file) { add(file, "Module not found", nextModule[1]!); continue }
+    const vite = /Rollup failed to resolve import (.+) from ["']([^"']+)["']/.exec(line)
+    if (vite && sourceFile(vite[2]!)) { add(sourceFile(vite[2]!)!, "Rollup resolve", `Failed to resolve import ${vite[1]!}`); continue }
+    const syntax = /^SyntaxError:\s*(.+) in ([^\s]+)$/.exec(line)
+    if (syntax && sourceFile(syntax[2]!)) { add(sourceFile(syntax[2]!)!, "SyntaxError", syntax[1]!); continue }
+    if (!ERROR_LINE.test(line) || RUN_BOOKKEEPING.test(line) || /^(?:Failed to compile\.|error during build:?)$/i.test(line)) continue
     const normalised = line
       .replace(/\((\d+),(\d+)\)/g, "")
       .replace(/:\d+:\d+\b/g, "")
@@ -100,9 +194,9 @@ export function failureSignature(output: string, root: string, options: { home?:
       .replace(/\b[0-9a-f]{8,}\b/gi, "<hash>")
       .replace(/\s+/g, " ")
       .trim()
-    if (normalised) signature.add(normalised)
+    if (normalised) opaque.add(`opaque: ${normalised}`)
   }
-  const sorted = [...signature].sort()
+  const sorted = [...structured].flatMap(([key, count]) => Array.from({ length: count }, (_, index) => index === 0 ? key : `${key} | occurrence:${index + 1}`)).concat([...opaque]).sort()
   if (sorted.length <= FAILURE_SIGNATURE_MAX_LINES) return sorted
   const digest = createHash("sha256").update(sorted.join("\n")).digest("hex").slice(0, 16)
   return [...sorted.slice(0, FAILURE_SIGNATURE_MAX_LINES - 1), `…${sorted.length - FAILURE_SIGNATURE_MAX_LINES + 1} more failure lines (set ${digest})`]
@@ -110,7 +204,7 @@ export function failureSignature(output: string, root: string, options: { home?:
 
 /** A signature with no recognised error line (only an exit code or a timeout) cannot be compared. */
 function opaqueSignature(signature: readonly string[]): boolean {
-  return signature.length > 0 && signature.every((line) => /^(?:exit_code:|timeout$)/.test(line))
+  return signature.length > 0 && signature.every((line) => /^(?:(?:build|lint): )?(?:exit_code:|timeout$|opaque:)/.test(line))
 }
 
 /**
@@ -141,14 +235,15 @@ export function buildDeniedWrites(root: string, appRoot: string): string[] {
   return [...new Set([join(root, ".git"), join(root, ".husky"), join(root, ".infinite"), join(appRoot, ".infinite")])]
 }
 
-function readBuildScript(appRoot: string): { ok: true } | { ok: false; reason: BuildSkipReason } {
+function readValidationScripts(appRoot: string): { scripts: Array<"build" | "lint"> } | { reason: BuildSkipReason } {
   const path = join(appRoot, "package.json")
-  if (!existsSync(path)) return { ok: false, reason: "no_package_json" }
+  if (!existsSync(path)) return { reason: "no_package_json" }
   try {
     const manifest = JSON.parse(readFileSync(path, "utf8")) as { scripts?: Record<string, unknown> }
-    return typeof manifest.scripts?.build === "string" && manifest.scripts.build.trim() ? { ok: true } : { ok: false, reason: "no_build_script" }
+    const scripts = (["build", "lint"] as const).filter((name) => typeof manifest.scripts?.[name] === "string" && (manifest.scripts[name] as string).trim())
+    return scripts.length > 0 ? { scripts } : { reason: "no_build_script" }
   } catch {
-    return { ok: false, reason: "no_package_json" }
+    return { reason: "no_package_json" }
   }
 }
 
@@ -160,6 +255,13 @@ export function buildPackageManager(root: string, appRoot: string, override?: Pa
     if (detected.kind === "ambiguous") return "ambiguous"
     if (detected.kind !== "unknown") return detected.kind
   }
+  for (const dir of appRoot === root ? [root] : [appRoot, root]) {
+    try {
+      const manifest = JSON.parse(readFileSync(join(dir, "package.json"), "utf8")) as { packageManager?: string }
+      const declared = /^(npm|pnpm|yarn|bun)@/.exec(manifest.packageManager ?? "")?.[1]
+      if (declared) return declared as PackageManager
+    } catch { /* No declared manager. */ }
+  }
   // No lockfile anywhere: `npm run build` runs the package.json script without installing anything.
   return "npm"
 }
@@ -169,16 +271,18 @@ export async function runBuild(options: BuildOptions): Promise<BuildRun> {
   const appRoot = resolve(root, options.appRoot)
   const clock = options.now ?? Date.now
   const started = clock()
-  const base = { ok: false, failureSignature: [] as string[], durationMs: 0, exitCode: null, timedOut: false, error: null, sandboxed: false, outputTail: [] as string[] }
-  const script = readBuildScript(appRoot)
-  if (!script.ok) return { ...base, ok: true, skipped: script.reason, packageManager: null }
+  const base = { signatureVersion: 3 as const, ok: false, failureSignature: [] as string[], durationMs: 0, exitCode: null, timedOut: false, error: null, sandboxed: false, outputTail: [] as string[] }
+  const scripts = readValidationScripts(appRoot)
+  if ("reason" in scripts) return { ...base, ok: true, skipped: scripts.reason, packageManager: null }
   const manager = buildPackageManager(root, appRoot, options.packageManager)
   if (manager === "ambiguous") return { ...base, skipped: "ambiguous_lockfiles", packageManager: null }
   const deny = options.denyReads ?? defaultDenyReads()
   const spawnFn = options.spawn ?? sandboxedSpawn
-  let result
-  try {
-    result = await spawnFn(manager, ["run", "build"], {
+  const runs: Array<{ name: "build" | "lint"; result: SandboxedSpawnResult; output: string }> = []
+  for (const name of scripts.scripts) {
+    let result: SandboxedSpawnResult
+    try {
+      result = await spawnFn(manager, ["run", name], {
       denyReads: deny.paths,
       denyReadPrefixes: deny.prefixes,
       network: true,
@@ -202,29 +306,39 @@ export async function runBuild(options: BuildOptions): Promise<BuildRun> {
       timeoutMs: options.timeoutMs ?? BUILD_DEFAULT_TIMEOUT_MS,
       signal: options.signal,
       platform: options.platform
-    })
-  } catch (error) {
-    const message = error instanceof SandboxUnavailableError || error instanceof Error ? error.message : String(error)
-    return { ...base, durationMs: clock() - started, skipped: null, error: message, packageManager: manager }
+      })
+    } catch (error) {
+      const message = error instanceof SandboxUnavailableError || error instanceof Error ? error.message : String(error)
+      return { ...base, durationMs: clock() - started, skipped: null, error: message, packageManager: manager }
+    }
+    runs.push({ name, result, output: `${result.stdout}\n${result.stderr}` })
+    if (result.timedOut || result.aborted) break
   }
-  const output = `${result.stdout}\n${result.stderr}`
-  const outputTail = output
+  const outputTail = runs.flatMap(({ name, result, output }) => output
     .replace(ANSI, "")
     .split(/\r?\n/)
     .map((line) => line.split(root).join("<root>").split(result.home).join("<home>").replace(SANDBOX_HOME, "<home>").trimEnd())
     .filter(Boolean)
-    .slice(-20)
-  const ok = result.exitCode === 0 && !result.timedOut
-  const signature = ok ? [] : failureSignature(output, root, { home: result.home })
+    .map((line) => scripts.scripts.length > 1 ? `${name}: ${line}` : line)).slice(-20)
+  const ok = runs.length === scripts.scripts.length && runs.every(({ result }) => result.exitCode === 0 && !result.timedOut && !result.aborted)
+  const signature = runs.flatMap(({ name, result, output }) => {
+    if (result.exitCode === 0 && !result.timedOut && !result.aborted) return []
+    const lines = failureSignature(output, root, { home: result.home })
+    return (lines.length > 0 ? lines : [result.timedOut ? "timeout" : `exit_code:${result.exitCode ?? result.signal}`]).map((line) => `${name}: ${line}`)
+  })
+  const missing = runs.find(({ result, output }) => result.exitCode === 127 && /(?:command )?not found|is not recognized/i.test(output))
+  const stopped = runs.find(({ result }) => result.timedOut || result.aborted)
+  const failed = runs.find(({ result }) => result.exitCode !== 0)
   return {
+    signatureVersion: 3,
     ok,
-    failureSignature: ok ? [] : signature.length ? signature : [result.timedOut ? "timeout" : `exit_code:${result.exitCode ?? result.signal}`],
+    failureSignature: ok ? [] : signature.length ? signature : ["exit_code:unknown"],
     durationMs: clock() - started,
     skipped: null,
-    exitCode: result.exitCode,
-    timedOut: result.timedOut,
-    error: result.aborted ? "the build was cancelled" : null,
-    sandboxed: result.sandboxed,
+    exitCode: failed?.result.exitCode ?? null,
+    timedOut: stopped?.result.timedOut ?? false,
+    error: missing ? `the site's ${missing.name} script could not run: its executable was not found (install this site's dependencies, then resume)` : stopped?.result.aborted ? "site validation was cancelled" : null,
+    sandboxed: runs.every(({ result }) => result.sandboxed),
     packageManager: manager,
     outputTail
   }
@@ -248,7 +362,7 @@ export function gradeBuild(checkId: string, current: BuildResult, baseline: Buil
     runId: ctx.runId
   })
   if (isBuildRun(current)) {
-    if (current.skipped === "no_package_json" || current.skipped === "no_build_script") return make("info", "no_build_script", "the app has no build script, so there is nothing to build")
+    if (current.skipped === "no_package_json" || current.skipped === "no_build_script") return make("info", "no_build_script", "the app has no build or lint script, so there is nothing to check")
     if (current.skipped === "ambiguous_lockfiles") return make("undetermined", "test_error", "several lockfiles: the package manager to build with is ambiguous")
     if (current.error) return make("undetermined", "test_error", current.error)
     if (current.timedOut) return make("undetermined", "test_error", `the build did not finish within ${Math.round(current.durationMs / 1000)} s`)
@@ -275,11 +389,13 @@ export async function buildVerdict(
   build: BuildResult,
   baseline: () => Promise<Pick<BuildResult, "failureSignature">>
 ): Promise<{ state: "pass" | "problem" | "undetermined"; reason?: string }> {
+  if ((build as Partial<BuildRun>).timedOut) return { state: "undetermined", reason: "test_error — the working-tree build or lint timed out" }
   const couldNotRun = (build as { error?: string | null }).error
   if (!build.ok && couldNotRun) return { state: "undetermined", reason: `test_error — the build could not run: ${couldNotRun}` }
   if (build.ok) return { state: "pass" }
   if (build.failureSignature.length === 0) return { state: "undetermined", reason: "test_error — the build did not run to a verdict" }
   const known = (await baseline()).failureSignature
+  if (opaqueSignature(build.failureSignature) || opaqueSignature(known)) return { state: "undetermined", reason: "test_error — the site checks did not print a comparable failure" }
   const fresh = build.failureSignature.filter((failure) => !known.includes(failure))
   if (fresh.length === 0) return { state: "pass", reason: "red before this run too; no new failures" }
   return { state: "problem", reason: `new build failures: ${fresh.slice(0, 3).join("; ")}` }

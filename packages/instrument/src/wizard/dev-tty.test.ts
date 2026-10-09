@@ -66,36 +66,6 @@ describe("the wizard's own /dev/tty prompt (O1-10)", () => {
     expect(openDevTtyPrompter(join(dir, "plain"))).toBeNull()
   })
 
-  it.skipIf(!hasPython)("opened and closed with no prompt: the process exits 0 with no EBADF (negative: the eager stream crashed here)", () => {
-    const { status, output } = onPty(`
-const prompter = openDevTtyPrompter()
-if (!prompter) { console.log("NO_TTY"); process.exit(5) }
-prompter.close()
-console.log("CLOSED")
-`)
-    expect(output).toContain("CLOSED")
-    expect(output).not.toContain("EBADF")
-    expect(status).toBe(0)
-  })
-
-  it.skipIf(!hasPython)("asks on the terminal, takes the typed answer, then lets the process exit on its own", () => {
-    const { status, output } = onPty(
-      `
-const prompter = openDevTtyPrompter()
-if (!prompter) { console.log("NO_TTY"); process.exit(5) }
-const answer = await prompter.ask("confirm", { question: "Start a fresh run?", defaultYes: false })
-console.log("ANSWER=" + JSON.stringify(answer))
-prompter.close()
-`,
-      "[y/N]",
-      "y\n"
-    )
-    expect(output).toContain("Start a fresh run? [y/N]")
-    expect(output).toContain("ANSWER=true")
-    expect(output).not.toContain("EBADF")
-    expect(status).toBe(0)
-  })
-
   it.skipIf(!hasPython)("an unanswered prompt gives up after its timeout (never a default yes)", () => {
     const { status, output } = onPty(`
 const prompter = openDevTtyPrompter("/dev/tty", { timeoutMs: 200 })

@@ -174,6 +174,17 @@ export interface ManualRequirement {
   reason: string
   /** The exact lines to add by hand. */
   snippet: string
+  /** The installer itself refused this source edit; it is never delegated to a worker. */
+  ownerBoundary?: { kind: "frozen_unit" | "policy_page" | "unproven_wiring"; file: string; line: number; unitHash?: string; lineOffset?: number; unitOrdinal?: number }
+}
+
+export interface ManagedCaptureRecord {
+  module: string
+  entrypoints: string[]
+  pixelFiles: string[]
+  mode: "required" | "not_required"
+  strategy: "first_import" | "before_interactive" | "blocking_script"
+  moduleHash: string
 }
 
 export interface ApplyResult {
@@ -234,6 +245,28 @@ export interface InfinitePublicArtifact {
    * hosts). Absent/false = the production default (bots are never counted). See the runtime.
    */
   allowAutomation?: boolean
+  /**
+   * `true` when the site already runs its own analytics or ad pixels: the tag starts when they start
+   * and stops when they stop, so the site's own banner governs it the same way. Absent = start on load.
+   */
+  followSitePixels?: boolean
+  /**
+   * Root-relative paths where the Infinite browser runtime should emit nothing. Only an explicit owner choice: the
+   * wizard never fills it from another tool's list (review P1-6: the PostHog sensitive-page list hid /checkout and
+   * /success from Infinite).
+   */
+  excludedPaths?: string[]
+  /**
+   * The site's own routes where it keeps its ad and analytics pixels off (a cart, a success page). Used only with
+   * `followSitePixels`: on these routes the absence of the site's pixels is not read as a refusal, and the tag carries
+   * the decision it saw earlier in the same tab session. See the runtime's follow-mode comment.
+   */
+  pixelFreePaths?: string[]
+  /**
+   * `true` when infinite-tag installed the Meta pixel (it sets `disablePushState`) on a single-page app whose own code
+   * sends no Meta PageView on a route change: the runtime's history hook sends one per route change (parity gap 8).
+   */
+  metaPageViews?: boolean
 }
 
 export interface InfiniteBrowserConfig {
@@ -242,7 +275,11 @@ export interface InfiniteBrowserConfig {
   productionHosts: string[]
   respectDnt: boolean
   consent:
-    | { mode: "not_required" }
+    | {
+        mode: "not_required"
+        /** The site's own pixel globals to follow (the tag itself names no provider). Absent = start on load. */
+        followSitePixels?: readonly string[]
+      }
     | { mode: "required"; storageKey: "infinite_analytics_consent" }
   /** Conversion destination for app_download_click detection. Absent = "/download". */
   downloadDestinationPath?: string
@@ -253,6 +290,12 @@ export interface InfiniteBrowserConfig {
    *  exclusion, for SYNTHETIC/TEST sandbox sources only. Every WebDriver event is stamped
    *  `automation: true`. The installer hard-refuses this on production hosts. Absent = off. */
   allowAutomation?: boolean
+  /** Root-relative paths where page views, clicks, submits and helper-recorded events emit nothing. */
+  excludedPaths?: string[]
+  /** Follow mode only: the site's own pixel-free routes (see `InfinitePublicArtifact.pixelFreePaths`). */
+  pixelFreePaths?: string[]
+  /** `true`: send `fbq('track', 'PageView')` on each client-side route change (managed pixel, see the artifact). */
+  metaPageViews?: boolean
 }
 
 /**
@@ -274,6 +317,8 @@ export interface InfiniteHandoffContext {
 
 export interface MetaPublicArtifact {
   pixelId: string
+  /** The wizard's answer also governs capture when no Infinite tag is installed. */
+  consentMode?: InfiniteConsentMode
   /**
    * ADOPTED pixel: emit only the managed `_fbc` landing capture (no pixel bootstrap) beside the pixel the
    * site already has. Set by an approved plan line (wf5-PORT-PLAN row 5); `pixelId` names the adopted
@@ -355,13 +400,18 @@ export interface WorkspaceInstallArtifacts {
   hostGuard?: { mode: "deny"; exempt: string[]; deny: string[] }
   /**
    * The managed conversion helpers (decisions 9 and 13, `src/conversions/`). Only an explicit
-   * `helpers: true` emits them. Absent = none (the plain installer's bytes are unchanged).
+   * `helpers: true` emits them. Absent = none (the plain installer's bytes are unchanged). `currency` is the site's
+   * own currency (ISO 4217, from its catalog or payment code): the default a product event carries to Meta and GA4
+   * when the caller passes none (review P2: Meta AddToCart/ViewContent never go with a value and no currency).
    */
-  conversions?: { helpers: boolean }
+  conversions?: { helpers: boolean; currency?: string }
 }
 
 export interface InstallManifest {
+  managedCapture?: ManagedCaptureRecord
   workspaceId: string
+  /** The wizard run that last wrote the managed-file content hashes. */
+  runId?: string
   appRoot: string
   framework: SupportedFramework
   providers: ProviderId[]

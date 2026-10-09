@@ -27,6 +27,9 @@
 // production host is ALWAYS exempt): a production host that is deny-shaped (e.g. a pre-launch
 // `acme.vercel.app`) and does not appear in the guard's literals.
 import { HOST_DENY_V1, normalizeHost } from "../wizard/contracts/host-deny.js"
+import { buildHostGuardExpression } from "../host-guard.js"
+import { escapeForTemplateLiteral } from "../text-escape.js"
+import { lexicalStates } from "../lexical-states.js"
 
 import { codeView, groupFindings, matchingBracket, sourceUnits, unitLine } from "./code-view.js"
 import { hostGuardMissingMessage, hostGuardPresentMessage, hostGuardSilencesProductionMessage } from "./copy.js"
@@ -45,7 +48,99 @@ export const GUARD_WINDOW_CHARS = 1_200
 const GUARD_CALL = /\b(?:__)?(?:infinite)?[hH]ost(?:Allowed|Guard)\s*\(/
 const HOST_READ = /\blocation\s*\.\s*host(?:name)?\b/
 /** infinite-tag's emitted guard expression (O5 `buildHostGuardExpression`): true when the bootstrap may start. */
-const EMITTED_GUARD = /\(function \(h\) \{ var n = [\s\S]*?return (?:true|false); \}\)\(/
+const EMITTED_GUARD_START = /\(function \(h(?:\s*:\s*string)?\) \{/
+
+/** Remove only the three annotation sites seen on the emitted expression; every other byte must match. */
+function withoutGuardTypeAnnotations(expression: string): string {
+  return expression
+    .replace(/^\(function \(h\s*:\s*string\) \{/, "(function (h) {")
+    .replace(/var n = \(function \(h\s*:\s*string\) \{/, "var n = (function (h) {")
+    .replace(/\}\)\(h\), i\s*:\s*number;/, "})(h), i;")
+}
+
+/** Both shipped emissions use the same approved host lists and guard body. */
+function matchesKnownEmission(expression: string, emitted: string, templateLiteral: boolean): boolean {
+  const variants = [emitted]
+  const browserlessAllowHost = '})(typeof location !== "undefined" ? location.hostname : null)'
+  if (emitted.endsWith(browserlessAllowHost)) {
+    variants.push(emitted.replace("if (h === null) return true; ", "").replace(browserlessAllowHost, '})(typeof location !== "undefined" ? location.hostname : "")'))
+  }
+  const safeHost = '})(typeof location !== "undefined" ? location.hostname : "")'
+  const emptyHostCheck = "})(h), i; if (!n) return false;"
+  const previous = variants.find(variant => variant.endsWith(safeHost))
+  if (previous && previous.includes(emptyHostCheck)) {
+    // Before the browserless guard, the emitter passed location.hostname directly and allowed an
+    // empty host. Keep precisely those historical bytes; no host lists or other logic may differ.
+    variants.push(previous.slice(0, -safeHost.length).replace(emptyHostCheck, "})(h), i;") + "})(location.hostname)")
+  }
+  return variants.some(variant => expression === (templateLiteral ? escapeForTemplateLiteral(variant) : variant))
+}
+
+function wholeParens(text: string): string {
+  let value = text.trim()
+  while (value.startsWith("(") && matchingBracket(value, 0) === value.length - 1) value = value.slice(1, -1).trim()
+  return value
+}
+
+/** A conjunction needs the guard to be true; an OR does not. Split only outside brackets and quotes. */
+function conjuncts(text: string): string[] | null {
+  const parts: string[] = []
+  let quote: string | null = null
+  let depth = 0
+  let start = 0
+  for (let index = 0; index < text.length; index += 1) {
+    const char = text[index]!
+    if (quote) {
+      if (char === "\\") index += 1
+      else if (char === quote) quote = null
+      continue
+    }
+    if (char === '"' || char === "'" || char === "`") { quote = char; continue }
+    if (char === "(" || char === "[" || char === "{") depth += 1
+    else if (char === ")" || char === "]" || char === "}") depth -= 1
+    else if (depth === 0 && text.slice(index, index + 2) === "||") return null
+    else if (depth === 0 && text.slice(index, index + 2) === "&&") {
+      parts.push(text.slice(start, index).trim())
+      start = index + 2
+      index += 1
+    }
+  }
+  parts.push(text.slice(start).trim())
+  return parts
+}
+
+/** Before the plan exists, accept only a structurally exact raw emission; it cannot prove host approval. */
+function matchesEmissionShape(expression: string, templateLiteral: boolean): boolean {
+  const marker = expression.includes("var x = ") ? "var x = " : "var a = "
+  const start = expression.indexOf(marker)
+  if (start < 0) return false
+  const open = start + marker.length
+  const close = matchingBracket(expression, open)
+  if (close < 0) return false
+  try {
+    const hosts = JSON.parse(expression.slice(open, close + 1)) as unknown
+    if (!Array.isArray(hosts) || !hosts.every((host) => typeof host === "string")) return false
+    const emitted = marker === "var x = "
+      ? buildHostGuardExpression({ mode: "deny", exempt: hosts, deny: [] })
+      : buildHostGuardExpression({ mode: "allow", hosts })
+    return matchesKnownEmission(expression, emitted, templateLiteral)
+  } catch {
+    return false
+  }
+}
+
+function isExactEmittedGuard(condition: string, expected: string | null, templateLiteral: boolean): boolean {
+  const parts = conjuncts(wholeParens(condition))
+  if (!parts) return false
+  return parts.some((part) => {
+    const expression = wholeParens(part)
+    if (!EMITTED_GUARD_START.test(expression)) return false
+    if (templateLiteral) return expected !== null ? matchesKnownEmission(expression, expected, true) : matchesEmissionShape(expression, true)
+    const normalised = withoutGuardTypeAnnotations(expression)
+    if (expected !== null) return matchesKnownEmission(normalised, expected, false)
+    return normalised === expression && matchesEmissionShape(expression, false)
+  })
+}
 const DENY_HOSTS = [...HOST_DENY_V1.deny.exact, ...HOST_DENY_V1.deny.suffix, ...HOST_DENY_V1.deny.suffix.map((suffix) => suffix.slice(1))]
 const escapeRegExp = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
 /** A WHOLE quoted deny-list host, or a regex literal naming one (`/\.vercel\.app$/`). */
@@ -63,17 +158,18 @@ export interface HostGuardRead {
   literalHosts: string[]
 }
 
-export function readAdoptedInitGuards(files: ReadonlyMap<string, string>): HostGuardRead[] {
+export function readAdoptedInitGuards(files: ReadonlyMap<string, string>, expectedEmittedGuard: string | null = null): HostGuardRead[] {
   const reads: HostGuardRead[] = []
   for (const unit of sourceUnits(files)) {
     if (unit.managed) continue
     const code = codeView(unit.file, unit.text)
+    const states = lexicalStates(unit.text)
     for (const { tool, pattern } of INITS) {
       for (const match of code.matchAll(pattern)) {
         const at = match.index ?? 0
         const windowStart = Math.max(0, at - GUARD_WINDOW_CHARS)
         const window = code.slice(windowStart, at)
-        const guarded = governingGuard(code, windowStart, at)
+        const guarded = governingGuard(code, windowStart, at, expectedEmittedGuard, states[at] === 2)
         const literalHosts = [...window.matchAll(/["']([a-z0-9-]+(?:\.[a-z0-9-]+)+\.?)["']/gi)].map((hit) => normalizeHost(hit[1] as string))
         reads.push({ tool, file: unit.file, line: unitLine(unit, at), guarded, literalHosts })
       }
@@ -83,18 +179,18 @@ export function readAdoptedInitGuards(files: ReadonlyMap<string, string>): HostG
 }
 
 /** Does any `if (<host test>)` in the window govern the init at `initAt` with the right polarity? */
-function governingGuard(code: string, windowStart: number, initAt: number): boolean {
+function governingGuard(code: string, windowStart: number, initAt: number, expectedEmittedGuard: string | null, templateLiteral: boolean): boolean {
   const window = code.slice(windowStart, initAt)
   const readsHost = HOST_READ.test(window)
   const candidates = new Set<number>()
-  for (const pattern of [GUARD_CALL, EMITTED_GUARD]) {
+  for (const pattern of [GUARD_CALL, EMITTED_GUARD_START]) {
     for (const match of window.matchAll(new RegExp(pattern.source, "g"))) candidates.add(windowStart + (match.index ?? 0))
   }
   if (readsHost) for (const match of window.matchAll(new RegExp(DENY_LITERAL.source, "g"))) candidates.add(windowStart + (match.index ?? 0))
   for (const offset of [...candidates].sort((a, b) => b - a)) {
     const condition = enclosingIfCondition(code, offset, initAt)
     if (!condition) continue
-    const allowWhenTrue = conditionPolarity(code.slice(condition.open + 1, condition.close))
+    const allowWhenTrue = conditionPolarity(code.slice(condition.open + 1, condition.close), expectedEmittedGuard, templateLiteral)
     if (allowWhenTrue === null) continue
     if (governs(code, condition.close, initAt, allowWhenTrue)) return true
   }
@@ -117,7 +213,7 @@ function enclosingIfCondition(code: string, offset: number, initAt: number): { o
  * Is the condition TRUE when the host is allowed (`true`), TRUE when it is denied (`false`), or
  * unreadable (`null`)? A leading `!` over the whole condition flips it.
  */
-function conditionPolarity(condition: string): boolean | null {
+function conditionPolarity(condition: string, expectedEmittedGuard: string | null, templateLiteral: boolean): boolean | null {
   let text = condition.trim()
   let negated = false
   while (text.startsWith("!") && !text.startsWith("!=")) {
@@ -128,7 +224,10 @@ function conditionPolarity(condition: string): boolean | null {
     text = rest.startsWith("(") ? rest.slice(1, -1).trim() : rest
   }
   let allowWhenTrue: boolean
-  if (EMITTED_GUARD.test(text) || GUARD_CALL.test(text)) {
+  if (EMITTED_GUARD_START.test(text)) {
+    if (!isExactEmittedGuard(text, expectedEmittedGuard, templateLiteral)) return null
+    allowWhenTrue = true
+  } else if (GUARD_CALL.test(text)) {
     // A predicate negated inside a longer expression (`!hostAllowed() || x`) cannot be read.
     if (/!\s*(?:\(|[\w$.]*[hH]ost(?:Allowed|Guard)\s*\()/.test(text)) return null
     allowWhenTrue = true
@@ -180,13 +279,16 @@ export interface HostGuardInput {
   strict?: boolean
   /** The exempt production hosts (site source ∪ hosting domains + aliases ∪ the observed host). */
   productionHosts?: readonly string[]
+  /** The approved O5 bytes; annotations are permitted only if removing them reproduces these bytes. */
+  expectedEmittedGuard?: string
 }
 
 export function checkHostGuard(input: HostGuardInput): SetupCheckResult {
   const findings: SetupFinding[] = []
   const toolOf = new Map<SetupFinding, string>()
   const production = (input.productionHosts ?? []).map(normalizeHost)
-  for (const read of readAdoptedInitGuards(input.files)) {
+  const expectedEmittedGuard = input.expectedEmittedGuard ?? (input.productionHosts?.length ? buildHostGuardExpression({ mode: "deny", exempt: [...input.productionHosts], deny: [] }) : null)
+  for (const read of readAdoptedInitGuards(input.files, expectedEmittedGuard)) {
     const base = { check: "host_guard" as const, file: read.file, line: read.line }
     if (!read.guarded) {
       findings.push({

@@ -1,3 +1,6 @@
+import { notDoneJobs, notDoneDescription } from "../jobs/settle-edits.js"
+import { createScanner } from "../review/scan.js"
+import { quoteDisplayNote } from "../review/display.js"
 // `ReportBuilder` (§3i, schema `infinite-tag.report.v2`): the before/after report the user ends with,
 // the same in the terminal, on the PR and in the Infinite app.
 //
@@ -12,6 +15,10 @@
 // 7. `in_pr` cells are keyed to `columns.in_pr.sha` and rebuilt on each new head.
 // A finish-line cell is computed ONLY from the inputs FINISH_LINE_SOURCES names for its column; a cell
 // whose inputs are absent is `not_measured` ("—") and leaves N, the determinable count.
+import type { OwnerBoundaryMeasurement } from "../jobs/owner-diff.js"
+import type { ChecklistItem } from "./contracts/jobs.js"
+import { consentActivationFromNotes, consentActivationNotes, consentHandoff, CONSENT_WAITING } from "../install/consent-handoff.js"
+import { OWNER_BOUNDARY, OWNER_CODE_REASON, OWNER_BOUNDARY_UNMEASURED, LEGACY_OWNER_BOUNDARY, hasRecordedPolicyEdits, withOwnerBoundary, ownerBoundaryNotes, isOwnerBoundaryStatement, hasLegacyOwnerHistory } from "../jobs/owner-boundary.js"
 import {
   CELL_STATES,
   FINISH_LINE_IDS,
@@ -42,7 +49,16 @@ import {
   type ReportV2
 } from "./contracts/report.js"
 import { FORBIDDEN_CHECKBOX } from "./contracts/git-host.js"
-import { computeVerdict, verdictErrors } from "./verdict.js"
+import { computeVerdict, UNCHECKED_WORDS, verdictErrors } from "./verdict.js"
+import { FINISH_LINE_WORDS, andWords, infiniteFindingLine, infiniteFindings, ownerReviewFindings, ownerReviewSuggestions, ownerStepsHeading, reviewAskLine, reviewAsksHeading } from "./pr-summary.js"
+import type { OwnerSetupSteps, VerdictOpenFinding } from "./contracts/report.js"
+
+/** A note naming one place the review agent asks the owner to look at (its own section on every surface). */
+export const REVIEW_ASK_NOTE = "The review agent asks you to look at "
+/** A note naming a review finding on Infinite's own files: for Infinite, never the owner's to-do list. */
+export const FOR_INFINITE_NOTE = "For Infinite: "
+/** How a note that points at the owner's setup steps begins (the steps themselves are rendered in full). */
+const OWNER_STEPS_NOTE = /^Before (?:purchases|your server conversions) reach Meta, do /
 import { shapeErrors } from "./contracts/shape.js"
 
 export const COLUMN_LABELS: Record<ReportColumnId, string> = {
@@ -69,8 +85,8 @@ export const REASON_TEXT: Record<Reason, string> = {
   read_failed: "Infinite could not read it this time",
   not_built: "this check is not available in this version",
   below_sample_floor: "below 50 page views: raw counts shown",
-  held_by_consent: "the tool waits for consent, so the test could not see it",
-  preview_protected: "the preview is password-protected, so the rehearsal could not load it",
+  held_by_consent: "your cookie banner keeps every tool off until a visitor accepts; real visitors who accept are measured from their own visits",
+  preview_protected: "previews need a login, so they were not tried",
   env_dependent: "the ID comes from a setting that previews do not have",
   pending_deploy: "waiting for the deploy",
   pending_open_infinite: "open Infinite (or re-run npx infinite-tag) to finish the live checks",
@@ -91,6 +107,18 @@ export class ReportRuleError extends Error {
     super(message)
     this.name = "ReportRuleError"
   }
+}
+
+// Existing cloud wire limits. Full owner snippets stay in the trusted local render context.
+const REPORT_NOTE_MAX_CHARS = 300
+const REPORT_NOTE_LIMIT = 20
+function boundedNotes(notes: readonly string[]): string[] {
+  const summaries = [...new Set(notes.map(note => note.replace(/\s+/g, " ").trim()).filter(Boolean).map(note => note.length > REPORT_NOTE_MAX_CHARS ? `${note.slice(0, REPORT_NOTE_MAX_CHARS - 1)}…` : note))]
+  if (summaries.length <= REPORT_NOTE_LIMIT) return summaries
+  const boundary = summaries.filter(isOwnerBoundaryStatement)
+  const other = summaries.filter(note => !isOwnerBoundaryStatement(note))
+  const kept = other.slice(0, REPORT_NOTE_LIMIT - boundary.length - 1)
+  return [...kept, `${other.length - kept.length} additional notes are omitted from this compact report; see the local checklist and review ledger.`, ...boundary]
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -289,7 +317,7 @@ function finishLineCell(
   // The worst reading decides; its input names the provenance.
   const decider = [...readings].sort((a, b) => STATE_SEVERITY[b.state] - STATE_SEVERITY[a.state] || b.at.localeCompare(a.at))[0]!
   let state: CellState = readings.every((fact) => fact.state === "info") ? "info" : decider.state
-  if (spec.fixedState === "info") state = "info"
+  if (spec.fixedState === "info" && !(decider.state === "problem" && decider.reason === "test_error")) state = "info"
   if (spec.fixedState === "pending" && state !== "pass" && state !== "problem") state = "pending"
   const source = FINISH_LINE_INPUT_PROVENANCE[decider.input]
   const reason = decider.reason ?? (state === "pending" ? spec.reason : undefined)
@@ -346,6 +374,7 @@ export function checksPassingCell(finishLine: Partial<Record<FinishLineId, Cell>
   let unknown = 0
   let pending = 0
   for (const id of FINISH_LINE_IDS) {
+    if (id === "consent_recorded" && !(finishLine[id]?.state === "problem" && finishLine[id]?.reason === "test_error")) continue // A failed wizard recording is its own problem, never a judgment on consent.
     const cell = finishLine[id]
     if (!cell) continue
     if (cell.state === "pass") pass += 1
@@ -359,7 +388,7 @@ export function checksPassingCell(finishLine: Partial<Record<FinishLineId, Cell>
   const determinable = pass + problems + unknown
   if (determinable === 0) return dashCell("wizard_check", at, runId, "not_exercised")
   const state: CellState = problems > 0 ? "problem" : unknown > 0 ? (pending === unknown ? "pending" : "undetermined") : "pass"
-  const total = FINISH_LINE_IDS.length
+  const total = FINISH_LINE_IDS.length - (finishLine.consent_recorded?.state === "problem" && finishLine.consent_recorded.reason === "test_error" ? 0 : 1)
   const notTestable = total - determinable
   const words = [`${pass} pass`, `${problems} problem${problems === 1 ? "" : "s"}`, ...(unknown > 0 ? [`${unknown} unknown`] : []), ...(notTestable > 0 ? [`${notTestable} not testable`] : [])]
   return assertCell("rows.checks_passing", {
@@ -443,6 +472,12 @@ function validateSnapshotCells(column: ReportColumnId, snapshot: ReportColumnSna
 }
 
 export function buildReport(input: BuildInput, now: () => Date = () => new Date()): ReportV2 {
+  input = { ...input, columns: Object.fromEntries(Object.entries(input.columns).map(([key, snapshot]) => {
+    if (!snapshot) return [key, snapshot]
+    const asInfo = (cell: Cell | undefined) => cell && (cell.state === "pass" || cell.state === "problem") && cell.reason !== "test_error" ? { ...cell, state: "info" as const } : cell
+    const finishLine = { ...snapshot.finishLine, consent_recorded: asInfo(snapshot.finishLine.consent_recorded) }
+    return [key, { ...snapshot, finishLine, cells: { ...snapshot.cells, consent_setting: asInfo(snapshot.cells.consent_setting), checks_passing: checksPassingCell(finishLine, input.runId, snapshot.meta.measuredAt ?? new Date(0).toISOString()) } }]
+  })) as BuildInput["columns"] }
   const { runId } = input
   const generatedAt = now().toISOString()
   const pending = input.provenLivePending
@@ -498,6 +533,42 @@ export function buildReport(input: BuildInput, now: () => Date = () => new Date(
     return { n: index + 1, id, cells }
   })
 
+  const leftGuards = (input.verdictFacts?.jobs ?? []).filter(job => job.jobId === "preview_guard" && job.state === "left_for_you" && (job.ownerBoundary?.kind === "frozen_unit" || job.ownerBoundary?.kind === "restored_unit"))
+  // A short cell: the action ("add the preview guard to GA4's start-up at …") is said once, in the "For you" list.
+  const ownerPreviewNote = leftGuards.length ? `for you: the preview guard for ${andWords([...new Set(leftGuards.map(job => ({ ga4: "GA4", meta: "Meta pixel", posthog: "PostHog" }[job.id.split(":")[1]!] ?? job.title)))])}` : null
+  if (ownerPreviewNote) {
+    // This is a wizard source-location fact, not a deployed browser measurement. The wire's proven
+    // column accepts only desktop evidence, so retain it and show the owner annotation alongside it.
+    const current = finishLine.find(line => line.id === "previews_silent")!.cells.in_pr
+    if (current.state !== "problem") {
+      const cell: Cell = { value: "not_done", display: ownerPreviewNote, state: "info", provenance: { source: "wizard_check", at: generatedAt, runId } }
+      finishLine.find(line => line.id === "previews_silent")!.cells.in_pr = cell
+      rows.find(row => row.id === "preview_share")!.cells.in_pr = cell
+      rows.find(row => row.id === "checks_passing")!.cells.in_pr = checksPassingCell(Object.fromEntries(finishLine.map(line => [line.id, line.cells.in_pr])), runId, generatedAt)
+    }
+  }
+  // The review's open findings in plain words: the ones on the owner's code ask the owner to look; the ones on
+  // Infinite's own files go to Infinite and never onto the owner's list.
+  const findings = input.verdictFacts?.openFindings ?? []
+  const reviewAsks = ownerReviewFindings(findings).map(finding => `${REVIEW_ASK_NOTE}${reviewAskLine(finding)}`)
+  const forInfinite = infiniteFindings(findings).map(finding => `${FOR_INFINITE_NOTE}${infiniteFindingLine(finding)}`)
+  const steps = input.verdictFacts?.ownerSteps
+  const stepsNote = steps && steps.steps.length > 0 ? [`${ownerStepsHeading(steps.purchase)}: the ${steps.steps.length} steps in ${steps.file}.`] : []
+  const activationNotes = consentActivationNotes(input.verdictFacts?.consentActivation)
+  if (activationNotes.length) {
+    // The wire has aggregate check rows, not dedicated Infinite/capture activation ids. Do not
+    // leave an aggregate pass asserting activation while the required banner signal is untested.
+    for (const column of ["in_pr", "proven_live"] as const) {
+      for (const id of ["each_tool_once", "proof_from_real_visit"] as const) {
+        const line = finishLine.find(entry => entry.id === id)!
+        const cell = line.cells[column]
+        if (cell.state === "pass") line.cells[column] = { ...cell, state: "info", display: activationNotes.join("; ") }
+      }
+      const live = rows.find(row => row.id === "live_test_per_tool")!
+      if (live.cells[column].state === "pass") live.cells[column] = { ...live.cells[column], state: "info", display: activationNotes.join("; ") }
+      rows.find(row => row.id === "checks_passing")!.cells[column] = checksPassingCell(Object.fromEntries(finishLine.map(line => [line.id, line.cells[column]])), runId, generatedAt)
+    }
+  }
   const report: ReportV2 = {
     schema: REPORT_SCHEMA,
     runId,
@@ -508,7 +579,22 @@ export function buildReport(input: BuildInput, now: () => Date = () => new Date(
     rows,
     day7: input.day7 ?? { measuredAt: null, window: null, cell: null },
     finishLine,
-    notes: [...input.notes],
+    notes: [...new Set([
+      ...notDoneJobs(input.verdictFacts?.jobs ?? []).map(item => `Not done, left for you: ${notDoneDescription(item)}`),
+      ...reviewAsks,
+      ...stepsNote,
+      ...activationNotes,
+      ...(activationNotes.length ? ["Your banner connection is unverified in this run. Required-mode offline and browser checks supply a test grant; passing those checks does not confirm your banner signal."] : []),
+      ...(input.verdictFacts?.consentActivation?.mode === "not_required" && (input.verdictFacts.consentActivation.infinite || input.verdictFacts.consentActivation.capture) ? ["Infinite's tag starts when your site's own analytics start and stops when they stop, so your cookie banner governs it the same way. On a site with no analytics of its own it starts on page load."] : []),
+      ...(input.verdictFacts?.tagNotInstalled ? ["Infinite’s tag is NOT installed by this run. Add the owner wiring before testing it live."] : []),
+      ...input.notes.filter(note => !isOwnerBoundaryStatement(note)),
+      ...(input.verdictFacts?.ownerPolicyFindings ?? []),
+      // Why the "For you" changes are the owner's: said once, above them, never on every line.
+      ...((input.verdictFacts?.jobs ?? []).some(job => job.state === "left_for_you" && job.ownerBoundary?.kind === "frozen_unit") ? [OWNER_CODE_REASON] : []),
+      ...(input.verdictFacts?.jobs ?? []).filter(job => job.state === "left_for_you" && job.ownerBoundary).map(job => job.note ?? (job.ownerBoundary?.kind === "restored_unit" ? "Put back: an edit reached code that handles consent." : `For you: make this change in ${job.ownerBoundary?.file ?? job.allow.files[0] ?? "the noted file"}.`)),
+      ...(input.verdictFacts?.priorPolicyEdits || hasRecordedPolicyEdits(input.verdictFacts?.jobs ?? []) || hasLegacyOwnerHistory(input.notes) ? [LEGACY_OWNER_BOUNDARY] : []),
+      ...forInfinite
+    ])],
     verdict: null
   }
   // §3x.6 THE verdict, from the finished columns and the run's facts (one predicate; every surface renders it).
@@ -520,9 +606,21 @@ export function buildReport(input: BuildInput, now: () => Date = () => new Date(
       jobs: input.verdictFacts.jobs,
       openFindings: input.verdictFacts.openFindings,
       tools: input.verdictFacts.tools,
-      installedUnknown: input.verdictFacts.installedUnknown
+      installedUnknown: input.verdictFacts.installedUnknown,
+      does: input.verdictFacts.does ?? null
     })
   }
+  if (input.verdictFacts?.tagNotInstalled && report.verdict) {
+    report.verdict.state = "not_checked_live"
+    report.verdict.headline = "Infinite’s tag is NOT installed by this run. Add the owner wiring before testing it live."
+  }
+  if (activationNotes.length && report.verdict?.state === "properly") {
+    report.verdict.state = "unconfirmed"
+    report.verdict.headline = `${input.site.productionHost ?? input.site.repoLabel}: ${activationNotes.join("; ")}`
+  }
+  const boundaryNotes = ownerBoundaryNotes(input.notes.filter(isOwnerBoundaryStatement).join("\n\n"), hasLegacyOwnerHistory(report.notes), input.verdictFacts?.ownerBoundary)
+  report.notes = [...report.notes.filter(note => !isOwnerBoundaryStatement(note)), ...boundaryNotes]
+  report.notes = boundedNotes(report.notes)
   assertReport(report, input.runStartedAt ?? null)
   return report
 }
@@ -530,6 +628,7 @@ export function buildReport(input: BuildInput, now: () => Date = () => new Date(
 /** Every rule the whole report must satisfy; throws the first set of problems found. */
 export function assertReport(report: ReportV2, runStartedAt: string | null = null): void {
   const problems = shapeErrors(report, REPORT_V2_SHAPE)
+  if (!Array.isArray(report.notes) || report.notes.length > REPORT_NOTE_LIMIT || report.notes.some(note => typeof note !== "string" || note.length === 0 || note.length > REPORT_NOTE_MAX_CHARS)) problems.push("notes must contain at most 20 nonempty summaries of at most 300 characters")
   if (report.schema !== REPORT_SCHEMA) problems.push(`schema is ${JSON.stringify(report.schema)}`)
   if (report.rows.map((row) => row.id).join() !== REPORT_ROWS.map((row) => row.id).join()) problems.push("rows are not the §3i.4 rows in order")
   if (report.finishLine.map((line) => line.id).join() !== FINISH_LINE_IDS.join()) problems.push("finishLine is not the 14 ids in order")
@@ -560,11 +659,10 @@ export function assertReport(report: ReportV2, runStartedAt: string | null = nul
 // ---------------------------------------------------------------------------------------------
 
 /**
- * One footnote per reason. A reason on a "—" or a pending cell is footnoted under "— / pending:"; a reason on
- * a value the table DOES show (raw counts below the sample floor) is footnoted on its own, so a footnote never
- * says a shown value was not measured.
+ * Why some cells show "—" or wait: one plain line per reason (never a loose "— / pending:" footnote). A reason on a
+ * value the table DOES show (raw counts below the sample floor) is said on its own, so it never reads as unmeasured.
  */
-function footnotes(report: ReportV2): string[] {
+function footnotes(report: ReportV2): { dash: string[]; shown: string[] } {
   const missing = new Set<Reason>()
   const shown = new Set<Reason>()
   const visit = (cell: Cell) => {
@@ -573,25 +671,86 @@ function footnotes(report: ReportV2): string[] {
     else if (cell.reason === "below_sample_floor") shown.add(cell.reason)
   }
   for (const row of report.rows) for (const column of REPORT_COLUMN_IDS) visit(row.cells[column])
-  return [
-    ...REASONS.filter((reason) => missing.has(reason)).map((reason) => `${NULL_DISPLAY} / pending: ${REASON_TEXT[reason]}`),
-    ...REASONS.filter((reason) => shown.has(reason)).map((reason) => sentence(REASON_TEXT[reason]))
-  ]
+  for (const line of report.finishLine) for (const column of REPORT_COLUMN_IDS) visit(line.cells[column])
+  return {
+    dash: REASONS.filter((reason) => missing.has(reason)).map((reason) => REASON_TEXT[reason]),
+    shown: REASONS.filter((reason) => shown.has(reason)).map((reason) => sentence(REASON_TEXT[reason]))
+  }
+}
+
+/** "Why some cells show —: the tool is not connected in Infinite; measured again 7 days after the deploy." */
+function dashLine(report: ReportV2): string | null {
+  const { dash } = footnotes(report)
+  return dash.length > 0 ? `Why some cells show ${NULL_DISPLAY}: ${dash.join("; ")}.` : null
 }
 
 function sentence(text: string): string {
   return `${text.charAt(0).toUpperCase()}${text.slice(1)}`
 }
 
-/** The report's own notes, then the footnotes, each said once (a note may already say a footnote's words). */
-function notesAndFootnotes(report: ReportV2): string[] {
-  return [...new Set([...report.notes, ...footnotes(report)])]
+/** A "For you: …" line as an item of the "For you" list (the heading already says whose it is). */
+function forYouText(note: string): string {
+  return sentence(note.replace(/^For you:\s*/, ""))
+}
+
+/** The notes that have their own section (never repeated among the plain notes). */
+function sectionNote(note: string): boolean {
+  return note.startsWith(REVIEW_ASK_NOTE) || note.startsWith(FOR_INFINITE_NOTE) || OWNER_STEPS_NOTE.test(note) || note.startsWith("For you:") || OMITTED_NOTES.test(note) ||
+    note.startsWith("Not done, left for you:") || note === OWNER_CODE_REASON || note.startsWith("Put back:")
+}
+
+/** The places the review agent asks the owner to look at, in plain words. */
+function reviewAsks(report: ReportV2): string[] {
+  return report.notes.filter((note) => note.startsWith(REVIEW_ASK_NOTE)).map((note) => note.slice(REVIEW_ASK_NOTE.length))
+}
+
+/** The cloud payload's own bookkeeping line when it had more notes than it carries (never shown to the owner). */
+const OMITTED_NOTES = /^\d+ additional notes are omitted from this compact report/
+
+/** The heading of the folded suggestions. */
+function suggestionsHeading(count: number): string {
+  return `The review agent also has ${count === 1 ? "one smaller suggestion" : `${count} smaller suggestions`}`
+}
+
+/** The review findings on Infinite's own files (for Infinite: they never hold the owner's pull request). */
+function infiniteNotes(report: ReportV2): string[] {
+  return report.notes.filter((note) => note.startsWith(FOR_INFINITE_NOTE)).map((note) => note.slice(FOR_INFINITE_NOTE.length))
+}
+
+/** The line under the "For Infinite" heading: what happens to those findings. */
+export const FOR_INFINITE_INTRO = "The review agent also commented on Infinite's own files in this pull request. Infinite fixes those in its own code; they are not yours to change and they do not hold this pull request."
+
+/**
+ * The "For you" list, each action ONCE: an approved job the wizard could not finish, then the changes in the owner's
+ * code (with the exact change folded under it where the wizard has one), then any other owner action.
+ */
+interface ForYouItem { text: string; snippet?: { code: string; language: string; summary: string } }
+function forYouItems(report: ReportV2, ownerJobs: readonly ChecklistItem[]): ForYouItem[] {
+  const notDone = ownerJobs.length > 0 ? notDoneJobs(ownerJobs).map(notDoneDescription) : report.notes.filter(note => note.startsWith("Not done, left for you:")).map(note => note.slice("Not done, left for you: ".length))
+  const instructions = ownerInstructions(ownerJobs)
+  const withSnippet = new Set(instructions.map(instruction => boundedNotes([instruction.note])[0]!))
+  const items: ForYouItem[] = [
+    ...notDone.map(text => ({ text: `Not done yet: ${text}` })),
+    ...instructions.map(instruction => ({ text: forYouText(instruction.note), snippet: { code: instruction.snippet, language: instruction.snippet.startsWith("--- a/") ? "diff" : "js", summary: instruction.placement } })),
+    ...report.notes.filter(note => (note.startsWith("For you:") || note.startsWith("Put back:")) && !withSnippet.has(note)).map(note => ({ text: forYouText(note) }))
+  ]
+  const seen = new Set<string>()
+  return items.filter(item => !seen.has(item.text) && !!seen.add(item.text))
+}
+
+/** The report's other notes, each said once (the sections above already carry theirs). */
+function otherNotes(report: ReportV2): string[] {
+  const shown = new Set(consentActivationNotes(consentActivationFromNotes(report.notes)))
+  return [...new Set([...report.notes.filter(note => !isOwnerBoundaryStatement(note) && !shown.has(note) && !sectionNote(note)), ...footnotes(report).shown])]
 }
 
 function cellText(cell: Cell): string {
-  if (cell.value === null) return NULL_DISPLAY
-  if (cell.state === "pass" || cell.state === "info" || cell.display === STATE_WORDS[cell.state]) return cell.display
-  return `${cell.display} (${STATE_WORDS[cell.state]})`
+  return cell.value === null ? NULL_DISPLAY : cell.state === "pass" || cell.state === "info" || cell.display === STATE_WORDS[cell.state] ? cell.display : `${cell.display} (${STATE_WORDS[cell.state]})`
+}
+
+/** A finish-line check's name, in plain words. */
+function checkName(id: FinishLineId): string {
+  return sentence(FINISH_LINE_WORDS[id])
 }
 
 function day7Text(report: ReportV2): string {
@@ -633,10 +792,14 @@ function hanging(first: string, text: string, width: number): string[] {
 }
 
 export interface TerminalReportOptions {
+  ownerBoundary?: OwnerBoundaryMeasurement
+  ownerJobs?: readonly ChecklistItem[]
   /** The run's display id ("r-7f3c"): the ONE id the terminal shows (header bar, this title, the exit line). */
   displayId?: string | null
   /** From the run's start to now; shown as "9 min". Absent = not shown. */
   durationMs?: number | null
+  /** The owner's setup steps for server conversions (shown in full); absent = the report's note points at them. */
+  ownerSteps?: OwnerSetupSteps | null
 }
 
 /** "under a minute", "9 min", "3 h", "2 days": how long the run took, in the largest honest unit. */
@@ -654,6 +817,8 @@ export function durationWords(ms: number): string {
  * was not graded by the tag (the desktop's partial report): it says so, and never guesses one.
  */
 export function verdictLine(report: ReportV2): string {
+  const unwired = report.notes.find(note => note.startsWith("Infinite’s tag is NOT installed"))
+  if (unwired) return unwired
   if (report.verdict) return report.verdict.headline
   const site = report.site.productionHost ?? report.site.repoLabel
   return `${site}: not graded yet · run npx infinite-tag to finish the live checks`
@@ -661,12 +826,13 @@ export function verdictLine(report: ReportV2): string {
 
 /**
  * Review P1-3: the words a reason opens with on report.md and the PR comment, one line per reason with its names.
- * `not_live` has none: the headline already says it ("not checked live yet").
+ * `not_live` has none: the headline already says it ("not checked live yet"). `review_blocker_open` has none: the
+ * review agent's asks have their own list, each with its place and its words.
  */
 export const VERDICT_REASON_WORDS: Record<VerdictReasonKind, string | null> = {
   live_problem: "Problems on the live site",
   approved_fix_missing: "Approved fixes the wizard has not confirmed in the code",
-  review_blocker_open: "Review blockers still open",
+  review_blocker_open: null,
   tool_silent: "Sent nothing on the real visit",
   tool_without_receipt: "No receipt from the real visit",
   tool_not_connected: "Sending, but its ID is not checked (not connected in Infinite)",
@@ -683,7 +849,9 @@ export function verdictReasonLines(report: ReportV2): string[] {
   return verdict.reasons.flatMap((entry) => {
     const words = VERDICT_REASON_WORDS[entry.kind]
     if (words === null || entry.names.length === 0) return []
-    const more = entry.count > entry.names.length ? ` +${entry.count - entry.names.length} more` : ""
+    // Live run 4: the headline already names the problems not re-checked after the deploy; said once.
+    if (entry.kind === "earlier_problem_unchecked" && verdict.headline.includes(UNCHECKED_WORDS)) return []
+    const more = entry.count > entry.names.length ? ` and ${entry.count - entry.names.length} more` : ""
     return [`${words}: ${entry.names.join(", ")}${more}`]
   })
 }
@@ -694,21 +862,46 @@ export function verdictReasonLines(report: ReportV2): string[] {
  */
 export const TERMINAL_TABLE_MIN_COLUMNS = 140
 
+/** The before/after rows a reader sees: every row but the computed tally and the day-7 cell (its own line). */
+function shownRows(report: ReportV2): ReportV2["rows"] {
+  return report.rows.filter((row) => row.id !== "day7_checkin" && row.id !== "checks_passing")
+}
+
 /**
- * The terminal's closing text: the verdict line, then the before/after table. NOTHING is cut at any width (final
- * verify F2: cells used to end in "…" at about 30 characters, which hid "of 14"): from 140 columns it is a
- * 3-column table whose cells wrap inside their column; below that each row is stacked (the label, then one
- * wrapped line per column). Notes and footnotes wrap too.
+ * The terminal's closing text, in the report's order: what the pull request does (the verdict line), the review
+ * agent's asks, the "For you" list, the owner's setup steps, the files changed, then the before/after table. NOTHING
+ * is cut at any width (final verify F2): from 140 columns the table is 3 columns whose cells wrap inside their column;
+ * below that each row is stacked (the label, then one wrapped line per column). Notes wrap too.
  */
 export function renderTerminal(report: ReportV2, width: number, options: TerminalReportOptions = {}): string {
   const lines: string[] = []
   const total = Math.max(20, Math.floor(width))
-  const tableRows = report.rows.filter((row) => row.id !== "day7_checkin")
+  const tableRows = shownRows(report)
   const site = report.site.productionHost ?? report.site.repoLabel
   // One id everywhere the user looks: the display id when the caller has it, else the run id's first 8.
   const run = options.displayId ?? report.runId.slice(0, 8)
   const took = options.durationMs === undefined || options.durationMs === null ? null : durationWords(options.durationMs)
   lines.push(...hanging("◆ ", [verdictLine(report), `run ${run}`, ...(took ? [took] : [])].join(" · "), total))
+  for (const line of verdictReasonLines(report)) lines.push(...hanging("  ", line, total))
+  const asks = reviewAsks(report)
+  if (asks.length > 0) lines.push("", sentence(reviewAsksHeading(asks.length)), ...asks.flatMap(text => hanging("- ", text, total)))
+  const forYou = forYouItems(report, options.ownerJobs ?? [])
+  if (forYou.length > 0) {
+    lines.push("", "For you", ...(report.notes.includes(OWNER_CODE_REASON) ? wrapPlain(OWNER_CODE_REASON, total) : []), ...forYou.flatMap(item => hanging("- ", item.text, total)))
+    if (forYou.some(item => item.snippet)) lines.push(...wrapPlain("The exact changes are in .infinite/wizard/report.md and the pull request.", total))
+  }
+  const steps = options.ownerSteps
+  if (steps && steps.steps.length > 0) {
+    lines.push("", ownerStepsHeading(steps.purchase), ...steps.steps.flatMap((step, index) => hanging(`${index + 1}. `, step.replace(/\*\*/g, ""), total)))
+  } else {
+    const pointer = report.notes.find(note => OWNER_STEPS_NOTE.test(note))
+    if (pointer) lines.push("", ...wrapPlain(pointer, total))
+  }
+  lines.push("")
+  // One line per file (a wrapped paragraph would run the list together).
+  for (const line of withOwnerBoundary(report.notes.filter(isOwnerBoundaryStatement).join("\n\n"), hasLegacyOwnerHistory(report.notes), options.ownerBoundary).split("\n")) {
+    lines.push(...(line.startsWith("- ") ? hanging("- ", line.slice(2), total) : wrapPlain(line, total)))
+  }
   lines.push("")
   lines.push(...wrapPlain(`Before and after · ${site}`, total))
   if (total >= TERMINAL_TABLE_MIN_COLUMNS) {
@@ -736,7 +929,19 @@ export function renderTerminal(report: ReportV2, width: number, options: Termina
     }
   }
   lines.push(...hanging("7 days later: ", day7Text(report), total))
-  for (const note of notesAndFootnotes(report)) lines.push(...hanging("", note, total))
+  const dashes = dashLine(report)
+  if (dashes) lines.push(...wrapPlain(dashes, total))
+  const activation = consentActivationFromNotes(report.notes)
+  const handoff = activation && consentHandoff(activation)
+  if (handoff) {
+    lines.push("", "Owner action: banner signal", "", ...handoff.split("\n"))
+    lines.push("", CONSENT_WAITING)
+  }
+  const notes = otherNotes(report)
+  if (notes.length > 0) lines.push("")
+  for (const note of notes) lines.push(...hanging("", note, total))
+  const infinite = infiniteNotes(report)
+  if (infinite.length > 0) lines.push("", "For Infinite", ...wrapPlain(FOR_INFINITE_INTRO, total), ...infinite.flatMap(text => hanging("- ", text, total)))
   return lines.join("\n")
 }
 
@@ -744,47 +949,121 @@ function md(text: string): string {
   return text.replace(/\\/g, "\\\\").replace(/\|/g, "\\|").replace(/\r?\n/g, " ")
 }
 
-/** The PR / app markdown: plain-text statuses, never a `- [ ]`. */
-export function renderMarkdown(report: ReportV2): string {
+/** Extra facts a markdown report renders in full (the cloud payload keeps only a pointer to them). */
+export interface MarkdownReportExtras {
+  /** The owner's setup steps for server conversions, word for word from the hand-off file. */
+  ownerSteps?: OwnerSetupSteps | null
+  /** The review's open findings (the verdict facts'): the owner's smaller suggestions are listed from them. */
+  findings?: readonly VerdictOpenFinding[]
+}
+
+/** `text` indented under a list item (each line), so a folded block stays inside its item. */
+function indented(text: string): string {
+  return text.split("\n").map((line) => (line ? `  ${line}` : line)).join("\n")
+}
+
+/**
+ * The PR / app markdown: plain-text statuses, never a `- [ ]`. It reads top-down as what the owner needs: what the
+ * pull request does (the headline), what the review agent asks them to look at, what is left for them (each action
+ * once, its exact change folded under it), the steps before purchases reach Meta, the files changed, the before/after
+ * table, and last, findings that are Infinite's to fix.
+ */
+export function renderMarkdown(report: ReportV2, ownerBoundary?: OwnerBoundaryMeasurement, ownerJobs: readonly ChecklistItem[] = [], excludedLines: readonly string[] = [], extras: MarkdownReportExtras = {}): string {
   const out: string[] = []
   const site = report.site.productionHost ?? report.site.repoLabel
-  // Review P1-3: report.md and the PR comment open with THE verdict's headline (the terminal's own line) and its
-  // reasons; a table of finish-line cells is never the only summary ("7 pass · 0 problems" hid run 3's problems).
+  // Review P1-3: report.md and the PR comment open with THE verdict's headline (the terminal's own line): what the pull
+  // request does, then where the run stands.
   out.push(`**${md(verdictLine(report))}**`)
   const reasons = verdictReasonLines(report)
   if (reasons.length > 0) {
     out.push("")
     for (const line of reasons) out.push(`- ${md(line)}`)
   }
+  const asks = reviewAsks(report)
+  if (asks.length > 0) out.push("", `**${reviewAsksHeading(asks.length)}**`, "", ...asks.map(text => `- ${md(text)}`))
+  // The review agent's smaller suggestions on the owner's code, folded (from the run's findings: the cloud's notes
+  // carry only the asks and Infinite's findings).
+  const suggested = ownerReviewSuggestions(extras.findings ?? []).map(reviewAskLine)
+  if (suggested.length > 0) out.push("", `<details><summary>${suggestionsHeading(suggested.length)}</summary>`, "", ...suggested.map(text => `- ${md(text)}`), "", "</details>")
+  const forYou = forYouItems(report, ownerJobs)
+  if (forYou.length > 0) {
+    out.push("", "### For you", "")
+    if (report.notes.includes(OWNER_CODE_REASON)) out.push(OWNER_CODE_REASON, "")
+    const ownerNoteScanner = createScanner({ literals: [], allowedIds: [] })
+    for (const item of forYou) {
+      out.push(`- ${md(item.text)}`)
+      if (!item.snippet) continue
+      const code = item.snippet.code
+      const fence = "`".repeat(Math.max(3, ...[...code.matchAll(/`+/g)].map(match => match[0].length + 1)))
+      out.push("", indented(`<details><summary>${md(quoteDisplayNote(ownerNoteScanner, item.snippet.summary).replace(/^>\s*/, ""))}</summary>\n\n${fence}${item.snippet.language}\n${code}\n${fence}\n\n</details>`), "")
+    }
+  }
+  const steps = extras.ownerSteps
+  if (steps && steps.steps.length > 0) {
+    out.push("", `### ${ownerStepsHeading(steps.purchase)}`, "", `Until they are done, the server code in this pull request sends nothing. They are also in \`${steps.file.replace(/`/g, "'")}\`.`, "", ...steps.steps.map((step, index) => `${index + 1}. ${step}`))
+  } else {
+    const pointer = report.notes.find(note => OWNER_STEPS_NOTE.test(note))
+    if (pointer) out.push("", md(pointer))
+  }
+  out.push("")
+  out.push(withOwnerBoundary(report.notes.filter(isOwnerBoundaryStatement).join("\n\n"), hasLegacyOwnerHistory(report.notes), ownerBoundary))
   out.push("")
   out.push(`### Before and after · ${md(site)}`)
   out.push("")
   out.push(`| | ${REPORT_COLUMN_IDS.map((column) => COLUMN_LABELS[column]).join(" | ")} |`)
   out.push(`|---|${REPORT_COLUMN_IDS.map(() => "---").join("|")}|`)
-  for (const row of report.rows) {
-    if (row.id === "day7_checkin") continue
+  for (const row of shownRows(report)) {
     out.push(`| ${md(row.label)} | ${REPORT_COLUMN_IDS.map((column) => md(cellText(row.cells[column]))).join(" | ")} |`)
   }
   out.push("")
   out.push(`**7 days later:** ${md(day7Text(report))}`)
   out.push("")
-  out.push("<details><summary>The 14 checks</summary>")
+  out.push("<details><summary>Every check</summary>")
   out.push("")
-  out.push(`| # | Check | ${REPORT_COLUMN_IDS.map((column) => COLUMN_LABELS[column]).join(" | ")} |`)
-  out.push(`|---|---|${REPORT_COLUMN_IDS.map(() => "---").join("|")}|`)
+  out.push(`| Check | ${REPORT_COLUMN_IDS.map((column) => COLUMN_LABELS[column]).join(" | ")} |`)
+  out.push(`|---|${REPORT_COLUMN_IDS.map(() => "---").join("|")}|`)
   for (const line of report.finishLine) {
-    out.push(`| ${line.n} | ${line.id.replace(/_/g, " ")} | ${REPORT_COLUMN_IDS.map((column) => md(cellText(line.cells[column]))).join(" | ")} |`)
+    out.push(`| ${md(checkName(line.id))} | ${REPORT_COLUMN_IDS.map((column) => md(cellText(line.cells[column]))).join(" | ")} |`)
   }
+  const activation = consentActivationFromNotes(report.notes)
+  for (const note of consentActivationNotes(activation)) {
+    const label = note.slice(0, note.indexOf(":"))
+    out.push(`| ${label} | — | ${CONSENT_WAITING} | ${CONSENT_WAITING} |`)
+  }
+  const dashes = dashLine(report)
+  if (dashes) out.push("", md(dashes))
   out.push("")
   out.push("</details>")
-  const notes = notesAndFootnotes(report)
+  const handoff = activation && consentHandoff(activation)
+  if (handoff) {
+    out.push("", "**Owner action: banner signal**", "")
+    for (const section of handoff.split("\n\n")) out.push(section.includes("\nwindow.dispatchEvent(") ? `${section.slice(0, section.indexOf("\n"))}\n\n\`\`\`js\n${section.slice(section.indexOf("\n") + 1)}\n\`\`\`` : section, "")
+  }
+  const notes = otherNotes(report)
   if (notes.length > 0) {
     out.push("")
     for (const note of notes) out.push(`${md(note)}  `)
   }
+  if (excludedLines.length > 0) out.push("", "### You said no to", "", ...[...new Set(excludedLines)].map(line => `- ${md(line)}`))
+  const infinite = infiniteNotes(report)
+  if (infinite.length > 0) out.push("", "### For Infinite", "", FOR_INFINITE_INTRO, "", ...infinite.map(text => `- ${md(text)}`))
   const text = out.join("\n")
   if (text.includes(FORBIDDEN_CHECKBOX)) throw new ReportRuleError("the markdown would contain a checkbox")
   return text
+}
+
+/** Copyable bytes are local wizard facts, never encoded as cloud notes or taken from agent prose. */
+function ownerInstructions(jobs: readonly ChecklistItem[]): Array<{ note: string; placement: string; snippet: string }> {
+  return jobs.flatMap(job => {
+    const proof = job.ownerBoundary
+    if (job.state !== "left_for_you" || !proof || (proof.kind !== "frozen_unit" && proof.kind !== "policy_page" && proof.kind !== "unproven_wiring")) return []
+    const snippet = proof.guard ?? proof.wiring
+    if (!snippet) return []
+    const where = `${proof.file ?? job.allow.files[0] ?? "the noted file"}:${proof.line ?? 1}`
+    return [{ note: job.note ?? `For you: add this at ${where}.`, snippet,
+      placement: proof.guard ? `The change at ${where} (keep your consent checks, grants and revocations outside it)`
+        : `What to add at ${where}` }]
+  })
 }
 
 /** The JSON the cloud stores: re-validated and copied. */

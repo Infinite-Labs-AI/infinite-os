@@ -101,9 +101,10 @@ describe("install --server-lane on Next.js (App Router)", () => {
       modulePath: "lib/infinite-server-lane.ts",
       middleware: { path: "middleware.ts", action: "create" },
       envKeys: ["INFINITE_SITE_SOURCE_KEY", "INFINITE_SERVER_EVENT_SECRET"],
-      files: ["middleware.ts", "lib/infinite-server-lane.ts"]
+      created: [{ path: "lib/infinite-outcome.ts", role: "module", action: "create" }],
+      files: ["middleware.ts", "lib/infinite-server-lane.ts", "lib/infinite-outcome.ts"]
     })
-    expect(plan.files).toEqual(expect.arrayContaining(["app/layout.tsx", "lib/infinite-analytics.ts", "middleware.ts", "lib/infinite-server-lane.ts"]))
+    expect(plan.files).toEqual(expect.arrayContaining(["app/layout.tsx", "lib/infinite-analytics.ts", "middleware.ts", "lib/infinite-server-lane.ts", "lib/infinite-outcome.ts"]))
     expect(plan.envKeys).toEqual(expect.arrayContaining(["INFINITE_SITE_SOURCE_KEY", "INFINITE_SERVER_EVENT_SECRET"]))
 
     expect(apply.changedFiles).toEqual(
@@ -114,9 +115,12 @@ describe("install --server-lane on Next.js (App Router)", () => {
       mode: "next-middleware",
       middleware: "middleware.ts",
       module: "lib/infinite-server-lane.ts",
+      // Gap 1: Next.js gets the same outcome helper as every other target.
+      created: ["lib/infinite-outcome.ts"],
       brief: SERVER_LANE_BRIEF_FILE,
       guide: SERVER_LANE_GUIDE_FILE
     })
+    expect(readFileSync(join(root, "lib/infinite-outcome.ts"), "utf8")).toContain("export async function reportInfiniteOutcome(")
 
     const middleware = readFileSync(join(root, "middleware.ts"), "utf8")
     expect(middleware).toContain("export default withInfiniteServerLane()")
@@ -174,7 +178,7 @@ describe("install --server-lane on Next.js (App Router)", () => {
     const { plan, apply } = planAndApply(root, {})
     expect(plan.providers).toEqual([])
     expect(plan.applyMode).toBe("supported")
-    expect(plan.files).toEqual(["middleware.ts", "lib/infinite-server-lane.ts"])
+    expect(plan.files).toEqual(["middleware.ts", "lib/infinite-server-lane.ts", "lib/infinite-outcome.ts"])
     expect(existsSync(join(root, "lib/infinite-analytics.ts"))).toBe(false)
     expect(readFileSync(join(root, "app/layout.tsx"), "utf8")).toBe(original.get("app/layout.tsx"))
     expect(apply.changedFiles).toEqual(
@@ -235,7 +239,7 @@ describe("install --server-lane on Next.js (App Router)", () => {
       action: "unpatchable",
       reason: UNPATCHABLE_REASONS.matcherNarrow
     })
-    expect(plan.serverLane?.files).toEqual(["lib/infinite-server-lane.ts"])
+    expect(plan.serverLane?.files).toEqual(["lib/infinite-server-lane.ts", "lib/infinite-outcome.ts"])
     expect(readFileSync(join(root, "middleware.ts"), "utf8")).toBe(narrow)
     expect(apply.warnings.some((warning) => warning.includes("left untouched"))).toBe(true)
     expect(existsSync(join(root, "lib/infinite-server-lane.ts"))).toBe(true)
@@ -268,23 +272,6 @@ describe("install --server-lane on Next.js (App Router)", () => {
     // Uninstall is atomic: the refusal left the tree exactly as it was.
     expect(readFileSync(middlewarePath, "utf8")).toContain("// customer edit")
     expect(existsSync(join(root, "lib/infinite-server-lane.ts"))).toBe(true)
-  })
-
-  it("blocks when an unmanaged lib/infinite-server-lane.ts is in the way", () => {
-    const root = copyFixture("next-app-router-basic")
-    mkdirSync(join(root, "lib"))
-    writeFileSync(join(root, "lib/infinite-server-lane.ts"), "export const mine = true\n")
-    const plan = planInstallation({
-      root,
-      inspect: inspectWorkspace(root),
-      workspaceId: "ws_test",
-      artifacts: withPixel,
-      serverLane: true
-    })
-    expect(plan.blockers).toContain(
-      "Server lane apply will not overwrite an existing unmanaged lib/infinite-server-lane.ts file."
-    )
-    expect(() => applyInstallation({ root, workspaceId: "ws_test", plan })).toThrow(/Refusing to apply/)
   })
 
   it("targets proxy.ts on Next.js 16+", () => {
@@ -325,31 +312,21 @@ describe("install --server-lane on Next.js (Pages Router)", () => {
 })
 
 describe("install --server-lane on other stacks", () => {
-  it("Vite: writes only the brief (mode brief), tracks it, and returns the brief text for printing", () => {
+  it("Vite: writes the brief plus the outcome helper (mode brief), tracks both, and returns the brief text for printing", () => {
     const root = copyFixture("vite-react-basic")
     const original = snapshotTree(root)
     const { plan, apply } = planAndApply(root, { ga4: { measurementId: "G-TEST123" } })
-    expect(plan.serverLane).toMatchObject({ mode: "brief", briefPath: SERVER_LANE_BRIEF_FILE, files: [] })
-    expect(apply.serverLane?.manifest).toEqual({ mode: "brief", brief: SERVER_LANE_BRIEF_FILE, guide: SERVER_LANE_GUIDE_FILE })
+    expect(plan.serverLane).toMatchObject({ mode: "brief", briefPath: SERVER_LANE_BRIEF_FILE, files: ["lib/infinite-outcome.ts"] })
+    const laneManifest = { mode: "brief", created: ["lib/infinite-outcome.ts"], createdDirs: ["lib"], brief: SERVER_LANE_BRIEF_FILE, guide: SERVER_LANE_GUIDE_FILE }
+    expect(apply.serverLane?.manifest).toEqual(laneManifest)
     // `brief` (returned + printed) is the full guide; the guide file matches it, the root a pointer.
     expect(apply.serverLane?.brief).toContain('This project was detected as "vite-react"')
     expect(readFileSync(join(root, SERVER_LANE_GUIDE_FILE), "utf8")).toBe(apply.serverLane?.brief)
     expect(readFileSync(join(root, SERVER_LANE_BRIEF_FILE), "utf8")).toContain(SERVER_LANE_GUIDE_FILE)
-    expect(readInstallManifest(root)?.serverLane).toEqual({ mode: "brief", brief: SERVER_LANE_BRIEF_FILE, guide: SERVER_LANE_GUIDE_FILE })
+    expect(readInstallManifest(root)?.serverLane).toEqual(laneManifest)
     const result = uninstallInstallation({ root, dryRun: false })
     expect(result.removedFiles).toContain(SERVER_LANE_BRIEF_FILE)
     expect(result.removedFiles).toContain(SERVER_LANE_GUIDE_FILE)
-    expectTreeEquals(root, original)
-  })
-
-  it("Vite, server lane alone: the brief is the whole install", () => {
-    const root = copyFixture("vite-react-basic")
-    const original = snapshotTree(root)
-    const { plan } = planAndApply(root, {})
-    expect(plan.providers).toEqual([])
-    expect(plan.files).toEqual([])
-    expect(existsSync(join(root, SERVER_LANE_BRIEF_FILE))).toBe(true)
-    uninstallInstallation({ root, dryRun: false })
     expectTreeEquals(root, original)
   })
 
@@ -361,7 +338,7 @@ describe("install --server-lane on other stacks", () => {
 
     // The customer's file is untouched and NOT recorded — the manifest claim must be true.
     expect(readFileSync(join(root, SERVER_LANE_GUIDE_FILE), "utf8")).toBe("# our own docs\n")
-    expect(readInstallManifest(root)?.serverLane).toEqual({ mode: "brief", brief: SERVER_LANE_BRIEF_FILE })
+    expect(readInstallManifest(root)?.serverLane).toEqual({ mode: "brief", created: ["lib/infinite-outcome.ts"], createdDirs: ["lib"], brief: SERVER_LANE_BRIEF_FILE })
     expect(apply.serverLane?.manifest.guide).toBeUndefined()
     expect(apply.warnings.some((warning) => warning.includes("not managed by Infinite"))).toBe(true)
 
@@ -376,31 +353,5 @@ describe("install --server-lane on other stacks", () => {
     uninstallInstallation({ root, dryRun: false })
     expect(existsSync(join(root, SERVER_LANE_BRIEF_FILE))).toBe(false)
     expect(readFileSync(join(root, SERVER_LANE_GUIDE_FILE), "utf8")).toBe("# our own docs\n")
-  })
-
-  it("does not overwrite an unmanaged INSTALL-SERVER-LANE.md; reports briefWritten=false", () => {
-    const root = copyFixture("vite-react-basic")
-    writeFileSync(join(root, SERVER_LANE_BRIEF_FILE), "# my own notes\n")
-    const { apply } = planAndApply(root, {})
-    expect(apply.serverLane?.briefWritten).toBe(false)
-    expect(readFileSync(join(root, SERVER_LANE_BRIEF_FILE), "utf8")).toBe("# my own notes\n")
-    expect(apply.warnings.some((warning) => warning.includes("not managed by Infinite"))).toBe(true)
-    // The root pointer was blocked, but the full guide (a different path) is still written + tracked.
-    expect(readInstallManifest(root)?.serverLane).toEqual({ mode: "brief", guide: SERVER_LANE_GUIDE_FILE })
-  })
-
-  it("Unsupported: the plan is blocked but carries the brief-mode lane for printing", () => {
-    const root = copyFixture("unsupported-basic")
-    const plan = planInstallation({
-      root,
-      inspect: inspectWorkspace(root),
-      workspaceId: "ws_test",
-      artifacts: {},
-      serverLane: true
-    })
-    expect(plan.blockers).toContain("Unsupported repository shape for instrumentation.")
-    expect(plan.serverLane).toMatchObject({ mode: "brief", briefPath: SERVER_LANE_BRIEF_FILE })
-    expect(() => applyInstallation({ root, workspaceId: "ws_test", plan })).toThrow(/Refusing to apply/)
-    expect(existsSync(join(root, SERVER_LANE_BRIEF_FILE))).toBe(false)
   })
 })

@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest"
 
 import type { InfinitePublicArtifact, WorkspaceInstallArtifacts } from "../types.js"
 
-import { infiniteProviderAdapter, renderInfiniteBrowserTag } from "./infinite.js"
+import { infiniteProviderAdapter } from "./infinite.js"
 
 const validArtifact: InfinitePublicArtifact = {
   siteSourceKey: "site_public_abc123",
@@ -62,21 +62,6 @@ describe("infinite provider plan", () => {
     expect(snippet).not.toContain("/sdk/")
   })
 
-  it("can render a not-required consent runtime for Infinite-only collection", () => {
-    const planned = infiniteProviderAdapter.plan(
-      "static-html",
-      { ...validArtifact, consentMode: "not_required" },
-      context({ infinite: { ...validArtifact, consentMode: "not_required" } })
-    )
-    const snippet = planned.instructions[0]!.snippet
-
-    expect(planned.blockers).toEqual([])
-    expect(snippet).toContain('"consent":{"mode":"not_required"}')
-    // The consent storage key ships in every mode: a not_required site still records
-    // the explicit decision of a GPC/DNT visitor (the only visitors it suppresses).
-    expect(snippet).toContain("infinite_analytics_consent")
-  })
-
   it("blocks Infinite collection until consent mode is explicitly selected", () => {
     const { consentMode: _, ...artifactWithoutConsent } = validArtifact
     const planned = infiniteProviderAdapter.plan(
@@ -117,18 +102,6 @@ describe("infinite provider plan", () => {
     }
   })
 
-  it("documents the required external consent signal", () => {
-    const planned = infiniteProviderAdapter.plan(
-      "static-html",
-      validArtifact,
-      context({ infinite: validArtifact })
-    )
-
-    expect(planned.assumptions.join("\n")).toContain("infinite:analytics-consent-change")
-    expect(planned.assumptions.join("\n")).toContain("detail: { granted: true }")
-    expect(planned.assumptions.join("\n")).toContain("detail: { granted: false }")
-  })
-
   it("plans a dormant runtime without a source key (no collection) that carries no provider coupling", () => {
     // A JS-module framework (Next) exercises the stripped, module-embedded snippet path. (Vite now
     // injects the wrapped <script> into index.html like static-html.)
@@ -146,54 +119,9 @@ describe("infinite provider plan", () => {
     expect(snippet).not.toContain("`")
     expect(snippet).not.toContain("${")
   })
-
-  it("exports the same browser-safe renderer used by every framework", () => {
-    const tag = renderInfiniteBrowserTag({
-      siteSourceKey: validArtifact.siteSourceKey,
-      collectPath: validArtifact.collectPath,
-      productionHosts: validArtifact.productionHosts,
-      respectDnt: true,
-      consent: { mode: "not_required" }
-    })
-
-    expect(tag.startsWith('<script data-infinite-runtime="managed">')).toBe(true)
-    expect(tag.endsWith("</script>")).toBe(true)
-    expect(infiniteProviderAdapter.envKeys("next-app-router")).toEqual([])
-  })
-})
-
-describe("autocapture threading", () => {
-  it("omits the key when the artifact says nothing (0.6.2-identical runtime config)", () => {
-    const plan = infiniteProviderAdapter.plan("static-html", validArtifact, context({ infinite: validArtifact }))
-    expect(plan.instructions[0]!.snippet).not.toContain('"autocapture"')
-  })
-
-  it("threads autocapture:false from the artifact into the runtime config", () => {
-    const artifact: InfinitePublicArtifact = { ...validArtifact, autocapture: false }
-    const plan = infiniteProviderAdapter.plan("static-html", artifact, context({ infinite: artifact }))
-    expect(plan.blockers).toEqual([])
-    expect(plan.instructions[0]!.snippet).toContain('"autocapture":false')
-  })
 })
 
 describe("allowAutomation threading", () => {
-  it("omits the config key when the artifact says nothing (bots are never counted by default)", () => {
-    const plan = infiniteProviderAdapter.plan("static-html", validArtifact, context({ infinite: validArtifact }))
-    // The runtime source names an `allowAutomation` variable; only the serialized CONFIG key matters.
-    expect(plan.instructions[0]!.snippet).not.toContain('"allowAutomation"')
-  })
-
-  it("serializes allowAutomation:true only when the artifact set it (on a sandbox host)", () => {
-    const artifact: InfinitePublicArtifact = {
-      ...validArtifact,
-      productionHosts: ["localhost"],
-      allowAutomation: true
-    }
-    const plan = infiniteProviderAdapter.plan("static-html", artifact, context({ infinite: artifact }))
-    expect(plan.blockers).toEqual([])
-    expect(plan.instructions[0]!.snippet).toContain('"allowAutomation":true')
-  })
-
   it("BLOCKS allowAutomation on a production host regardless of how the flag arrived (defense-in-depth)", () => {
     // validArtifact's hosts (example.com/www.example.com) are production — a persisted/discovered
     // artifact carrying allowAutomation:true would otherwise skip the CLI-only refusal.

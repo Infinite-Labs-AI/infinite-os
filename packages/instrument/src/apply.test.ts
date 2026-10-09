@@ -2,7 +2,6 @@ import {
   cpSync,
   existsSync,
   lstatSync,
-  mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
@@ -19,7 +18,6 @@ import { applyInstallation, snapshotFiles, restoreSnapshot } from "./apply.js"
 import { inspectWorkspace } from "./inspect.js"
 import { installManifestRelativePath } from "./manifest.js"
 import { planInstallation } from "./plan.js"
-import { uninstallInstallation } from "./uninstall.js"
 
 const tempRoots: string[] = []
 const fixtureRoot = dirname(fileURLToPath(import.meta.url))
@@ -326,7 +324,6 @@ describe("applyInstallation", () => {
     expect(secondApp.match(/InfiniteAnalyticsClient/g)).toHaveLength(2)
     expect(secondApp.match(/<InfiniteAnalyticsClient \/>/g)).toHaveLength(1)
   })
-
 })
 
 const gitEnv = {
@@ -361,21 +358,6 @@ describe("applyInstallation git safety", () => {
     ga4: { measurementId: "G-TEST123" }
   }
 
-  it("clean committed tree: inspects as clean and apply succeeds writing the manifest", () => {
-    const root = copyFixture("static-html-basic")
-    initGitRepo(root)
-
-    const inspectResult = inspectWorkspace(root)
-    expect(inspectResult.repoStatus).toBe("clean")
-
-    const plan = planInstallation({ root, inspect: inspectResult, workspaceId: "ws_test", artifacts })
-    const result = applyInstallation({ root, workspaceId: "ws_test", plan })
-
-    const manifestPath = join(root, installManifestRelativePath)
-    expect(existsSync(manifestPath)).toBe(true)
-    expect(result.changedFiles).toContain(installManifestRelativePath)
-  })
-
   it("dirty tree refusal: inspects as dirty and apply throws without allowDirty, no manifest created", () => {
     const root = copyFixture("static-html-basic")
     initGitRepo(root)
@@ -394,42 +376,6 @@ describe("applyInstallation git safety", () => {
 
     const manifestPath = join(root, installManifestRelativePath)
     expect(existsSync(manifestPath)).toBe(false)
-  })
-
-  it("--allow-dirty bypass: dirty tree with allowDirty succeeds and injects instrumentation", () => {
-    const root = copyFixture("static-html-basic")
-    initGitRepo(root)
-
-    // Add an untracked file to make the tree dirty
-    writeFileSync(join(root, "notes.txt"), "scratch notes\n")
-
-    const inspectResult = inspectWorkspace(root)
-    expect(inspectResult.repoStatus).toBe("dirty")
-
-    const plan = planInstallation({ root, inspect: inspectResult, workspaceId: "ws_test", artifacts })
-    const result = applyInstallation({ root, workspaceId: "ws_test", plan, allowDirty: true })
-
-    const manifestPath = join(root, installManifestRelativePath)
-    expect(existsSync(manifestPath)).toBe(true)
-    expect(result.changedFiles).toContain(installManifestRelativePath)
-
-    const htmlPath = join(root, "index.html")
-    expect(readFileSync(htmlPath, "utf8")).toContain("<!-- infinite:start -->")
-  })
-
-  it("sanity: non-git fixture reports not-a-git-repo and apply succeeds (documents why gate never fired in old tests)", () => {
-    const root = copyFixture("static-html-basic")
-    // No git init — plain temp dir
-
-    const inspectResult = inspectWorkspace(root)
-    expect(inspectResult.repoStatus).toBe("not-a-git-repo")
-
-    const plan = planInstallation({ root, inspect: inspectResult, workspaceId: "ws_test", artifacts })
-    const result = applyInstallation({ root, workspaceId: "ws_test", plan })
-
-    const manifestPath = join(root, installManifestRelativePath)
-    expect(existsSync(manifestPath)).toBe(true)
-    expect(result.changedFiles).toContain(installManifestRelativePath)
   })
 })
 

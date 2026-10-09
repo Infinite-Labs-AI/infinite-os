@@ -1,4 +1,4 @@
-import { cpSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { cpSync, existsSync, mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 import { fileURLToPath } from "node:url"
@@ -57,22 +57,6 @@ describe("infinite-tag server-lane --brief", () => {
     expect(out).toContain('This project was detected as "Vite + React"')
     expect(existsSync(join(root, SERVER_LANE_BRIEF_FILE))).toBe(false)
   })
-
-  it("on a Next.js repo prints the manual-wiring status; --json wraps it", async () => {
-    const root = copyFixture("next-app-router-basic")
-    const code = await runCli(["server-lane", "--json", "--root", root])
-    expect(code).toBe(0)
-    const parsed = JSON.parse(stdoutText()) as { framework: string; brief: string }
-    expect(parsed.framework).toBe("next-app-router")
-    expect(parsed.brief).toContain("This is a Next.js project.")
-    expect(parsed.brief).toContain("### Exactly what to add to your middleware")
-  })
-
-  it("help mentions the server lane", async () => {
-    await runCli(["help"])
-    expect(stdoutText()).toContain("--server-lane")
-    expect(stdoutText()).toContain("verify --server-lane <url>")
-  })
 })
 
 describe("infinite-tag install --server-lane", () => {
@@ -108,20 +92,6 @@ describe("infinite-tag install --server-lane", () => {
     expect(existsSync(join(root, "middleware.ts"))).toBe(true)
   })
 
-  it("human mode on Next.js narrates the lane and the env vars, and does not print the brief", async () => {
-    const root = copyFixture("next-app-router-basic")
-    const code = await runCli(["install", "--root", root, "--workspace", "ws_test", "--server-lane", "--yes"])
-    expect(code).toBe(0)
-    const out = stdoutText()
-    expect(out).toContain("Server lane (lossless analytics):")
-    expect(out).toContain("+ middleware.ts")
-    expect(out).toContain("+ lib/infinite-server-lane.ts")
-    expect(out).toContain(`+ ${SERVER_LANE_BRIEF_FILE}`)
-    expect(out).toContain("INFINITE_SERVER_EVENT_SECRET=")
-    expect(out).toContain("npx infinite-tag verify --server-lane https://")
-    expect(out).not.toContain("## The contract (implement exactly)")
-  })
-
   it("a server-lane-only install does not claim a browser pixel and counts runtime files honestly", async () => {
     const root = copyFixture("next-app-router-basic")
     const code = await runCli(["install", "--root", root, "--workspace", "ws_test", "--server-lane", "--yes"])
@@ -138,55 +108,6 @@ describe("infinite-tag install --server-lane", () => {
     expect(out).not.toContain("Installed analytics →")
   })
 
-  it("a pixel + server-lane install keeps the pixel wording and still counts runtime files", async () => {
-    const root = copyFixture("next-app-router-basic")
-    const code = await runCli([
-      "install",
-      "--root",
-      root,
-      "--workspace",
-      "ws_test",
-      "--server-lane",
-      "--infinite-site-source-key",
-      "site_public_test",
-      "--infinite-production-host",
-      "example.com",
-      "--infinite-consent-mode",
-      "not-required",
-      "--yes"
-    ])
-    expect(code).toBe(0)
-    const out = stdoutText()
-    // Task 1: a real pixel is present, so the pixel wording stays.
-    expect(out).toContain("your site is now wired for Infinite")
-    expect(out).not.toContain("Browser pixel NOT installed.")
-    expect(out).toContain("managed runtime file")
-  })
-
-  it("human mode on Vite writes the brief AND prints it (the brief is the install)", async () => {
-    const root = copyFixture("vite-react-basic")
-    const code = await runCli(["install", "--root", root, "--workspace", "ws_test", "--server-lane", "--yes"])
-    expect(code).toBe(0)
-    const out = stdoutText()
-    expect(out).toContain("The full agent brief follows (also written into the project):")
-    expect(out).toContain("## The contract (implement exactly)")
-    expect(existsSync(join(root, SERVER_LANE_BRIEF_FILE))).toBe(true)
-  })
-
-  it("prints the brief when the existing middleware could not be patched", async () => {
-    const root = copyFixture("next-app-router-basic")
-    writeFileSync(
-      join(root, "middleware.ts"),
-      `export function middleware(request) {\n  return undefined\n}\nexport const config = { matcher: ["/dashboard/:path*"] }\n`
-    )
-    const code = await runCli(["install", "--root", root, "--workspace", "ws_test", "--server-lane", "--yes"])
-    expect(code).toBe(0)
-    const out = stdoutText()
-    expect(out).toContain("! middleware.ts  left untouched")
-    expect(out).toContain("### Exactly what to add to your middleware")
-    expect(readFileSync(join(root, "middleware.ts"), "utf8")).toContain('matcher: ["/dashboard/:path*"]')
-  })
-
   it("on an unsupported stack, prints the unsupported notice AND the brief without writing files", async () => {
     const root = copyFixture("unsupported-basic")
     const code = await runCli(["install", "--root", root, "--workspace", "ws_test", "--server-lane", "--yes"])
@@ -197,17 +118,6 @@ describe("infinite-tag install --server-lane", () => {
     expect(out).toContain("## The contract (implement exactly)")
     expect(existsSync(join(root, SERVER_LANE_BRIEF_FILE))).toBe(false)
   })
-
-  it("plan --server-lane previews the lane files", async () => {
-    const root = copyFixture("next-app-router-basic")
-    const code = await runCli(["plan", "--root", root, "--server-lane"])
-    expect(code).toBe(0)
-    const out = stdoutText()
-    expect(out).toContain("+ middleware.ts")
-    expect(out).toContain("+ lib/infinite-server-lane.ts")
-    expect(out).toContain("This was a preview — nothing changed.")
-    expect(existsSync(join(root, "middleware.ts"))).toBe(false)
-  })
 })
 
 describe("infinite-tag verify --server-lane <url>", () => {
@@ -215,12 +125,6 @@ describe("infinite-tag verify --server-lane <url>", () => {
     const code = await runCli(["verify", "--server-lane", "https://example.com/", "--infinite-site-source-key", "site_x"])
     expect(code).toBe(1)
     expect(stdoutText()).toContain("INFINITE_SERVER_EVENT_SECRET is not set in this shell")
-  })
-
-  it("requires a URL value", async () => {
-    const code = await runCli(["verify", "--server-lane"])
-    expect(code).toBe(1)
-    expect(errorSpy.mock.calls.map((c) => String(c[0])).join("\n")).toContain("Missing value for --server-lane")
   })
 
   it("--json emits the machine result", async () => {

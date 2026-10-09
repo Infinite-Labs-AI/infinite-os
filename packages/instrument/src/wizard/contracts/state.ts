@@ -8,6 +8,7 @@
 import type { AgentReviewerKind, AgentWorkerKind, WhoPays } from "./agents.js"
 import type { AskKind } from "./asks.js"
 import type { RuntimeVariant } from "./bridge.js"
+import type { OwnerBoundaryMeasurement } from "../../jobs/owner-diff.js"
 import type { WizardCode } from "./codes.js"
 import type { ChecklistItem } from "./jobs.js"
 import { CHECKLIST_ITEM_SHAPE } from "./jobs.js"
@@ -67,6 +68,7 @@ export interface StepRecord {
 
 export type BaseSource = "vercel" | "default_branch" | "origin_head"
 export type GitHostKind = "github" | "gitlab" | "bitbucket" | "other"
+export type PushTarget = { kind: "origin"; remoteUrl: null; headOwner: null } | { kind: "fork"; remoteUrl: string; headOwner: string }
 
 /** Run markers per moment (the ids a real visit or a rehearsal produced). */
 export interface RunMarkers {
@@ -144,6 +146,14 @@ export interface WizardRunState {
     cloudReviewer?: AgentReviewerKind
   } | null
   git: { base: string; baseSource: BaseSource; branch: string; baseSha: string; headSha: string | null } | null
+  ownerBoundary?: OwnerBoundaryMeasurement
+  /** Only SHAs returned by this run's commit operations; public trailers do not establish ownership. */
+  wizardCommits?: string[]
+  /** Backfilled history anchors are never wizard-measured SHAs. */
+  commitHistory?: { version: 1; priorHeads: string[]; unverifiedReason?: string; unclassifiedHead?: string; resolution?: "accepted" | "noninteractive" | "declined" }
+  approvedForeignCommits?: string[]
+  lastPush?: { sha: string; at: string }
+  pushTarget?: PushTarget
   pr: {
     host: GitHostKind
     number: number | null
@@ -207,9 +217,12 @@ export interface StoreStepRow {
   state: "pending" | "running" | StepOutcomeKind
   status: string | null
   code: WizardCode | null
+  startedAt?: string | null
   /** The last few sub-statuses (the TUI shows the last 5). */
-  subs: Array<{ text: string; tone: "ok" | "warn" | "info" | "pending"; at: string }>
+  subs: Array<{ text: string; tone: "ok" | "warn" | "info" | "pending" | "result"; at: string }>
 }
+
+export type JobDisplayState = "waiting" | "agent_claim" | "agent_blocked" | "agent_not_needed" | "checking" | "could_not_check" | "done_in_code" | "waiting_deploy" | "waiting_real_event" | "proven" | "not_needed" | "left_for_you" | "failed" | "blocked"
 
 /** Renderer-agnostic: what a UI needs to draw one frame. `version` bumps on every change. */
 export interface WizardStoreSnapshot {
@@ -225,10 +238,14 @@ export interface WizardStoreSnapshot {
    */
   learnFacts?: { site?: string | null; workspace?: string | null; worker?: "claude_code" | "codex" | null; reviewer?: "claude_code" | "codex" | "brief" | null }
   narration: Array<{ agent: "claude_code" | "codex"; role: "worker" | "reviewer"; text: string; at: string }>
+  /** Stable rows for the agent's jobs; transient claim/checking states never assert a verdict. */
+  jobs?: Array<{ id: string; title: string; state: JobDisplayState; note?: string }>
+  /** Highest number of jobs that reached a settled display state during this step. */
+  jobsSettledHighWater?: number
   /** At most one pending ask (a second throws). */
   pendingAsk: { askId: string; kind: AskKind; payload: unknown } | null
   outro: string | null
-  exit: { exitCode: number; prUrl: string | null; reportPath: string | null } | null
+  exit: { exitCode: number; prUrl: string | null; reportPath: string | null; code?: string | null; reason?: string | null } | null
 }
 
 // ---- shapes ----
@@ -260,8 +277,10 @@ export const WIZARD_RUN_STATE_SHAPE = shapeOf<WizardRunState>()(
     "report",
     "snapshot"
   ],
-  ["runStartedAt", "site", "proof", "rehearsalChecks"],
+  ["runStartedAt", "site", "proof", "rehearsalChecks", "pushTarget", "ownerBoundary", "wizardCommits", "commitHistory", "approvedForeignCommits", "lastPush"],
   {
+    commitHistory: shapeOf<NonNullable<WizardRunState["commitHistory"]>>()("RunState.commitHistory", ["version", "priorHeads"], ["unverifiedReason", "unclassifiedHead", "resolution"]),
+    pushTarget: shapeOf<PushTarget>()("RunState.pushTarget", ["kind", "remoteUrl", "headOwner"], []),
     rehearsalChecks: arrayOf(shapeOf<NonNullable<WizardRunState["rehearsalChecks"]>[number]>()("RunState.rehearsalCheck", ["checkId", "state", "sha"], [])),
     proof: shapeOf<RunProofState>()("RunState.proof", ["at", "tools", "laneProbed", "infinitePageViews", "filter", "installedUnknown"], [], {
       tools: arrayOf(

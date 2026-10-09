@@ -1,3 +1,4 @@
+import { REVIEW_ITEMS } from "../../src/wizard/contracts/agents.js"
 // Lane O4's test doubles for WizardDeps: a recording fake bridge, scripted agents, a fake check runner /
 // registry / installer / report builder, a fake clock, a real-disk WizardFs, and a WizardContext with an
 // in-memory run state, an event log and scripted ask answers. No network, no real agent, no real desktop.
@@ -392,11 +393,11 @@ export function fakeReport(markdown = "| Row | Live site today | In this pull re
         rows: [],
         day7: { measuredAt: null, window: null, cell: null },
         finishLine: [],
-        notes: input.notes,
+        notes: [...input.notes, ...(input.verdictFacts?.ownerPolicyFindings ?? [])],
         verdict: null
       }) as ReportV2,
     renderTerminal: () => markdown,
-    renderMarkdown: () => markdown,
+    renderMarkdown: report => [markdown, ...report.notes.filter(note => note.startsWith("About your consent or privacy pages (yours to decide)"))].join("\n\n"),
     payload: (report) => report
   }
 }
@@ -445,6 +446,8 @@ export function initialState(overrides: Partial<WizardRunState> = {}): WizardRun
     steps: {},
     agent: { worker: "claude_code", reviewer: "codex", workerSession: null, whoPays: { worker: null, reviewer: null } },
     git: null,
+    wizardCommits: [],
+    commitHistory: { version: 1, priorHeads: [] },
     pr: null,
     plan: { hash: "sha256:plan", answers: { consentMode: "not_required", conversions: ["sign_up"], privacyApproved: null, npmInstall: null, metaGoal: null }, lines: [] },
     jobs: [],
@@ -553,7 +556,7 @@ export function review(findings: ReviewResult["findings"], verdict: ReviewResult
   return {
     verdict,
     summary: findings.length > 0 ? "A few things to fix." : "Looks good.",
-    checklist: [{ item: "R1", status: "pass", note: "Scope is fine." }],
+    checklist: REVIEW_ITEMS.filter(item => item !== "R6").map(item => ({ item, status: "pass", note: "Checked." })),
     findings
   }
 }

@@ -28,10 +28,13 @@ import { sanitizeUntrusted } from "../agents/sanitize.js"
 import { openTagBridge } from "../bridge/client.js"
 import { envProxyFetch } from "../checks/live/env-proxy-fetch.js"
 import { registerJobStaticChecks, type JobStaticRunContext } from "../checks/job-static.js"
-import { registerO9Checks } from "../checks/o9.js"
+import { readEventInventory } from "../checks/commerce-inventory.js"
+import type { EventInventory } from "../scan/event-inventory.js"
+import { registerO9Checks, type O9RunContext } from "../checks/o9.js"
 import { runCensus } from "../checks/census.js"
 import { lexicalStates } from "../lexical-states.js"
 import { createCheckRunner } from "../checks/registry.js"
+import { baselineTree, sweepBaselineTrees } from "../checks/baseline-tree.js"
 import { createGitOps } from "../git/index.js"
 import { createGhClient } from "../github/gh.js"
 import { buildHostGuardExpression, productionDeniedConflict, type HostGuardSpec } from "../host-guard.js"
@@ -46,6 +49,7 @@ import { INFINITE_API_ORIGIN, infiniteCollectDestination } from "../workspace-ar
 import type { BeforeFacts } from "./contracts/jobs.js"
 import type { BriefFacts } from "../jobs/briefs.js"
 import { adoptedMetaGuardRecipe } from "../providers/meta.js"
+import { buildScanner } from "../review/context.js"
 import { createWizardUi } from "../tui/index.js"
 import type { KeyboardInput } from "../tui/keys.js"
 import type { JsonInput } from "../tui/json-ui.js"
@@ -89,6 +93,16 @@ export function readBeforeFactsSync(root: string, runId: string | null): BeforeF
   return parsed as unknown as BeforeFactsFile
 }
 
+/**
+ * The scan's own event × tool inventory as `before` wrote it (`src/scan/event-inventory.ts` shape), or null when the
+ * file holds none (an older run, or no store facts).
+ */
+export function scanInventoryOf(before: BeforeFactsFile | null): EventInventory | null {
+  const value = (before as { eventInventory?: unknown } | null)?.eventInventory
+  if (!isRecord(value) || !Array.isArray(value.events) || !Array.isArray(value.checkoutCreates) || !Array.isArray(value.pixelRestrictedRoutes)) return null
+  return value as unknown as EventInventory
+}
+
 /** THIS run's `keys` step result (its stream / pixel choices), or null. */
 export function readKeysResultSync(root: string, runId: string | null): KeysStepResult | null {
   if (!runId) return null
@@ -111,7 +125,7 @@ function runKeys(root: string, runId: string | null): TagKeys | null {
 }
 
 /** O9's run context: the exempt production hosts (§3h.9) and the run's expectation (the connection's ids). */
-export function o9RunContext(root: string, runId: string | null): { productionHosts?: string[]; expect?: TestExpect } | undefined {
+export function o9RunContext(root: string, runId: string | null): O9RunContext | undefined {
   const before = readBeforeFactsSync(root, runId)
   if (!before) return undefined
   const keys = applyKeysChoices(before.facts.keys, readKeysResultSync(root, runId))
@@ -124,7 +138,16 @@ export function o9RunContext(root: string, runId: string | null): { productionHo
   ]
     .map(normalizeHost)
     .filter((host) => host !== "")
-  return { productionHosts: [...new Set(hosts)], expect: testExpectFromKeys(keys) }
+  const saved = readPlanApprovalsSync(root)
+  const runState = readJsonSync(join(root, WIZARD_PATHS.state))
+  const currentPlan = isRecord(runState) && runState.runId === runId && isRecord(runState.plan) && runState.plan.hash === saved?.planHash && isRecord(runState.steps) && isRecord(runState.steps.before) && runState.steps.before.at === saved?.beforeAt
+  const approved = currentPlan ? saved?.guard : null
+  const expectedEmittedGuard = approved?.emit ? buildHostGuardExpression({ mode: "deny", exempt: approved.exempt, deny: approved.deny }) : null
+  const plan = currentPlan && saved?.plan ? briefPlanFrom(saved.plan, saved.approvals) : null
+  return {
+    productionHosts: [...new Set(hosts)], expect: testExpectFromKeys(keys), ...(expectedEmittedGuard ? { expectedEmittedGuard } : {}),
+    ...(plan ? { conversionNames: plan.conversionNames, posthogSensitivePaths: [...new Set(plan.lines.filter(line => line.kind === "sensitive_pages").flatMap(line => line.sensitivePaths ?? []))] } : {})
+  }
 }
 
 /**
@@ -149,6 +172,11 @@ export function jobStaticRunContext(root: string, runId: string | null): JobStat
     const posthog = keys.posthog.status === "connected" ? posthogProxyFor(keys.posthog) : null
     const infinite = keys.infinite.collectPath ? { path: keys.infinite.collectPath, destination: infiniteCollectDestination(INFINITE_API_ORIGIN) } : null
     out.proxy = { ...(posthog ? { posthog } : {}), ...(infinite ? { infinite } : {}) }
+    // Review r3: the scan's event × tool inventory (what the plan promised each tool) and whether Meta gets this site's
+    // conversions (connected in Infinite, or the site runs a pixel), for the commerce checks.
+    const inventory = readEventInventory((before as unknown as { eventInventory?: unknown }).eventInventory)
+    if (inventory) out.eventInventory = inventory
+    out.metaInUse = keys.meta.status === "connected" || before.facts.census.entries.some((entry) => entry.tool === "meta")
   }
   return out
 }
@@ -185,7 +213,8 @@ export function briefFactsFor(root: string, state: Readonly<WizardRunState> | nu
     helpers: writtenHelpers(root),
     guardSites: adoptedInitSites(root, state.appRoot),
     consentMode: state.plan?.answers.consentMode ?? null,
-    managedFiles: managedModules(root)
+    managedFiles: managedModules(root),
+    inventory: scanInventoryOf(before)
   }
 }
 
@@ -313,15 +342,24 @@ export async function createDefaultWizardDeps(input: DefaultDepsInput, overrides
   }
 
   const git = createGitOps({ cwd: root, env, runKey: runId() ?? "local-run" })
+  if (await git.isRepo()) await sweepBaselineTrees(root, git)
   const gh = createGhClient({ cwd: root, env })
   const remoteUrl = await git.remoteUrl().catch(() => null)
   const host = createGitHostAdapter({ remoteUrl, gh, git })
 
-  const checks = createCheckRunner({ root, appRoot: input.appRoot, runId, platform: platform as NodeJS.Platform, signal: input.signal })
+  const checks = createCheckRunner({ root, appRoot: input.appRoot, runId, platform: platform as NodeJS.Platform, signal: input.signal,
+    baselineTree: async () => {
+      const sha = state()?.git?.baseSha
+      if (!sha) return { root, dispose: async () => {} }
+      return baselineTree(root, input.appRoot, sha, git)
+    }
+  })
+  // One proxy-aware fetch for the live checks and the wizard's own anonymous reads (a preview's login answer).
+  const liveFetch = overrides.fetch ?? envProxyFetch(env)
   registerO9Checks(checks, {
     root,
     version: tagVersion,
-    fetch: overrides.fetch ?? envProxyFetch(env),
+    fetch: liveFetch,
     run: () => o9RunContext(root, runId())
   })
   // Review I1 P1-5: the job table's S checks on an agent's edit (jobs 1, 2, 3, 8, 9, 12, 14).
@@ -329,6 +367,7 @@ export async function createDefaultWizardDeps(input: DefaultDepsInput, overrides
 
   const agents = new AgentRunnerImpl({
     root,
+    appRoot: input.appRoot,
     home,
     env,
     isTTY: !options.json && !options.nested,
@@ -344,6 +383,18 @@ export async function createDefaultWizardDeps(input: DefaultDepsInput, overrides
 
   const registry = createJobRegistry({
     briefFacts: () => briefFactsFor(root, state()),
+    scanner: () => {
+      const before = readBeforeFactsSync(root, runId())
+      const keys = runKeys(root, runId())
+      const publicIds = [
+        ...(keys ? connectionIdsFromKeys(keys) : []),
+        ...(before?.facts.census?.entries ?? []).flatMap(entry => entry.id ? [entry.id] : []),
+        ...(before?.facts.dryLive?.ga4?.events ?? []).flatMap(event => event.tid ? [event.tid] : []),
+        ...(before?.facts.dryLive?.meta?.tr ?? []).flatMap(event => event.pixelId ? [event.pixelId] : []),
+        ...(state()?.proof?.tools ?? []).flatMap(tool => tool.ids)
+      ]
+      return buildScanner({ root, appRoot: input.appRoot }, { bridge, env, agents }, publicIds)
+    },
     // A production reading counts for an item only after the change could be live: the merge.
     liveSince: () => state()?.steps.merge?.at ?? null
   })
@@ -363,12 +414,19 @@ export async function createDefaultWizardDeps(input: DefaultDepsInput, overrides
     // §3y.5: the answered host and a pending claim (the run state), and whether the app offers the claim path.
     runFacts: () => {
       let siteClaim = false
+      let metaRelay: boolean | undefined
       try {
         siteClaim = bridge.has("tag.site-claim.v1")
       } catch {
         siteClaim = false
       }
-      return { site: state()?.site ?? null, siteClaim }
+      try {
+        // P1-8: Meta counts as connected in Infinite only when the app can send server events to Meta.
+        metaRelay = bridge.has("tag.meta-relay.v1")
+      } catch {
+        metaRelay = undefined
+      }
+      return { site: state()?.site ?? null, siteClaim, ...(metaRelay === undefined ? {} : { metaRelay }) }
     }
   })
 
@@ -386,6 +444,7 @@ export async function createDefaultWizardDeps(input: DefaultDepsInput, overrides
     env,
     platform,
     tagVersion,
+    fetch: liveFetch,
     // B29: the merge-ready "open" answer opens the PR, in a darwin terminal run only.
     ...(platform === "darwin" && !options.json && !options.nested ? { openUrl: openInBrowser } : {})
   }

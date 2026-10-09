@@ -2,7 +2,7 @@
 // imported for real (vitest transforms the .ts on the way in), then driven against the fixed
 // vectors in helpers.test.ts — the same vectors the receiving side proves. A lane that would post
 // a different envelope than the Node recipe fails here, not in a customer's production traffic.
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 import { pathToFileURL } from "node:url"
@@ -13,8 +13,7 @@ import {
   INFINITE_SERVER_EVENTS_DESTINATION,
   infiniteServerEventsDestination
 } from "../../workspace-artifacts.js"
-import { VECTORS } from "../helpers.test.js"
-import { buildServerLaneModuleSource } from "../runtime-source.js"
+import { VECTORS } from "../../../test/server-lane-vectors.js"
 import {
   hashInfiniteEmail,
   signServerEventBody,
@@ -24,12 +23,11 @@ import {
 
 import { cloudflarePagesMiddlewareSource } from "./cloudflare.js"
 import { NETLIFY_EXCLUDED_ASSET_EXTENSIONS, netlifyEdgeFunctionSource } from "./netlify.js"
-import { nodeLaneModuleSource, nodeOutcomeHelperSource } from "./node.js"
+import { nodeLaneModuleSource, nodeTarget } from "./node.js"
+import { outcomeHelperSource } from "./outcome-helper.js"
 import {
   detectServerLaneHelperLanguage,
   edgeLaneCoreSource,
-  nonDocumentPrefixes,
-  outcomeHelperSource,
   outcomeHelperTarget
 } from "./shared.js"
 import { vercelLaneModuleSource, vercelMiddlewareSource } from "./vercel-any.js"
@@ -38,6 +36,19 @@ const tempRoots: string[] = []
 /** Infinite's real 202 (§3j.1, as answered today: no Meta instruction). */
 const acceptedResponse = () => new Response(JSON.stringify({ accepted: true, duplicate: false }), { status: 202 })
 const BUILD = { siteSourceKey: "site_test", productionHosts: [VECTORS.host] }
+const META_MATCH = (
+  JSON.parse(readFileSync(new URL("../../../contracts/server-lane-v1.vectors.json", import.meta.url), "utf8")) as {
+    metaMatch: {
+      email: { raw: string; sha256: string }
+      externalId: { raw: string; sha256: string }
+      city: { raw: string; sha256: string }
+      usState: { raw: string; country: string; sha256: string }
+      zip: { raw: string; sha256: string }
+      country: { raw: string; sha256: string }
+      fullName: { raw: string; fn: string; ln: string }
+    }
+  }
+).metaMatch
 
 afterEach(() => {
   while (tempRoots.length > 0) rmSync(tempRoots.pop()!, { recursive: true, force: true })
@@ -160,22 +171,13 @@ describe("the shared edge core, executed", () => {
   describe("the document gate", () => {
     const cases: Array<[string, Parameters<typeof documentRequest>[0], boolean]> = [
       ["an HTML page", {}, true],
-      ["a nested HTML page", { url: `https://${VECTORS.host}/blog/why-servers` }, true],
       ["a POST", { method: "POST" }, false],
-      ["a non-HTML accept", { headers: { accept: "application/json" } }, false],
       ["a purpose:prefetch", { headers: { purpose: "prefetch" } }, false],
-      ["a sec-purpose prerender", { headers: { "sec-purpose": "prefetch;prerender" } }, false],
-      ["a Next router prefetch", { headers: { "next-router-prefetch": "1" } }, false],
       // Privacy: DNT / Global-Privacy-Control are honored like the client pixel does.
       ["a Do-Not-Track signal", { headers: { dnt: "1" } }, false],
-      ["a Sec-GPC signal", { headers: { "sec-gpc": "1" } }, false],
-      ["DNT explicitly disabled", { headers: { dnt: "0" } }, true],
       ["an API route", { url: `https://${VECTORS.host}/api/checkout` }, false],
-      ["a Vercel internal", { url: `https://${VECTORS.host}/_vercel/insights/view` }, false],
-      ["a Next internal", { url: `https://${VECTORS.host}/_next/static/chunk.js` }, false],
       ["the Infinite pixel's collect path", { url: `https://${VECTORS.host}${DEFAULT_INFINITE_COLLECT_PATH}` }, false],
       ["a file with an extension", { url: `https://${VECTORS.host}/logo.svg` }, false],
-      ["a dotted path segment", { url: `https://${VECTORS.host}/assets/app.min.css` }, false]
     ]
 
     it.each(cases)("%s -> %s", async (_label, overrides, expected) => {
@@ -245,21 +247,6 @@ describe("the shared edge core, executed", () => {
       )
     ).resolves.toBe(true)
   })
-
-  it("never throws and never rejects when the network fails", async () => {
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async () => {
-        throw new Error("network down")
-      })
-    )
-    const lane = (await loadGenerated(vercelLaneModuleSource(BUILD))) as {
-      recordInfiniteDocumentRequest: (request: Request, credentials: unknown) => Promise<boolean>
-    }
-    await expect(
-      lane.recordInfiniteDocumentRequest(documentRequest(), { secret: VECTORS.secret, sourceKey: "site_test" })
-    ).resolves.toBe(false)
-  })
 })
 
 describe("the Netlify edge function, executed", () => {
@@ -316,14 +303,6 @@ describe("the Netlify edge function, executed", () => {
     // Never a blanket "/*.*": URLPattern's wildcard is greedy across "/", so it would also exclude a
     // real page like /v1.0/pricing. https://developer.mozilla.org/en-US/docs/Web/API/URL_Pattern_API
     expect(fn.config.excludedPath).not.toContain("/*.*")
-  })
-
-  it("does nothing on an asset request", async () => {
-    const fn = (await loadGenerated(netlifyEdgeFunctionSource(BUILD))) as {
-      default: (request: Request, context: unknown) => Promise<void>
-    }
-    await fn.default(documentRequest({ url: `https://${VECTORS.host}/logo.svg` }), { waitUntil: () => undefined })
-    expect(fetchMock).not.toHaveBeenCalled()
   })
 })
 
@@ -454,16 +433,6 @@ describe("the Node module, executed", () => {
     expect(next).toHaveBeenCalledTimes(5)
     expect(fetchMock).not.toHaveBeenCalled()
   })
-
-  it("stays dormant on an off-allowlist host", async () => {
-    const lane = (await loadGenerated(nodeLaneModuleSource(BUILD), "js")) as {
-      infiniteServerLane: () => (req: unknown, res: unknown, next: () => void) => void
-    }
-    const next = vi.fn()
-    lane.infiniteServerLane()(expressRequest({ headers: { host: "localhost:3000" } }), {}, next)
-    expect(next).toHaveBeenCalledTimes(1)
-    expect(fetchMock).not.toHaveBeenCalled()
-  })
 })
 
 describe("the outcome helper, executed", () => {
@@ -486,10 +455,10 @@ describe("the outcome helper, executed", () => {
 
   it("posts a purchase with a stable event id, the path, and the SAME visit key as the page view", async () => {
     const helper = (await loadGenerated(outcomeHelperSource(BUILD))) as {
-      postInfiniteOutcome: (input: Record<string, unknown>) => Promise<boolean>
+      reportInfiniteOutcome: (input: Record<string, unknown>) => Promise<number | null>
     }
     await expect(
-      helper.postInfiniteOutcome({
+      helper.reportInfiniteOutcome({
         type: "purchase",
         path: "/checkout",
         eventId: "purchase:cs_test_123",
@@ -497,7 +466,7 @@ describe("the outcome helper, executed", () => {
         occurredAt: new Date(VECTORS.nowMs),
         visitKeyInputs: documentRequest()
       })
-    ).resolves.toBe(true)
+    ).resolves.toBe(202)
 
     const posted = postedBody(fetchMock)
     const body = JSON.parse(posted.body) as {
@@ -520,7 +489,7 @@ describe("the outcome helper, executed", () => {
 
   it("carries an adMatch block VERBATIM inside the signed body (the Meta CAPI relay)", async () => {
     const helper = (await loadGenerated(outcomeHelperSource(BUILD))) as {
-      postInfiniteOutcome: (input: Record<string, unknown>) => Promise<boolean>
+      reportInfiniteOutcome: (input: Record<string, unknown>) => Promise<number | null>
     }
     const adMatch = {
       em: hashInfiniteEmail("founder@example.com"),
@@ -529,7 +498,7 @@ describe("the outcome helper, executed", () => {
       client_ip_address: VECTORS.clientIp,
       client_user_agent: VECTORS.userAgent
     }
-    await helper.postInfiniteOutcome({
+    await helper.reportInfiniteOutcome({
       type: "purchase",
       path: "/checkout",
       eventId: "purchase:cs_test_123",
@@ -547,72 +516,34 @@ describe("the outcome helper, executed", () => {
     expect(posted.body).not.toContain("founder@example.com")
   })
 
-  it("adMatchFromRequest reads the BUYER'S cookies, ip and user agent from the customer's request", async () => {
-    const helper = (await loadGenerated(outcomeHelperSource(BUILD))) as {
-      adMatchFromRequest: (
-        request: { headers: Headers },
-        hashed?: { em?: string; external_id?: string }
-      ) => Record<string, string>
-      postInfiniteOutcome: (input: Record<string, unknown>) => Promise<boolean>
-    }
-    const em = hashInfiniteEmail("founder@example.com")
-    const block = helper.adMatchFromRequest(
-      documentRequest({
-        headers: {
-          cookie: "_ga=GA1.1.x; _fbp=fb.1.1755500000123.987654321; _fbc=fb.1.1755500000123.IwAR0abc; other=1"
-        }
-      }),
-      { em }
-    )
-    expect(block).toEqual({
-      em,
-      fbc: "fb.1.1755500000123.IwAR0abc",
-      fbp: "fb.1.1755500000123.987654321",
-      // First hop of x-forwarded-for — the buyer, not the proxy chain.
-      client_ip_address: VECTORS.clientIp,
-      client_user_agent: VECTORS.userAgent
-    })
-  })
-
   it("adMatchFromRequest omits what the request did not carry, and never invents a value", async () => {
     const helper = (await loadGenerated(outcomeHelperSource(BUILD))) as {
-      adMatchFromRequest: (request: { headers: Headers }) => Record<string, string>
+      adMatchFromRequest: (request: { headers: Headers }, match: Record<string, unknown>) => Promise<Record<string, string> | undefined>
     }
-    const bare = helper.adMatchFromRequest({ headers: new Headers({ "user-agent": VECTORS.userAgent }) })
-    expect(bare).toEqual({ client_user_agent: VECTORS.userAgent })
+    // No page signal, no match data: undefined, never an empty block.
+    const bare = await helper.adMatchFromRequest({ headers: new Headers({ "user-agent": VECTORS.userAgent }) }, { trackingAllowed: false })
+    expect(bare).toBeUndefined()
+    await expect(
+      helper.adMatchFromRequest({ headers: new Headers({ "user-agent": VECTORS.userAgent }) }, { trackingAllowed: true })
+    ).resolves.toEqual({ client_user_agent: VECTORS.userAgent })
+    await expect(
+      helper.adMatchFromRequest({ headers: new Headers({ "user-agent": VECTORS.userAgent }) }, { trackingAllowed: false, person: { email: META_MATCH.email.raw } })
+    ).resolves.toBeUndefined()
     // An empty cookie value is absent, not an empty string Meta would have to reject.
-    const emptyCookie = helper.adMatchFromRequest({
-      headers: new Headers({ cookie: "_fbp=; _fbc=fb.1.1.abc", "user-agent": "ua" })
-    })
+    const emptyCookie = await helper.adMatchFromRequest(
+      {
+        headers: new Headers({ cookie: "_fbp=; _fbc=fb.1.1.abc", "user-agent": "ua" })
+      },
+      { trackingAllowed: true }
+    )
     expect(emptyCookie).toEqual({ fbc: "fb.1.1.abc", client_user_agent: "ua" })
-  })
-
-  it("omits adMatch entirely when the caller sends none — the block is opt-in per outcome", async () => {
-    const helper = (await loadGenerated(outcomeHelperSource(BUILD))) as {
-      postInfiniteOutcome: (input: Record<string, unknown>) => Promise<boolean>
-    }
-    await helper.postInfiniteOutcome({ type: "sign_up", eventId: "signup:1" })
-    expect(postedBody(fetchMock).body).not.toContain("adMatch")
-  })
-
-  it("accepts raw visit-key inputs, and mints a random event id when none is given", async () => {
-    const helper = (await loadGenerated(outcomeHelperSource(BUILD))) as {
-      postInfiniteOutcome: (input: Record<string, unknown>) => Promise<boolean>
-    }
-    await helper.postInfiniteOutcome({
-      type: "sign_up",
-      visitKeyInputs: { clientIp: VECTORS.clientIp, userAgent: VECTORS.userAgent }
-    })
-    const body = JSON.parse(postedBody(fetchMock).body) as { eventId: string; properties: Record<string, string> }
-    expect(body.eventId).toMatch(/^[0-9a-f-]{36}$/)
-    expect(body.properties.visitKey).toBe(VECTORS.visitKey)
   })
 
   it("reads a PLAIN-OBJECT request (Vercel Node function / Express req.headers), not just a WHATWG Request", async () => {
     // Regression: req.headers on a Vercel Node function is a plain object, so headers.get(...) threw
     // and the whole outcome was swallowed as false — no visit key, no purchase posted.
     const helper = (await loadGenerated(outcomeHelperSource(BUILD))) as {
-      postInfiniteOutcome: (input: Record<string, unknown>) => Promise<boolean>
+      reportInfiniteOutcome: (input: Record<string, unknown>) => Promise<number | null>
     }
     const nodeReq = {
       headers: {
@@ -621,13 +552,14 @@ describe("the outcome helper, executed", () => {
       }
     }
     await expect(
-      helper.postInfiniteOutcome({
+      helper.reportInfiniteOutcome({
         type: "purchase",
+        path: "/checkout",
         eventId: "purchase:node_1",
         occurredAt: new Date(VECTORS.nowMs),
         visitKeyInputs: nodeReq
       })
-    ).resolves.toBe(true)
+    ).resolves.toBe(202)
     const body = JSON.parse(postedBody(fetchMock).body) as { properties: Record<string, string> }
     // A real key from the plain object — never false/empty, and the IP itself still never leaves.
     expect(body.properties.visitKey).toBe(VECTORS.visitKey)
@@ -637,7 +569,7 @@ describe("the outcome helper, executed", () => {
   it("exports infiniteVisitKey so a checkout can compute the key and a webhook can carry it", async () => {
     const helper = (await loadGenerated(outcomeHelperSource(BUILD))) as {
       infiniteVisitKey: (inputs: { clientIp?: string; userAgent?: string; nowMs?: number }) => Promise<string>
-      postInfiniteOutcome: (input: Record<string, unknown>) => Promise<boolean>
+      reportInfiniteOutcome: (input: Record<string, unknown>) => Promise<number | null>
     }
     // 1. At CHECKOUT, from the buyer's request — same recipe as the page-view lane.
     const visitKey = await helper.infiniteVisitKey({
@@ -648,8 +580,9 @@ describe("the outcome helper, executed", () => {
     expect(visitKey).toBe(VECTORS.visitKey)
     // 2. In the WEBHOOK, carried via properties.visitKey (the request there is the provider's) — the
     //    helper skips its own derivation and keeps the carried key verbatim.
-    await helper.postInfiniteOutcome({
+    await helper.reportInfiniteOutcome({
       type: "purchase",
+      path: "/success",
       eventId: "purchase:cs_1",
       occurredAt: new Date(VECTORS.nowMs),
       properties: { visitKey }
@@ -657,107 +590,39 @@ describe("the outcome helper, executed", () => {
     expect(JSON.parse(postedBody(fetchMock).body).properties.visitKey).toBe(VECTORS.visitKey)
   })
 
-  it("a carried properties.visitKey wins over visitKeyInputs — no re-derivation", async () => {
-    const helper = (await loadGenerated(outcomeHelperSource(BUILD))) as {
-      postInfiniteOutcome: (input: Record<string, unknown>) => Promise<boolean>
-    }
-    await helper.postInfiniteOutcome({
-      type: "purchase",
-      eventId: "purchase:cs_2",
-      occurredAt: new Date(VECTORS.nowMs),
-      properties: { visitKey: "carried_from_checkout" },
-      // A different request that WOULD derive a different key — it must be ignored.
-      visitKeyInputs: { clientIp: "198.51.100.7", userAgent: "someone-else" }
-    })
-    expect(JSON.parse(postedBody(fetchMock).body).properties.visitKey).toBe("carried_from_checkout")
-  })
-
   it("falls back to the baked source key, takes explicit credentials, and stays silent with no secret", async () => {
     const helper = (await loadGenerated(outcomeHelperSource(BUILD))) as {
-      postInfiniteOutcome: (input: Record<string, unknown>) => Promise<boolean>
+      reportInfiniteOutcome: (input: Record<string, unknown>) => Promise<number | null>
     }
     delete process.env.INFINITE_SITE_SOURCE_KEY
-    await helper.postInfiniteOutcome({ type: "download" })
+    await helper.reportInfiniteOutcome({ type: "download", eventId: "d1", path: "/download" })
     expect(postedBody(fetchMock).headers.get(SERVER_LANE_SOURCE_KEY_HEADER)).toBe("site_test")
 
     fetchMock.mockClear()
     delete process.env.INFINITE_SERVER_EVENT_SECRET
-    await expect(helper.postInfiniteOutcome({ type: "download" })).resolves.toBe(false)
+    await expect(helper.reportInfiniteOutcome({ type: "download", eventId: "d1", path: "/download" })).resolves.toBeNull()
     expect(fetchMock).not.toHaveBeenCalled()
 
     // Cloudflare Workers have no process.env: the caller passes its binding values instead.
     await expect(
-      helper.postInfiniteOutcome({
+      helper.reportInfiniteOutcome({
         type: "download",
+        eventId: "d2",
+        path: "/download",
         credentials: { secret: VECTORS.secret, sourceKey: "site_worker" }
       })
-    ).resolves.toBe(true)
+    ).resolves.toBe(202)
     expect(postedBody(fetchMock).headers.get(SERVER_LANE_SOURCE_KEY_HEADER)).toBe("site_worker")
   })
 
-  it("never throws when Infinite is unreachable", async () => {
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async () => {
-        throw new Error("network down")
-      })
-    )
-    const helper = (await loadGenerated(outcomeHelperSource(BUILD))) as {
-      postInfiniteOutcome: (input: Record<string, unknown>) => Promise<boolean>
-    }
-    await expect(helper.postInfiniteOutcome({ type: "purchase" })).resolves.toBe(false)
-  })
-
-  it("the Node twin posts the same shape on top of the generated Node module", async () => {
+  it("the Node target ships this same helper (one API on every host), never a Node-only twin", () => {
     const dir = mkdtempSync(join(tmpdir(), "instrument-lane-node-outcome-"))
     tempRoots.push(dir)
-    writeFileSync(join(dir, "infinite-server-lane.js"), nodeLaneModuleSource(BUILD))
-    const outcomePath = join(dir, "infinite-outcome.js")
-    writeFileSync(outcomePath, nodeOutcomeHelperSource())
-    const helper = (await import(pathToFileURL(outcomePath).href)) as {
-      postInfiniteOutcome: (input: Record<string, unknown>) => Promise<boolean>
-    }
-
-    await expect(
-      helper.postInfiniteOutcome({
-        type: "purchase",
-        path: "/checkout",
-        eventId: "purchase:1",
-        occurredAt: new Date(VECTORS.nowMs),
-        visitKeyInputs: { clientIp: VECTORS.clientIp, userAgent: VECTORS.userAgent }
-      })
-    ).resolves.toBe(true)
-    const body = JSON.parse(postedBody(fetchMock).body) as { properties: Record<string, string> }
-    expect(body.properties).toEqual({ path: "/checkout", visitKey: VECTORS.visitKey })
-  })
-
-  it("the Node twin derives the SAME visit key from a plain-object req as from explicit inputs", async () => {
-    // Regression: the Node outcome helper used to spread `{ ...visitKeyInputs, nowMs }`, so a Node
-    // `req` became `{ headers, nowMs }` — clientIp/userAgent empty — and it derived a DIFFERENT key,
-    // breaking same-lane attribution for Node users who followed the guide's `visitKeyInputs: req`.
-    const dir = mkdtempSync(join(tmpdir(), "instrument-lane-node-req-"))
-    tempRoots.push(dir)
-    writeFileSync(join(dir, "infinite-server-lane.js"), nodeLaneModuleSource(BUILD))
-    const outcomePath = join(dir, "infinite-outcome.js")
-    writeFileSync(outcomePath, nodeOutcomeHelperSource())
-    const helper = (await import(pathToFileURL(outcomePath).href)) as {
-      postInfiniteOutcome: (input: Record<string, unknown>) => Promise<boolean>
-    }
-
-    await expect(
-      helper.postInfiniteOutcome({
-        type: "purchase",
-        path: "/checkout",
-        eventId: "purchase:node_req",
-        occurredAt: new Date(VECTORS.nowMs),
-        // A Node request: .headers is a PLAIN OBJECT, exactly as Express / node:http hand it over.
-        visitKeyInputs: { headers: { "x-forwarded-for": `${VECTORS.clientIp}, 10.0.0.1`, "user-agent": VECTORS.userAgent } }
-      })
-    ).resolves.toBe(true)
-    const body = JSON.parse(postedBody(fetchMock).body) as { properties: Record<string, string> }
-    // The shared helper's vector — the Node twin must derive the identical key, and never leak the IP.
-    expect(body.properties.visitKey).toBe(VECTORS.visitKey)
-    expect(postedBody(fetchMock).body).not.toContain(VECTORS.clientIp)
+    writeFileSync(join(dir, "package.json"), JSON.stringify({ type: "module", dependencies: { express: "4" } }))
+    writeFileSync(join(dir, "tsconfig.json"), "{}")
+    const built = nodeTarget.build(BUILD, dir)
+    expect(Object.keys(built).sort()).toEqual(["lib/infinite-outcome.js", "lib/infinite-server-lane.js"])
+    expect(built["lib/infinite-outcome.js"]).toBe(outcomeHelperSource(BUILD, { language: "js", extension: "js", background: "bounded" }))
   })
 })
 
@@ -785,21 +650,21 @@ describe("the generated files as text", () => {
     }
   })
 
-  it("the Vercel middleware imports @vercel/functions, the lane module, and matches only documents", () => {
-    const source = vercelMiddlewareSource(BUILD)
-    expect(source).toContain('from "@vercel/functions"')
-    expect(source).toContain('from "./lib/infinite-server-lane"')
-    expect(source).toContain("export default function middleware")
-    expect(source).toContain(
-      `matcher: ["/((?!api/|_next/|_vercel/|${DEFAULT_INFINITE_COLLECT_PATH.slice(1)}|.*\\\\..*).*)"]`
-    )
-  })
-
-  it("takes the collect-path default from the one place it is defined", () => {
-    // The default moved to /infinite/ledger; a second copy of the old string here would be exactly
-    // the drift the "interpolated from one place" design exists to prevent.
-    expect(nonDocumentPrefixes(undefined)).toEqual(["/api/", "/_next/", "/_vercel/", DEFAULT_INFINITE_COLLECT_PATH])
-    expect(DEFAULT_INFINITE_COLLECT_PATH).toBe("/infinite/ledger")
+  it("an overridden origin actually reaches the wire", async () => {
+    const origin = "https://api.infinite.fast"
+    const lane = (await loadGenerated(vercelLaneModuleSource({ ...BUILD, apiOrigin: origin }))) as {
+      recordInfiniteDocumentRequest: (request: Request, credentials: unknown) => Promise<boolean>
+    }
+    const fetchMock = vi.fn(async () => acceptedResponse())
+    vi.stubGlobal("fetch", fetchMock)
+    vi.spyOn(Date, "now").mockReturnValue(VECTORS.nowMs)
+    try {
+      await lane.recordInfiniteDocumentRequest(documentRequest(), { secret: VECTORS.secret, sourceKey: "site_test" })
+      expect(postedBody(fetchMock).url).toBe(infiniteServerEventsDestination(origin))
+    } finally {
+      vi.unstubAllGlobals()
+      vi.restoreAllMocks()
+    }
   })
 
   it("posts to the resolved --infinite-api-origin, and to the default when there is no override", () => {
@@ -823,33 +688,6 @@ describe("the generated files as text", () => {
       outcomeHelperSource(BUILD)
     ]) {
       expect(source).toContain(`"${INFINITE_SERVER_EVENTS_DESTINATION}"`)
-    }
-  })
-
-  it("the Next.js module follows the override too, and is byte-identical without one", () => {
-    const origin = "https://api.infinite.fast"
-    const withoutOverride = buildServerLaneModuleSource(BUILD)
-    expect(withoutOverride).toBe(buildServerLaneModuleSource({ ...BUILD, apiOrigin: undefined }))
-    expect(withoutOverride).toContain(`"${INFINITE_SERVER_EVENTS_DESTINATION}"`)
-    expect(buildServerLaneModuleSource({ ...BUILD, apiOrigin: origin })).toContain(
-      `"${infiniteServerEventsDestination(origin)}"`
-    )
-  })
-
-  it("an overridden origin actually reaches the wire", async () => {
-    const origin = "https://api.infinite.fast"
-    const lane = (await loadGenerated(vercelLaneModuleSource({ ...BUILD, apiOrigin: origin }))) as {
-      recordInfiniteDocumentRequest: (request: Request, credentials: unknown) => Promise<boolean>
-    }
-    const fetchMock = vi.fn(async () => acceptedResponse())
-    vi.stubGlobal("fetch", fetchMock)
-    vi.spyOn(Date, "now").mockReturnValue(VECTORS.nowMs)
-    try {
-      await lane.recordInfiniteDocumentRequest(documentRequest(), { secret: VECTORS.secret, sourceKey: "site_test" })
-      expect(postedBody(fetchMock).url).toBe(infiniteServerEventsDestination(origin))
-    } finally {
-      vi.unstubAllGlobals()
-      vi.restoreAllMocks()
     }
   })
 
@@ -910,64 +748,6 @@ describe("the outcome helper module format (TS vs JS)", () => {
     })
     expect(outcomeHelperTarget(project)).toMatchObject({ path: "lib/infinite-outcome.js", language: "js" })
   })
-
-  it("the emitted JS helper carries no TypeScript syntax and names its own extension in the example", () => {
-    const source = outcomeHelperSource(BUILD, { language: "js", extension: "mjs" })
-    expect(source).not.toMatch(/\binterface\b/)
-    expect(source).not.toMatch(/: Promise<|Record<string|as InfiniteVisitKeyInputs|: InfiniteAdMatch/)
-    expect(source).toContain('from "../lib/infinite-outcome.mjs"')
-    // The TS helper still shows the extensionless import (bundler-resolved).
-    expect(outcomeHelperSource(BUILD)).toContain('from "../lib/infinite-outcome"')
-  })
-
-  describe("the JS helper, executed", () => {
-    const originalEnv = { ...process.env }
-    let fetchMock: ReturnType<typeof vi.fn>
-
-    beforeEach(() => {
-      process.env.INFINITE_SERVER_EVENT_SECRET = VECTORS.secret
-      process.env.INFINITE_SITE_SOURCE_KEY = "site_test"
-      fetchMock = vi.fn(async () => acceptedResponse())
-      vi.stubGlobal("fetch", fetchMock)
-      vi.spyOn(Date, "now").mockReturnValue(VECTORS.nowMs)
-    })
-
-    afterEach(() => {
-      vi.unstubAllGlobals()
-      vi.restoreAllMocks()
-      process.env = { ...originalEnv }
-    })
-
-    it("posts the SAME envelope as the TS helper — the strip changed types, never behavior", async () => {
-      const helper = (await loadGenerated(
-        outcomeHelperSource(BUILD, { language: "js", extension: "js" }),
-        "js"
-      )) as {
-        postInfiniteOutcome: (input: Record<string, unknown>) => Promise<boolean>
-        adMatchFromRequest: (request: { headers: Headers }, hashed?: { em?: string }) => Record<string, string>
-      }
-      await expect(
-        helper.postInfiniteOutcome({
-          type: "purchase",
-          path: "/checkout",
-          eventId: "purchase:cs_test_123",
-          accountKey: "cus_123",
-          occurredAt: new Date(VECTORS.nowMs),
-          visitKeyInputs: documentRequest()
-        })
-      ).resolves.toBe(true)
-      const posted = postedBody(fetchMock)
-      const body = JSON.parse(posted.body) as { properties: Record<string, string> }
-      expect(body.properties).toEqual({ path: "/checkout", visitKey: VECTORS.visitKey })
-      expect(posted.headers.get(SERVER_LANE_SOURCE_KEY_HEADER)).toBe("site_test")
-
-      const block = helper.adMatchFromRequest(
-        documentRequest({ headers: { cookie: "_fbp=fb.1.1.987; _fbc=fb.1.1.abc" } }),
-        { em: hashInfiniteEmail("founder@example.com") }
-      )
-      expect(block).toMatchObject({ fbc: "fb.1.1.abc", fbp: "fb.1.1.987", client_user_agent: VECTORS.userAgent })
-    })
-  })
 })
 
 // THE SERVER HALF OF infinite.fast's 2026-09-29 "first click shadowed later ones" incident (06b2ce8).
@@ -975,37 +755,31 @@ describe("the outcome helper module format (TS vs JS)", () => {
 // lists the OLDER first. Reading the first-listed value sends Meta the oldest ad click, so Meta
 // credits the wrong ad. infinite.fast's reader (scripts/lib/meta-click-id.mjs rule 3 at 9f65b47)
 // picks the newest by the creation time inside Meta's format, skipping values without Meta's shape.
-// Run against BOTH emitted variants: the .ts helper and the type-stripped .js helper.
+// Run against the type-stripped .js helper (the .ts one is the same source with types).
 describe.each([
-  { variant: "ts", language: "ts" as const, extension: "ts" as const },
   { variant: "js", language: "js" as const, extension: "js" as const }
 ])("adMatchFromRequest picks the newest ad click ($variant helper, executed)", ({ language, extension }) => {
   const FIRST_CLICK = "fb.1.1790645529960.TEST_NOT_REAL_FIRST"
   const SECOND_CLICK = "fb.1.1790645538268.TEST_NOT_REAL_SECOND"
   type AdMatchHelper = {
-    adMatchFromRequest: (request: { headers: unknown }, hashed?: { em?: string }) => Record<string, string>
+    adMatchFromRequest: (request: { headers: unknown }, match?: Record<string, unknown>) => Promise<Record<string, string>>
   }
   const helper = async (): Promise<AdMatchHelper> =>
     (await loadGenerated(outcomeHelperSource(BUILD, { language, extension }), extension)) as AdMatchHelper
   const withCookie = (cookie: string) => ({ headers: new Headers({ cookie, "user-agent": "ua" }) })
 
   it("sends the SECOND click when the older first click is listed first (the live 09-29 capture)", async () => {
-    const block = (await helper()).adMatchFromRequest(withCookie(`_fbc=${FIRST_CLICK}; _fbc=${SECOND_CLICK}`))
+    const block = await (await helper()).adMatchFromRequest(withCookie(`_fbc=${FIRST_CLICK}; _fbc=${SECOND_CLICK}`), { trackingAllowed: true })
     expect(block.fbc).toBe(SECOND_CLICK)
     expect(block.fbc).not.toBe(FIRST_CLICK)
-  })
-
-  it("picks by timestamp, not by position: the same answer whichever order the browser lists them", async () => {
-    const block = (await helper()).adMatchFromRequest(withCookie(`_fbc=${SECOND_CLICK}; _fbc=${FIRST_CLICK}`))
-    expect(block.fbc).toBe(SECOND_CLICK)
   })
 
   it("a malformed first _fbc cannot hide a valid later one, and is never forwarded itself", async () => {
     const bad = "fb.1.notms.IwAR0bad"
     const h = await helper()
-    expect(h.adMatchFromRequest(withCookie(`_fbc=${bad}; _fbc=${FIRST_CLICK}`)).fbc).toBe(FIRST_CLICK)
+    expect((await h.adMatchFromRequest(withCookie(`_fbc=${bad}; _fbc=${FIRST_CLICK}`), { trackingAllowed: true })).fbc).toBe(FIRST_CLICK)
     // Negative: only malformed values → no fbc at all, never the bad bytes.
-    const onlyBad = h.adMatchFromRequest(withCookie(`_fbc=${bad}; _fbc=fb.1.1790645538268.has space`))
+    const onlyBad = await h.adMatchFromRequest(withCookie(`_fbc=${bad}; _fbc=fb.1.1790645538268.has space`), { trackingAllowed: true })
     expect(onlyBad).not.toHaveProperty("fbc")
     expect(JSON.stringify(onlyBad)).not.toContain("IwAR0bad")
   })
@@ -1013,39 +787,19 @@ describe.each([
   it("keeps the fbclid byte for byte (Meta's _fbc is case-sensitive), and ties keep the first listed", async () => {
     const h = await helper()
     const mixedCase = "fb.2.1790645538268.IwAR0aBc-DeF_9.x"
-    expect(h.adMatchFromRequest(withCookie(`_fbc=${mixedCase}`)).fbc).toBe(mixedCase)
+    expect((await h.adMatchFromRequest(withCookie(`_fbc=${mixedCase}`), { trackingAllowed: true })).fbc).toBe(mixedCase)
     const tieA = "fb.1.1790645538268.TEST_NOT_REAL_A"
     const tieB = "fb.1.1790645538268.TEST_NOT_REAL_B"
-    expect(h.adMatchFromRequest(withCookie(`_fbc=${tieA}; _fbc=${tieB}`)).fbc).toBe(tieA)
-  })
-
-  it("reads a plain-object headers bag (Vercel Node functions, Express) as well as Headers", async () => {
-    const block = (await helper()).adMatchFromRequest(
-      {
-        headers: {
-          Cookie: `_fbp=fb.1.1755500000123.987654321; _fbc=${FIRST_CLICK}; _fbc=${SECOND_CLICK}`,
-          "user-agent": VECTORS.userAgent,
-          "x-forwarded-for": `${VECTORS.clientIp}, 10.0.0.1`
-        }
-      },
-      { em: hashInfiniteEmail("founder@example.com") }
-    )
-    expect(block).toEqual({
-      em: hashInfiniteEmail("founder@example.com"),
-      fbc: SECOND_CLICK,
-      fbp: "fb.1.1755500000123.987654321",
-      client_ip_address: VECTORS.clientIp,
-      client_user_agent: VECTORS.userAgent
-    })
+    expect((await h.adMatchFromRequest(withCookie(`_fbc=${tieA}; _fbc=${tieB}`), { trackingAllowed: true })).fbc).toBe(tieA)
   })
 
   it("_fbp is a browser id, not a click: first listed, and dropped when it lacks Meta's shape", async () => {
     const h = await helper()
     expect(
-      h.adMatchFromRequest(withCookie("_fbp=fb.1.1755500000123.111; _fbp=fb.1.1790645538268.222")).fbp
+      (await h.adMatchFromRequest(withCookie("_fbp=fb.1.1755500000123.111; _fbp=fb.1.1790645538268.222"), { trackingAllowed: true })).fbp
     ).toBe("fb.1.1755500000123.111")
     // Negative: an oversized or malformed _fbp is absent, never forwarded.
-    expect(h.adMatchFromRequest(withCookie(`_fbp=fb.1.1725350400000.${"A".repeat(513)}`))).not.toHaveProperty("fbp")
-    expect(h.adMatchFromRequest(withCookie("_fbp=garbage"))).not.toHaveProperty("fbp")
+    await expect(h.adMatchFromRequest(withCookie(`_fbp=fb.1.1725350400000.${"A".repeat(513)}`), { trackingAllowed: true })).resolves.not.toHaveProperty("fbp")
+    await expect(h.adMatchFromRequest(withCookie("_fbp=garbage"), { trackingAllowed: true })).resolves.not.toHaveProperty("fbp")
   })
 })

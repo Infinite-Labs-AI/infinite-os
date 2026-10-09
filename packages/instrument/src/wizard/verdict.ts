@@ -9,7 +9,7 @@
 // refusal. Pure: typed inputs in, one verdict out.
 import { maskIdentifier } from "../checks/result.js"
 import { openFindingName } from "../review/ledger.js"
-import type { ChecklistItem, JobItemState } from "./contracts/jobs.js"
+import { checkProvesChange, type ChecklistItem, type JobItemState } from "./contracts/jobs.js"
 import {
   PROBLEM_REASON_KINDS,
   VERDICT_LIMITS,
@@ -24,6 +24,7 @@ import {
   type VerdictToolFact
 } from "./contracts/report.js"
 import type { TestTool } from "./contracts/test-engine.js"
+import { FINISH_LINE_WORDS } from "./pr-summary.js"
 
 /** What the real visit measured of ONE tool under test (the contract's type). */
 export type ToolProofFact = VerdictToolFact
@@ -43,6 +44,8 @@ export interface VerdictInput {
   tools: readonly ToolProofFact[] | null
   /** Review P1-6: null = the deployed code's installed set was read; else why it could not be. */
   installedUnknown: string | null
+  /** What the pull request does, in one plain sentence; the headline opens with it. Absent/null = not known. */
+  does?: string | null
 }
 
 /** Job item states that are "in the code" (DECISIONS §5.3): `claimed` is NOT (the wizard could not check it). */
@@ -53,13 +56,26 @@ const NOT_PLAN_JOBS = new Set(["review_comments", "build_fix"])
 const SILENT_LABEL: Record<TestTool, string> = { infinite: "Infinite pixel", ga4: "GA4", posthog: "PostHog", meta: "Meta pixel" }
 const SHORT_LABEL: Record<TestTool, string> = { infinite: "Infinite", ga4: "GA4", posthog: "PostHog", meta: "Meta" }
 
-const label = (id: FinishLineId): string => id.replace(/_/g, " ")
+const label = (id: FinishLineId): string => FINISH_LINE_WORDS[id]
 const plural = (count: number, one: string, many: string) => (count === 1 ? one : many)
 
-/** At most 3 names, then `+N more` (DECISIONS §5.3). */
+/** At most 3 names, then "and N more" (DECISIONS §5.3). */
 function listNames(names: readonly string[]): string {
   const shown = names.slice(0, 3).join(", ")
-  return names.length > 3 ? `${shown} +${names.length - 3} more` : shown
+  return names.length > 3 ? `${shown} and ${names.length - 3} more` : shown
+}
+
+/**
+ * The review findings that hold the owner's pull request: blockers on the OWNER's code. A finding on Infinite's own
+ * files (a label: Infinite's managed runtime, the wizard's own change) is recorded for Infinite and never blocks it.
+ */
+export function ownerBlockers<T extends Pick<VerdictOpenFinding, "severity" | "label">>(findings: readonly T[]): T[] {
+  return findings.filter((finding) => finding.severity === "blocker" && finding.label === null)
+}
+
+/** "the review agent asks you to look at 2 things" (the merge card and the headline say the same words). */
+function reviewAsksWords(count: number): string {
+  return `the review agent asks you to look at ${count === 1 ? "one thing" : `${count} things`}`
 }
 
 /** "GA4", "GA4 and Meta", "GA4, PostHog and Meta". */
@@ -96,8 +112,17 @@ function notCheckedLiveHeadline(input: VerdictInput): string {
 /** The agent items of approved plan lines that are not in the code (an unanswered line's item is not approved). */
 export function missingApprovedFixes(jobs: readonly ChecklistItem[]): ChecklistItem[] {
   return jobs.filter((item) => {
-    if (item.owner !== "agent" || NOT_PLAN_JOBS.has(item.jobId)) return false
+    if (item.owner !== "agent" || item.state === "left_for_you" || item.jobId === "privacy_paragraph" || NOT_PLAN_JOBS.has(item.jobId)) return false
     if (DONE_STATES.includes(item.state)) return false
+    if (item.state === "failed") {
+      const failedLiveRunIds = new Set(item.checks
+        .filter((check) => ["T1", "RH", "PV"].includes(check.tier) && check.state === "problem" && check.runId)
+        .map((check) => check.runId!))
+      const local = item.checks.filter((check) => ["S", "B", "T0"].includes(check.tier))
+      if (failedLiveRunIds.size > 0 && local.length > 0 &&
+        local.every((check) => check.state === "pass" && check.runId !== undefined && failedLiveRunIds.has(check.runId)) &&
+        ((item.edits?.length ?? 0) > 0 || local.some((check) => checkProvesChange(item.jobId, check.tier, check.id)))) return false
+    }
     // A plan line the user never answered seeds its item `blocked:needs_you` with no wizard note: not approved.
     if (item.state === "blocked" && item.blockedReason === "needs_you" && item.note === undefined) return false
     return true
@@ -140,7 +165,8 @@ function earlierProblemsUnchecked(finishLine: VerdictInput["finishLine"]): strin
       const before = (["live_today", "in_pr"] as ReportColumnId[]).some((column) => line.cells[column].state === "problem")
       if (!before) return false
       const live: Cell = line.cells.proven_live
-      return live.state === "not_measured" || (live.state === "undetermined" && live.reason !== "not_connected")
+      // P0-2: an address behind a login reads "not tried" (info), and was not re-checked either.
+      return live.state === "not_measured" || (live.state === "undetermined" && live.reason !== "not_connected") || (live.state === "info" && live.reason === "preview_protected")
     })
     .map((line) => label(line.id))
 }
@@ -157,16 +183,16 @@ export function computeVerdict(input: VerdictInput): ReportVerdict {
     reasons.push(reason("not_live", []))
     const missing = missingApprovedFixes(input.jobs)
     if (missing.length > 0) reasons.push(reason("approved_fix_missing", missing.map((item) => item.title)))
-    const blockers = input.openFindings.filter((finding) => finding.severity === "blocker")
+    const blockers = ownerBlockers(input.openFindings)
     if (blockers.length > 0) reasons.push(reason("review_blocker_open", blockers.map(openFindingName)))
-    return { state: "not_checked_live", headline: notCheckedLiveHeadline(input).slice(0, VERDICT_LIMITS.headlineMaxChars), reasons, installed }
+    return { state: "not_checked_live", headline: withDoes(input, notCheckedLiveHeadline(input)), reasons, installed }
   }
 
   const liveProblems = input.finishLine.filter((line) => line.cells.proven_live.state === "problem").map((line) => label(line.id))
   if (liveProblems.length > 0) reasons.push(reason("live_problem", liveProblems))
   const missing = missingApprovedFixes(input.jobs)
   if (missing.length > 0) reasons.push(reason("approved_fix_missing", missing.map((item) => item.title)))
-  const blockers = input.openFindings.filter((finding) => finding.severity === "blocker")
+  const blockers = ownerBlockers(input.openFindings)
   if (blockers.length > 0) reasons.push(reason("review_blocker_open", blockers.map(openFindingName)))
   const silent = tools.filter((tool) => tool.installed && !tool.fired && !tool.ungraded)
   if (silent.length > 0) reasons.push(reason("tool_silent", silent.map((tool) => SILENT_LABEL[tool.tool])))
@@ -196,10 +222,16 @@ export function computeVerdict(input: VerdictInput): ReportVerdict {
     if (live) parts.push(`${live.count} ${plural(live.count, "problem", "problems")} on the live site (${listNames(liveProblems)})`)
     if (has("approved_fix_missing")) parts.push(...approvedFixClauses(missing))
     const open = has("review_blocker_open")
-    if (open) parts.push(`${open.count} review ${plural(open.count, "blocker", "blockers")} open (${listNames(blockers.map(openFindingName))})`)
+    if (open) parts.push(reviewAsksWords(open.count))
     if (silent.length > 0) parts.push(`${listNames(silent.map((tool) => SILENT_LABEL[tool.tool]))} sent nothing on the real visit`)
     if (withoutReceipt.length > 0) parts.push(`no receipt from the real visit for ${listNames(withoutReceipt.map((tool) => SILENT_LABEL[tool.tool]))}`)
     headline = `${input.site} does not collect properly yet: ${parts.join(" · ")}`
+    if (input.installedUnknown !== null) headline += ` · ${installedUnknownWords(input.installedUnknown)}`
+  } else if (state === "unconfirmed" && heldByBanner(input, tools)) {
+    // The site keeps its trackers off until a visitor accepts its own banner, and the test visit does not accept it:
+    // nothing was measured, which is never a failure (real visitors who accept are measured from their own visits).
+    headline = `${input.site}: not measured: ${HELD_BY_BANNER_WORDS}`
+    if (unchecked.length > 0) headline += ` · ${uncheckedWords(unchecked)}`
     if (input.installedUnknown !== null) headline += ` · ${installedUnknownWords(input.installedUnknown)}`
   } else if (state === "unconfirmed") {
     const received = tools.filter((tool) => tool.receipt === "verified")
@@ -217,7 +249,7 @@ export function computeVerdict(input: VerdictInput): ReportVerdict {
       const many = notConnected.length > 1
       headline += `; ${names} ${many ? "send" : "sends"}, but ${many ? "their IDs are" : "its ID is"} not checked (not connected in Infinite)`
     }
-    if (unchecked.length > 0) headline += ` · ${unchecked.length} earlier ${plural(unchecked.length, "problem", "problems")} not re-checked after the deploy (${listNames(unchecked)})`
+    if (unchecked.length > 0) headline += ` · ${uncheckedWords(unchecked)}`
     const ungraded = tools.filter((tool) => tool.installed && !tool.fired && tool.ungraded)
     if (ungraded.length > 0) headline += ` · ${andList(ungraded.map((tool) => SHORT_LABEL[tool.tool]))} could not be graded on the real visit`
     if (input.installedUnknown !== null) headline += ` · ${installedUnknownWords(input.installedUnknown)}`
@@ -228,7 +260,64 @@ export function computeVerdict(input: VerdictInput): ReportVerdict {
     }).length
     headline = `${input.site} collects analytics properly now${waiting > 0 ? ` · ${waiting} ${plural(waiting, "check waits", "checks wait")} for real visitors or the 7-day check-in` : ""}`
   }
-  return { state, headline: headline.slice(0, VERDICT_LIMITS.headlineMaxChars), reasons, installed }
+  return { state, headline: withDoes(input, headline), reasons, installed }
+}
+
+/** The headline opens with what the pull request does, then the run's state (bounded; never cut mid-state). */
+function withDoes(input: VerdictInput, status: string): string {
+  const does = input.does?.trim() ?? ""
+  const room = VERDICT_LIMITS.headlineMaxChars - status.length - 1
+  if (does.length === 0 || room < 40) return wordsWithin(status, VERDICT_LIMITS.headlineMaxChars)
+  const lead = doesWithin(does, room)
+  return lead ? `${lead} ${status}` : status
+}
+
+/**
+ * Live run 4: the "does" sentence within `room` characters, never cut mid-word ("adds the analytics re…"). Whole
+ * clauses ("; "-separated) are dropped from the end, so the first one (the shop events) stays; a first clause wider
+ * than the room ends at a word with "…".
+ */
+export function doesWithin(does: string, room: number): string {
+  if (does.length <= room) return does
+  const clauses = does.replace(/\.$/, "").split("; ")
+  for (let keep = clauses.length - 1; keep >= 1; keep -= 1) {
+    const sentence = `${clauses.slice(0, keep).join("; ")}.`
+    if (sentence.length <= room) return sentence
+  }
+  return wordsWithin(clauses[0]!, room)
+}
+
+/** `text` within `max` characters, ending at a whole word with "…" when it had to be shortened. */
+export function wordsWithin(text: string, max: number): string {
+  if (text.length <= max) return text
+  const words = text.split(" ")
+  let out = ""
+  for (const word of words) {
+    const next = out ? `${out} ${word}` : word
+    if (next.length + 1 > max) break
+    out = next
+  }
+  return out ? `${out.replace(/[,;:·\s]+$/, "")}…` : ""
+}
+
+/** The headline's clause for problems found before the merge and not measured again (said once: report.ts skips its own line). */
+export const UNCHECKED_WORDS = "not re-checked after the deploy"
+
+function uncheckedWords(unchecked: readonly string[]): string {
+  return `${unchecked.length} earlier ${plural(unchecked.length, "problem", "problems")} ${UNCHECKED_WORDS} (${listNames(unchecked)})`
+}
+
+/** The headline's words for a proof visit the site's own cookie banner kept silent. */
+export const HELD_BY_BANNER_WORDS = "your cookie banner keeps every tool off until a visitor accepts; real visitors who accept are measured from their own visits"
+
+/**
+ * The real visit saw nothing from any tool, and the proof cell says the site's banner held it (the grader's
+ * `held_by_consent`): every tool under test is silent and ungraded, none fired.
+ */
+function heldByBanner(input: VerdictInput, tools: readonly ToolProofFact[]): boolean {
+  const proof = input.finishLine.find((line) => line.id === "proof_from_real_visit")?.cells.proven_live
+  if (!proof || proof.state !== "undetermined" || proof.reason !== "held_by_consent") return false
+  return tools.length > 0 && tools.every((tool) => !tool.fired && (tool.ungraded || !tool.installed))
 }
 
 /** Review P1-6: the installed set could not be read, in the headline's words (the cause named). */
@@ -245,7 +334,7 @@ export function incompleteParts(verdict: Pick<ReportVerdict, "reasons">, jobs: r
   const parts: string[] = []
   if (verdict.reasons.some((entry) => entry.kind === "approved_fix_missing")) parts.push(...approvedFixClauses(missingApprovedFixes(jobs)))
   const blockers = verdict.reasons.find((entry) => entry.kind === "review_blocker_open")
-  if (blockers) parts.push(`${blockers.count} review ${plural(blockers.count, "blocker", "blockers")} open (${listNames(blockers.names)})`)
+  if (blockers) parts.push(`${reviewAsksWords(blockers.count)} (${listNames(blockers.names)})`)
   return parts.length > 0 ? parts.join(" · ") : null
 }
 

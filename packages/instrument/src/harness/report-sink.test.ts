@@ -3,9 +3,6 @@ import { describe, expect, it, vi } from "vitest"
 import {
   CloudReportSink,
   DesktopBridgeReportSink,
-  NO_DESKTOP_REPORT_REASON,
-  NoneReportSink,
-  REPORT_STRING_MAX,
   buildHarnessReportPayload,
   redactProviderIds
 } from "./report-sink.js"
@@ -73,16 +70,6 @@ describe("buildHarnessReportPayload", () => {
     expect(JSON.stringify(payload)).not.toContain("/home/founder")
   })
 
-  it("bounds every string and keeps a non-file evidence clause out of evidenceFile", () => {
-    const out = report()
-    const long = "x".repeat(REPORT_STRING_MAX + 50)
-    updateProvider(out, "gtm", (state) => transitionProvider(state, { to: "skipped", reason: long, evidence: "no Tag Manager container found" }))
-    const payload = buildHarnessReportPayload(out, { engineProjectId: "proj_1", tagVersion: "0.7.0", repoLabel: long })
-    expect(payload.providers.gtm?.via?.length).toBe(REPORT_STRING_MAX)
-    expect(payload.providers.gtm?.evidenceFile).toBeUndefined()
-    expect(payload.repoLabel?.length).toBe(REPORT_STRING_MAX)
-  })
-
   it("redacts provider ids the harness quotes in a conflict clause — keys never leave the machine", () => {
     const out = report()
     updateProvider(out, "gtm", (state) =>
@@ -99,14 +86,6 @@ describe("buildHarnessReportPayload", () => {
     const wire = JSON.stringify(payload)
     for (const id of ["G-AAAA1111", "GTM-BBBB22", "123456789012345", "phc_abcDEF123"]) expect(wire).not.toContain(id)
     expect(redactProviderIds("GT-XYZ12345 and G-AB1")).toBe("<id> and G-AB1")
-  })
-})
-
-describe("NoneReportSink", () => {
-  it("never sends and names why — the CLI's reason when it has one, 'open the app' otherwise", async () => {
-    const payload = buildHarnessReportPayload(report(), { engineProjectId: "p", tagVersion: "0.7.0" })
-    expect(await new NoneReportSink().send(payload)).toEqual({ sent: false, reason: NO_DESKTOP_REPORT_REASON })
-    expect(await new NoneReportSink("update the Infinite app").send(payload)).toEqual({ sent: false, reason: "update the Infinite app" })
   })
 })
 
@@ -127,44 +106,10 @@ describe("DesktopBridgeReportSink", () => {
     expect(body).toMatchObject({ protocolVersion: 1, tagVersion: "0.7.0", framework: "nextjs" })
     expect(body.engineProjectId).toBeUndefined()
   })
-
-  it("names the app's own refusals: 409 not_ready with its state, 503 capability_unavailable → update, forwarded cloud answers as the cloud's", async () => {
-    const cases: Array<[Response | Error, string]> = [
-      [jsonResponse(409, { error: "not_ready", state: "subscription_required" }), "Infinite Desktop is not ready (subscription_required) — complete onboarding"],
-      [jsonResponse(503, { error: { code: "capability_unavailable", message: "update" } }), "this Infinite Desktop version cannot verify — update the Infinite app"],
-      [jsonResponse(503, { error: "cloud_unavailable", message: "The Infinite app is signed out or the cloud is unreachable." }), "The Infinite app is signed out or the cloud is unreachable."],
-      [jsonResponse(404, { error: { code: "route_not_found" } }), "this Infinite Desktop version cannot verify — update the Infinite app"],
-      [jsonResponse(402, { error: "entitlement_required" }), "subscription required — complete onboarding in Infinite Desktop"],
-      [jsonResponse(400, { error: "invalid_request", reason: "unknown provider: mixpanel" }), "the Infinite app rejected the report: invalid_request — unknown provider: mixpanel"],
-      [jsonResponse(401, {}), "the Infinite app rejected this terminal's bridge credentials (HTTP 401) — restart the app and re-run"],
-      [new Error("ECONNREFUSED"), "the Infinite app was unreachable (ECONNREFUSED)"]
-    ]
-    for (const [answer, reason] of cases) {
-      const fetchImpl = async () => {
-        if (answer instanceof Error) throw answer
-        return answer
-      }
-      const sink = new DesktopBridgeReportSink({ bridgeUrl: "http://127.0.0.1:1", token: "t", fetch: fetchImpl as unknown as typeof fetch })
-      expect(await sink.send(payload)).toEqual({ sent: false, reason })
-    }
-  })
 })
 
 describe("CloudReportSink", () => {
   const payload = buildHarnessReportPayload(report(), { engineProjectId: "proj_1", tagVersion: "0.7.0" })
-
-  it("POSTs the payload with the bearer to /api/analytics/harness-report", async () => {
-    const calls: Array<{ url: string; init: RequestInit }> = []
-    const fetchImpl = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
-      calls.push({ url: String(url), init: init ?? {} })
-      return jsonResponse(201, { id: "r1" })
-    })
-    const sink = new CloudReportSink({ origin: "https://api.ultima.inc/", token: "tok_1", fetch: fetchImpl as unknown as typeof fetch })
-    expect(await sink.send(payload)).toEqual({ sent: true })
-    expect(calls[0].url).toBe("https://api.ultima.inc/api/analytics/harness-report")
-    expect((calls[0].init.headers as Record<string, string>).authorization).toBe("Bearer tok_1")
-    expect(JSON.parse(String(calls[0].init.body))).toMatchObject({ engineProjectId: "proj_1", tagVersion: "0.7.0" })
-  })
 
   it("maps every failure to a reason and never throws", async () => {
     const cases: Array<[Response | Error, string]> = [

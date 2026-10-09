@@ -14,9 +14,11 @@ import { wizardGitExtras } from "../../git/index.js"
 import { isGitHubAdapter } from "../../hosts/github.js"
 import { isUnsupported } from "../../hosts/other.js"
 import { assertNoAgentAlive, requireRunId, status, sub } from "../../review/context.js"
+import { commitChecks, withDeploymentStates, readinessChecks, retryCheckRead } from "../../github/checks.js"
 import { mergeRequirementLine } from "../../github/rules.js"
 import { parseLedger, REVIEW_LEDGER_PATH } from "../../review/ledger.js"
 import { verdictFactsFor } from "../verdict-facts.js"
+import { notRunReason } from "../review-outcome.js"
 import { incompleteParts } from "../verdict.js"
 import { repoLabelFromRemote } from "./done.js"
 
@@ -88,17 +90,26 @@ async function saveMerge(ctx: WizardContext, deps: WizardDeps, runId: string, me
  * (<agent> could not read the files)", an incomplete one names how many items were not checked.
  */
 export async function reviewSentence(ctx: Pick<WizardContext, "root">, deps: Pick<WizardDeps, "fs">, runId: string, reviewer: string | null): Promise<string> {
-  const label = reviewer === "codex" ? "Codex" : reviewer === "claude_code" ? "Claude Code" : null
   const ledger = parseLedger(await deps.fs.readText(join(ctx.root, REVIEW_LEDGER_PATH)), runId)
+  const recordedReviewer = ledger.completeness?.reviewer ?? ledger.rounds.at(-1)?.reviewer ?? reviewer
+  const label = recordedReviewer === "codex" ? "Codex" : recordedReviewer === "claude_code" ? "Claude Code" : null
   // Live run 5 (P2): a review posted from the printed brief and read back is a review (its round is in the ledger).
-  if (!label) return reviewer === "brief" && ledger.rounds.some((round) => round.reviewer === "brief") ? "Reviewed from the printed review brief" : "No second review"
+  if (!label) return recordedReviewer === "brief" && ledger.rounds.some((round) => round.reviewer === "brief") ? `Reviewed from the printed review brief${ledger.completeness?.state === "incomplete" ? " (review incomplete)" : ""}` : "No second review"
   const completeness = ledger.completeness
-  if (completeness?.state === "blind") return `No second review (${label} could not read the files)`
+  if (completeness?.state === "blind") return `Review incomplete (${label} could not read the files)`
   if (completeness?.state === "incomplete") {
+    // No round was ever read: nothing was checked, so it is no review at all, said with why.
+    if (ledger.rounds.length === 0) {
+      const notRun = notRunReason(completeness.unchecked)
+      if (notRun) return `No second review (${notRun})`
+      // Ledgers written before review-outcome.ts recorded these two.
+      if (completeness.unchecked.includes("the reviewer's service refused the request before it answered")) return `No second review (${label}'s service refused the request)`
+      if (completeness.unchecked.includes("answer did not match the schema")) return `No second review (${label}'s answer could not be read)`
+    }
     const count = completeness.unchecked.length
     return `Review incomplete (${label} could not check ${count} item${count === 1 ? "" : "s"})`
   }
-  return `Reviewed by ${label}`
+  return ledger.rounds.length > 0 && completeness?.state === "complete" ? `Reviewed by ${label}` : "No second review ran"
 }
 
 export function mergeSummary(input: { sentence: string; branch: string; base: string; filesChanged: number | null; checks: string }): string {
@@ -190,6 +201,35 @@ async function run(ctx: WizardContext, deps: WizardDeps): Promise<StepOutcome> {
   if (pr.state === "MERGED" && pr.mergeCommitOid) return saveMerge(ctx, deps, runId, pr.mergeCommitOid, pr.mergedAt)
   if (pr.state === "CLOSED") return parked("The pull request was closed without merging. Run `npx infinite-tag` to start a fresh run.", null)
 
+  // The review step's snapshot may be stale on resume. Read this head again before inviting a merge.
+  let checkLine: string
+  try {
+    const head = pr.headRefOid
+    const base = await commitChecks(github.gh, state.git.baseSha).catch(() => [])
+    for (;;) {
+      const found = await retryCheckRead(async () => {
+        const checks = await withDeploymentStates(github.gh, head, await commitChecks(github.gh, head))
+        if (checks.some(check => !["pass", "fail", "cancel", "pending", "skipping"].includes(check.bucket))) throw new Error("PR check states could not be read")
+        return checks
+      }, ms => deps.clock.sleep(ms, ctx.signal))
+      const measured = readinessChecks(found, base)
+      measured.notes.forEach(note => sub(ctx, "merge", note, "warn"))
+      const held = measured.checks.filter(check => !["pass", "skipping"].includes(check.bucket))
+      const pushedAt = state.lastPush?.sha === head ? Date.parse(state.lastPush.at) : NaN
+      const remaining = 10 * 60_000 - (deps.clock.now().getTime() - pushedAt)
+      if (held.length && held.every(check => check.bucket === "pending") && remaining > 0 && !ctx.signal.aborted) {
+        status(ctx, "merge", `Waiting on PR checks: ${held.map(check => check.name).join(", ")}`)
+        await deps.clock.sleep(Math.min(30_000, remaining), ctx.signal)
+        continue
+      }
+      if (held.length) return { kind: "parked", code: "INF_WIZ_MERGE_PARKED", reason: `PR checks are not ready: ${held.map(check => `${check.name} (${check.state})`).join(", ")}.`, resumeHint: "Resolve the named checks, then run `npx infinite-tag` again." }
+      checkLine = [...measured.notes, ...(measured.checks.length ? measured.checks.map(check => `${check.name}: ${check.bucket === "skipping" ? "not measured" : check.state}`) : measured.notes.length ? [] : ["no checks reported: not measured"])].join("; ")
+      break
+    }
+  } catch {
+    return { kind: "parked", code: "INF_WIZ_MERGE_PARKED", reason: "PR checks could not be read after three attempts.", resumeHint: "Run `npx infinite-tag` again when GitHub checks can be read." }
+  }
+
   const rules = await github.rules(state.git.base)
   const requirement = isUnsupported(rules) ? null : mergeRequirementLine({ reviewDecision: pr.reviewDecision, ...rules })
   const once = state.report.in_pr?.finishLine.each_tool_once?.state
@@ -200,7 +240,7 @@ async function run(ctx: WizardContext, deps: WizardDeps): Promise<StepOutcome> {
     branch: state.git.branch,
     base: state.git.base,
     filesChanged: await filesChanged(deps, state.git.baseSha, state.git.headSha),
-    checks: once === "pass" ? "rehearsal passed on the latest commit" : once === "problem" ? "the rehearsal found a problem" : "the rehearsal could not tell"
+    checks: checkLine
   })
   sub(ctx, "merge", `Waiting for you to merge #${number}…`, "pending")
   // §3y.9 (P2-6): GitHub is polled every 30 s WHILE the card is up; a merge seen closes the card (the ask's signal).

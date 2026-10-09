@@ -1,0 +1,62 @@
+import { describe, expect, it } from "vitest"
+import { beforeFacts, census, scanResult } from "../../test/wizard/o8/fixtures.js"
+import { fakeBefore, fakeKeys, fakeProductionDeniedConflict } from "../../test/wizard/o7-fakes.js"
+import { buildPlanModel } from "../install/plan-model.js"
+import { triage, triageKey, type TriageItem } from "../review/triage.js"
+import { emptyLedger, openFindings, recordDecisions } from "../review/ledger.js"
+import { globalDenyReason } from "./allow.js"
+import { jobScanFrom } from "./detectors/index.js"
+import { snapshotFromFiles } from "./repo-files.js"
+import { seedCandidatesFrom } from "./registry.js"
+import { blockItem } from "./state-machine.js"
+import { item } from "../../test/wizard/repo.js"
+import { missingApprovedFixes } from "../wizard/verdict.js"
+
+describe("consent and policy belong to the site owner", () => {
+  it("never seeds a privacy page job or evaluates the page's named tools", () => {
+    const scan = jobScanFrom(scanResult(), snapshotFromFiles({ "app/privacy/page.tsx": "<p>Our policy</p>" }))
+    expect(scan.detections.privacy).toEqual([])
+    expect(seedCandidatesFrom(scan, beforeFacts()).some(x => x.jobId === "privacy_paragraph")).toBe(false)
+  })
+  it.each(["app/privacy/page.tsx", "public/terms-of-service.html"])("denies %s even when an agent claims it", path => {
+    expect(globalDenyReason(path, [])).not.toBeNull()
+  })
+  it.each([ "fbq(\n'consent',\n'revoke'\n);", "gtag('consent','default',{ad_storage:'denied'});"])("leaves a preview guard for the owner when consent is in its file: %s", consent => {
+    const file = "src/tracking.ts"
+    const scan = jobScanFrom(scanResult(), snapshotFromFiles({ [file]: `function boot(){\nfbq('init','1234567890123456');\n${consent}\n}` }))
+    const facts = beforeFacts({ census: census([{ tool: "meta", kind: "fbq_init", id: "1234567890123456", file, line: 2 }]) })
+    expect(seedCandidatesFrom(scan, facts).find(x => x.id === "preview_guard:meta")).toMatchObject({ state: "left_for_you", checks: [], note: "For you: add the preview guard to Meta pixel's start-up at src/tracking.ts:2; until then preview and local visits count in Meta pixel." })
+  })
+  it("does not ask a privacy question or return approved privacy prose for an agent", () => {
+    const plan = buildPlanModel({ scan: { framework: "next-app-router", managedProviders: [], adopted: [], improve: [], serverLane: null, npm: null, sensitivePaths: [] }, keys: fakeKeys(), before: fakeBefore(), candidates: [], agent: { worker: "claude_code", whoPays: { payer: "plan", label: "plan" } }, consentFlag: null, productionDeniedConflict: fakeProductionDeniedConflict })
+    expect(plan.lines.some(line => line.kind === "privacy_text")).toBe(false)
+    expect(plan.decisions.privacyText).toBeNull()
+  })
+  it("a consent refusal is informational and is not an approved-fix failure", () => {
+    const changed = blockItem(item("preview_guard:meta", ["src/tracking.ts"]), "consent_touched").item
+    expect(changed.state).toBe("left_for_you")
+    expect(changed.checks).toEqual([])
+    expect(missingApprovedFixes([changed])).toEqual([])
+  })
+  it.each(["Consent is incorrectly configured",])("keeps owner-labelled blockers open for the owner, including a repeat: %s", body => {
+    const finding: TriageItem = { category: "owner_consent_privacy", source: "reviewer", threadId: null, findingId: "F1", item: "R6", severity: "blocker", path: "src/tracking.ts", line: 2, body, suggestedFix: null }
+    const context = { allowlist: ["src/tracking.ts"], declinedKeys: new Set<string>(), passingChecks: new Set<string>(), answerFor: () => null }
+    for (const declinedKeys of [new Set<string>(), new Set([triageKey(finding)])]) {
+      const decision = triage([finding], { ...context, declinedKeys })[0]!
+      expect(decision).toMatchObject({ action: "ASK", askReason: "owner_file" })
+      expect(decision.reason).toContain("The reviewer marked this finding as a blocker. It stays open for you")
+      const ledger = emptyLedger("fixture")
+      recordDecisions(ledger, [decision], 1)
+      expect(openFindings(ledger, [])).toEqual([{ findingId: "F1", item: "R6", severity: "blocker", path: "src/tracking.ts", line: 2, label: null }])
+    }
+  })
+})
+
+it("leaves only the tool whose evidence line lies inside a frozen unit", () => {
+  const file = "src/tracking.ts"
+  const scan = jobScanFrom(scanResult(), snapshotFromFiles({ [file]: "function google(){\n gtag('config','G-FAKE00001');\n}\nfunction meta(){\n fbq('init','1234567890123456');\n fbq?.('consent','revoke');\n}\n" }))
+  const facts = beforeFacts({ census: census([{ tool: "ga4", kind: "gtag_config", id: "G-FAKE00001", file, line: 2 }, { tool: "meta", kind: "fbq_init", id: "1234567890123456", file, line: 5 }]) })
+  const jobs = seedCandidatesFrom(scan, facts)
+  expect(jobs.find(job => job.id === "preview_guard:ga4")?.state).toBe("pending")
+  expect(jobs.find(job => job.id === "preview_guard:meta")?.state).toBe("left_for_you")
+})

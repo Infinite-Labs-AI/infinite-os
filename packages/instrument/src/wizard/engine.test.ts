@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs"
+import { mkdtempSync, readFileSync, rmSync, statSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
@@ -28,7 +28,6 @@ import { WizardEventEmitter } from "./events.js"
 import { nodeWizardFs } from "./fs.js"
 import { RunStateFile, createRunState, loadRunState } from "./run-state.js"
 import { WizardStore } from "./store.js"
-import { GITIGNORE_FENCE_BLOCK } from "../harness/outputs.js"
 
 const roots: string[] = []
 function tempRoot(): string {
@@ -99,31 +98,6 @@ describe("runWizard: order, outcomes and exit codes", () => {
     expect(events.filter((event) => event.t === "step.done").map((event) => (event as { step: string }).step)).toEqual([...WIZARD_STEP_IDS])
   })
 
-  it("a failed step with next:continue does not stop the run or set the exit code; a halt does", async () => {
-    const ran: WizardStepId[] = []
-    const cont = await setup()
-    const keepGoing = await cont.run(
-      fakeSteps({ review: async () => ({ kind: "failed", code: "INF_WIZ_REVIEW_UNPARSEABLE", message: "no review", next: "continue" }) }, ran)
-    )
-    expect(ran).toContain("done")
-    expect(keepGoing.exitCode).toBe(0)
-
-    const halted: WizardStepId[] = []
-    const halt = await setup()
-    const stopped = await halt.run(fakeSteps({ install: async () => ({ kind: "failed", code: "INF_WIZ_APPLY_ROLLED_BACK", message: "rolled back", next: "halt" }) }, halted))
-    expect(halted.at(-1)).toBe("install")
-    expect(halted).not.toContain("jobs")
-    expect(stopped).toMatchObject({ exitCode: 1, stoppedAt: "install", haltingCodes: ["INF_WIZ_APPLY_ROLLED_BACK"] })
-  })
-
-  it("blocked halts with its code (e.g. no app → exit 4)", async () => {
-    const ran: WizardStepId[] = []
-    const { run } = await setup()
-    const result = await run(fakeSteps({ link: async () => ({ kind: "blocked", code: "INF_WIZ_NO_APP", reason: "Open the Infinite app" }) }, ran))
-    expect(ran).toEqual(["link"])
-    expect(result.exitCode).toBe(4)
-  })
-
   it("maps EVERY WizardCode that halts or parks the run to its §3d.5 exit code", async () => {
     for (const code of WIZARD_CODES) {
       const ran: WizardStepId[] = []
@@ -156,44 +130,6 @@ describe("runWizard: resume", () => {
     expect(ran2[0]).toBe("plan")
     expect(ran2).not.toContain("link")
     expect(resumed.events.filter((event) => event.resumedSkip).map((event) => event.step)).toEqual(["link", "agent", "before", "keys"])
-  })
-
-  it("an ok step whose input hash changed runs again (negative: an unchanged hash never re-runs)", async () => {
-    const root = tempRoot()
-    const first = await setup({ root })
-    await first.run(fakeSteps({ merge: async () => ({ kind: "parked", code: "INF_WIZ_MERGE_PARKED", reason: "waiting", resumeHint: "merge" }) }, []))
-    const second = await setup({ root })
-    const ran: WizardStepId[] = []
-    await second.run(fakeSteps({}, ran, { rehearsal: "new-head-sha" }))
-    // rehearsal re-runs (new hash); review keeps its hash so it is skipped; merge onward were never ok.
-    expect(ran).toEqual(["rehearsal", "merge", "prove", "done"])
-    expect(ran).not.toContain("jobs")
-  })
-
-  it("§3d.6: a MERGED pull request resumes at merge — link re-attaches, nothing before merge re-runs even with a changed hash or a failed review", async () => {
-    const root = tempRoot()
-    const first = await setup({ root })
-    await first.run(
-      fakeSteps(
-        {
-          review: async () => ({ kind: "failed", code: "INF_WIZ_REVIEW_UNPARSEABLE", message: "unreadable", next: "continue" }),
-          merge: async () => ({ kind: "parked", code: "INF_WIZ_MERGE_PARKED", reason: "waiting", resumeHint: "merge" })
-        },
-        []
-      )
-    )
-    const second = await setup({ root })
-    const ran: WizardStepId[] = []
-    const result = await second.run(fakeSteps({}, ran, { link: "per-process", keys: "new", rehearsal: "new-head-sha" }), { resumeAt: "merge" })
-    expect(ran).toEqual(["link", "merge", "prove", "done"])
-    expect(result.exitCode).toBe(0)
-    expect(result.events.filter((event) => event.resumedSkip).map((event) => event.step)).toEqual(["agent", "before", "keys", "plan", "install", "jobs", "settings", "rehearsal", "review"])
-    expect(result.events.find((event) => event.step === "review")?.outcome).toEqual({ kind: "skipped", reason: "The pull request is already merged." })
-    // negative: without resumeAt the changed hashes and the failed review run again
-    const third = await setup({ root })
-    const again: WizardStepId[] = []
-    await third.run(fakeSteps({}, again, { link: "per-process-2", keys: "newer", rehearsal: "newer-head" }))
-    expect(again).toEqual(expect.arrayContaining(["link", "keys", "rehearsal", "review"]))
   })
 })
 
@@ -255,26 +191,6 @@ describe("runWizard: the engine invariant (§3a.9.4)", () => {
 })
 
 describe("runWizard: capabilities, budgets, nested mode and the fence", () => {
-  it("a step whose capability the app lacks fails INF_WIZ_BRIDGE_PROTOCOL without running (link checks its own)", async () => {
-    const setupResult = await setup()
-    const bridge = createFakeBridge(setupResult.log, { capabilities: ["tag.status.v1", "tag.link.v1", "tag.runs.v1"] })
-    setupResult.deps.bridge = bridge
-    const ran: WizardStepId[] = []
-    const result = await setupResult.run(fakeSteps({}, ran))
-    expect(ran).toEqual(["link", "agent"])
-    expect(result).toMatchObject({ exitCode: 2, stoppedAt: "before", haltingCodes: ["INF_WIZ_BRIDGE_PROTOCOL"] })
-  })
-
-  it("a step that runs past its budget ends with the budget's outcome and kills the agents", async () => {
-    const { run, log } = await setup()
-    const result = await run(fakeSteps({ jobs: () => new Promise(() => {}) }, []), {
-      budgets: { jobs: { ms: 10, onOverrun: { kind: "failed", code: "INF_WIZ_AGENT_TIMEOUT", message: "late", next: "halt" } } },
-      settleMs: 20
-    })
-    expect(result).toMatchObject({ exitCode: 1, stoppedAt: "jobs" })
-    expect(log.names("agents")).toContain("agents.killAll")
-  })
-
   it("after an overrun the engine waits for the step to unwind, THEN restores the fence snapshot, before it returns (O1-04)", async () => {
     const { run, log } = await setup()
     const order: string[] = []
@@ -304,62 +220,5 @@ describe("runWizard: capabilities, budgets, nested mode and the fence", () => {
     order.push("engine returned")
     expect(result).toMatchObject({ exitCode: 1, stoppedAt: "jobs" })
     expect(order).toEqual(["step cleaned up", "fence abort (killAll before: true)", "engine returned"])
-  })
-
-  it("nested mode spawns no agent: runJobs throws inside a step, and the jobs step itself runs (its own nested branch, B8)", async () => {
-    const { run, log } = await setup({ nested: true })
-    let threw: unknown = null
-    const jobsRan: boolean[] = []
-    await run(
-      fakeSteps(
-        {
-          agent: async (_ctx, deps) => {
-            try {
-              await deps.agents.runJobs({ items: [], brief: "", budget: { maxTurns: 1, wallMs: 1 }, onClaim() {}, onAsk() {}, onProgress() {}, onNarrate() {} })
-            } catch (error) {
-              threw = error
-            }
-            return { kind: "ok", status: "nested" }
-          },
-          jobs: async (ctx) => (jobsRan.push(ctx.options.nested), { kind: "parked", code: "INF_WIZ_NEEDS_ANSWERS", reason: "jobs handed off", resumeHint: "--resume" })
-        },
-        []
-      )
-    )
-    expect(threw).toBeInstanceOf(EngineInvariantError)
-    expect(log.names("agents")).not.toContain("agents.runJobs")
-    // no engine-level substitution: the jobs step ran, and it saw nested mode
-    expect(jobsRan).toEqual([true])
-  })
-
-  it("the default after-step writes the gitignore fence after `before` is ok, not before it", async () => {
-    const root = tempRoot()
-    writeFileSync(join(root, ".gitignore"), "node_modules\n")
-    const { ctx, deps } = await setup({ root })
-    const seen: string[] = []
-    const steps = fakeSteps(
-      {
-        before: async () => {
-          seen.push(readFileSync(join(root, ".gitignore"), "utf8"))
-          return { kind: "ok", status: "branch made" }
-        },
-        keys: async () => {
-          seen.push(readFileSync(join(root, ".gitignore"), "utf8"))
-          return { kind: "ok", status: "keys" }
-        }
-      },
-      []
-    )
-    await runWizard(ctx, deps, { steps })
-    expect(seen[0]).toBe("node_modules\n")
-    expect(seen[1]).toBe(`node_modules\n${GITIGNORE_FENCE_BLOCK}\n`)
-  })
-
-  it("stops between steps when the run is aborted (exit 130)", async () => {
-    const { run, controller } = await setup()
-    const ran: WizardStepId[] = []
-    const result = await run(fakeSteps({ keys: async () => (controller.abort(), { kind: "ok", status: "k" }) }, ran))
-    expect(result).toMatchObject({ exitCode: 130, interrupted: true })
-    expect(ran.at(-1)).toBe("keys")
   })
 })

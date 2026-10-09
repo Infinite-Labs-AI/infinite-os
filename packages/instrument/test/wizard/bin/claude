@@ -6,7 +6,7 @@ import { randomUUID } from "node:crypto"
 import { readdirSync, readFileSync, statSync } from "node:fs"
 import { dirname } from "node:path"
 
-import { emit, envSnapshot, loadScenario, McpClient, priorRuns, readStdin, record, runSteps, withReadCheck } from "./fake-agent-lib.mjs"
+import { emit, envSnapshot, isJobsReviewSchema, jobsReviewAnswer, jobsReviewTurn, loadScenario, McpClient, priorRuns, readStdin, record, runSteps, withReadCheck } from "./fake-agent-lib.mjs"
 
 const argv = process.argv.slice(2)
 const scenario = loadScenario("claude")
@@ -32,6 +32,16 @@ const turns = scenario.turns ?? [{}]
 const turn = turns[Math.min(index, turns.length - 1)] ?? {}
 const stdin = await readStdin()
 const role = argv.includes("--no-session-persistence") ? "reviewer" : "worker"
+const jsonSchema = flag("--json-schema")
+if (role === "reviewer" && jsonSchema && isJobsReviewSchema(JSON.parse(jsonSchema))) {
+  // The jobs' review: its own turns (`jobsReview`), never one of the step-9 review's.
+  const jobsTurn = jobsReviewTurn(scenario, "claude")
+  record({ kind: "jobs_review", agent: "claude", argv, cwd: process.cwd(), stdin })
+  const session = randomUUID()
+  emit({ type: "system", subtype: "init", session_id: session, apiKeySource: "none", tools: (flag("--tools") ?? "").split(",").filter(Boolean), mcp_servers: [], model: flag("--model") ?? "default", permissionMode: flag("--permission-mode") })
+  emit({ type: "result", subtype: "success", is_error: false, session_id: session, num_turns: 1, result: "", permission_denials: [], structured_output: jobsReviewAnswer(jobsTurn, process.cwd()) })
+  process.exit(jobsTurn.exit ?? 0)
+}
 record({ kind: "run", agent: "claude", role, argv, cwd: process.cwd(), env: envSnapshot(), stdin, cwdEntries: readdirSync(process.cwd()) })
 
 const sessionId = flag("--resume") ?? flag("--session-id") ?? randomUUID()
@@ -67,7 +77,11 @@ await runSteps(turn.steps, {
   agent: "claude",
   cwd: process.cwd(),
   mcp,
-  onEdit: (path) => emit({ type: "assistant", session_id: sessionId, message: { content: [{ type: "tool_use", id: randomUUID(), name: "Edit", input: { file_path: `${process.cwd()}/${path}`, old_string: "x", new_string: "y" } }] } }),
+  onEdit: (path) => {
+    const id = randomUUID()
+    emit({ type: "assistant", session_id: sessionId, message: { content: [{ type: "tool_use", id, name: "Edit", input: { file_path: `${process.cwd()}/${path}`, old_string: "x", new_string: "y" } }] } })
+    emit({ type: "user", session_id: sessionId, message: { content: [{ type: "tool_result", tool_use_id: id, content: "updated" }] } })
+  },
   onTool: (tool, args) => emit({ type: "assistant", session_id: sessionId, message: { content: [{ type: "tool_use", id: randomUUID(), name: `mcp__infinite_tag__${tool}`, input: args }] } })
 })
 mcp?.close()

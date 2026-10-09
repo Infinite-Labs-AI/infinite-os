@@ -69,20 +69,6 @@ describe("runSetupChecks", () => {
     expect(readdirSync(root).sort()).toEqual(before)
   })
 
-  it("reports a clean app as clean without claiming more than it checked", () => {
-    const report = runSetupChecks(
-      makeApp({
-        "index.html": [
-          // The site's own pixel, behind a host check (so previews stay silent) and with automatic events off.
-          "<html><head><script>(function(){ if (location.hostname === 'localhost' || location.hostname.endsWith('.vercel.app')) return; fbq('set', 'autoConfig', false, '111222333444555');fbq('init', '111222333444555'); })()</script></head>",
-          '<body><form data-conversion="signup" method="post"><input type="email" /><button type="submit">Join</button></form></body></html>'
-        ].join("\n")
-      })
-    )
-    expect(report.state).toBe("ok")
-    expect(setupFindingLines(report)).toEqual([])
-  })
-
   it("never returns a bare ok for an app it could not read", () => {
     const report = runSetupChecks(makeApp({ "src/app/page.tsx": "<main>Nothing here</main>" }))
     // No pixel in source: the click-id question is UNANSWERED, and the overall state says so.

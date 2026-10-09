@@ -89,16 +89,11 @@ export function silentFormMessage(input: {
 }): string {
   return (
     `Worth checking: the <form> at ${input.file}:${input.line} submits (${input.submitVia}) and ` +
-    `emits no conversion event — there is no \`data-conversion\` on the form or anywhere inside it, ` +
-    `no \`data-analytics-cta-id\` on its submit control, and no analytics call in this file. It ` +
-    `looks like a lead form (${input.leadSignal}). A form like this is usually the most valuable ` +
-    `event on the site and the easiest one to miss, because a missing event is indistinguishable ` +
-    `from nobody filling it in — the harness's receipt lanes can only ask whether an event arrived, ` +
-    `and nothing here ever tries to send one. If it IS a conversion, add \`data-conversion="signup"\` ` +
-    `to the <form> tag itself (not to the button — see the placement check) and re-run verify. If it ` +
-    `is NOT — search, filtering, login, newsletter, comments — ignore this line; this check writes ` +
-    `nothing and changes nothing. Ignored, the cost is that every submission stays invisible, so ads ` +
-    `and pages that actually produce customers cannot be told apart from ones that produce nothing.`
+    `the source check did not find supported conversion marking. It looks like a lead form ` +
+    `(${input.leadSignal}). This check does not follow imported or custom handlers; an existing ` +
+    `success handler may already report it. Check that handler before adding anything. If it needs ` +
+    `tracking, use this run's approved conversion name in its successful response branch and put ` +
+    `the matching data-conversion marker on the <form> itself. A marker alone does not send a completed conversion.`
   )
 }
 
@@ -120,15 +115,11 @@ export function clickIdNotAtLandingMessage(input: {
   sharedCandidates: readonly string[]
 }): string {
   return (
-    `A Meta pixel initialises only in page-scoped files (${input.initFiles.join(", ")}), not in a ` +
-    `shared entry point. Meta writes the \`_fbc\` click-id cookie from the \`fbclid\` parameter on ` +
-    `the URL of the page the pixel runs on, and an ad click puts \`fbclid\` on the LANDING url only ` +
-    `— by the time a visitor reaches a conversion or thank-you page it is gone, and the pixel there ` +
-    `has nothing to save. ${FBC_GUIDANCE} Move the pixel bootstrap into the entry the whole site ` +
-    `loads (${input.sharedCandidates.join(" or ")}) so it runs on the first page a visitor lands on. ` +
-    `Until then every conversion you send reaches Meta with no click id: Meta cannot attribute it to ` +
-    `the ad that produced it, the campaign reads as unprofitable, and the creative gets blamed for ` +
-    `spend that actually worked.`
+    `A Meta pixel initialises in ${input.initFiles.join(", ")}, but this source check could not prove ` +
+    `that it runs on every landing page. It does not follow imports to establish site-wide coverage. ` +
+    `Check whether the existing module already loads through ${input.sharedCandidates.join(" or ") || "the app entry"}. ` +
+    `The _fbc cookie needs the landing URL's fbclid before navigation removes it. ${FBC_GUIDANCE} ` +
+    `If the existing entry does not cover landings, add capture at the shared entry without changing consent code.`
   )
 }
 
@@ -165,10 +156,10 @@ export function clickIdPresentMessage(input: { file: string }): string {
 /** The managed `_fbc` capture is installed in a shared entry. */
 export function clickIdManagedCaptureMessage(input: { file: string }): string {
   return (
-    `infinite-tag's managed click-id capture runs in ${input.file}, a shared entry that loads on ` +
-    `every route. On the page a visitor lands on it saves the ad's \`fbclid\` into Meta's own ` +
-    `\`_fbc\` cookie — last click wins — even when the pixel itself is blocked or still waiting, so ` +
-    `a later conversion can still be credited to the ad. That is the setup being right; it is not ` +
+    `infinite-tag's managed click-id capture loads in ${input.file} on every route. On a landing ` +
+    `with an ad's \`fbclid\`, it saves the last click in Meta's \`_fbc\` cookie when consent allows, ` +
+    `even if the pixel is blocked or still waiting. Required consent waits for a grant; a recorded no, ` +
+    `Do Not Track or Global Privacy Control writes no cookie. That is the setup being right; it is not ` +
     `proof a cookie was written on your live site.`
   )
 }
@@ -329,7 +320,7 @@ export function providerMultipleIdsMessage(input: { tool: string; ids: ReadonlyA
 export function posthogUnreadableMessage(input: { file: string; line: number }): string {
   return (
     `The PostHog init at ${input.file}:${input.line} takes its options from a variable or expression, so its proxy, ` +
-    `page-view and privacy settings could not be read from source. This is "not checked", not "fine".`
+    `page-view, session replay and click-capture settings could not be read from source. This is "not checked", not "fine".`
   )
 }
 
@@ -360,7 +351,7 @@ export function posthogRegionMismatchMessage(input: { file: string; line: number
 export function posthogPrivacyChangedMessage(input: { file: string; option: string; before: string; after: string }): string {
   return (
     `\`${input.option}\` in ${input.file} changed from ${input.before} to ${input.after}. Session replay and click ` +
-    `capture are the site owner's privacy and billing choices; infinite-tag never changes them without an approved ` +
+    `capture are the site owner's tracking and billing choices; infinite-tag never changes them without an approved ` +
     `sensitive-pages plan line. Revert this edit.`
   )
 }
@@ -389,15 +380,15 @@ export function hostGuardSilencesProductionMessage(input: { tool: string; file: 
 export function sensitivePagesMessage(input: { routes: readonly string[]; remaining: number }): string {
   const more = input.remaining > 0 ? ` and ${input.remaining} more` : ""
   return (
-    `Worth checking: PostHog session replay and click capture are on for ${input.routes.length + input.remaining} ` +
+    `Worth checking: this site uses PostHog and has ${input.routes.length + input.remaining} ` +
     `sensitive page${input.routes.length + input.remaining === 1 ? "" : "s"} (${input.routes.join(", ")}${more}). ` +
-    `Recordings of login, payment and confirmation pages can capture what people type there. A plan line can turn ` +
+    `This source check could not confirm that session replay and click capture are both off there. A plan line can turn ` +
     `replay and click capture off on those pages only; nothing changes without your OK.`
   )
 }
 
-export function sensitivePagesHandledMessage(input: { file: string }): string {
-  return `PostHog in ${input.file} already turns replay or click capture off for sensitive pages.`
+export function sensitivePagesHandledMessage(input: { file: string; bothOff?: boolean }): string {
+  return `PostHog in ${input.file} already turns replay ${input.bothOff ? "and" : "or"} click capture off for sensitive pages.`
 }
 
 export function metaEventIdPageBuiltMessage(input: { file: string; line: number }): string {
@@ -405,7 +396,7 @@ export function metaEventIdPageBuiltMessage(input: { file: string; line: number 
     `A Meta event id is built in the page at ${input.file}:${input.line}. Meta merges a browser event with its server ` +
     `twin only when both carry the SAME id, and the page cannot know the id the server sent — so this event is ` +
     `either counted twice or, when the server sent nothing, it is a phantom conversion. Fire the browser event only ` +
-    `with the \`metaEventId\` the server returned (\`infiniteMetaMirror(metaEventId)\`), and stay silent when it is null.`
+    `with the \`metaEventId\` the server returned (\`infiniteMetaMirror(metaEventName, metaEventId)\`), and stay silent when it is null.`
   )
 }
 

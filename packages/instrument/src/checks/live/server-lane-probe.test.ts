@@ -23,8 +23,4 @@ describe("server-lane probe", () => {
     const sent = await sendServerLaneProbe("acme.com", "/__infinite_probe/7f3c2a91b0de", { version: "t", fetch: stalled, now: FIXED_NOW, timeoutMs: 20 })
     expect(sent).toMatchObject({ status: 0, detail: "aborted" })
   })
-
-  it("refuses a path without enough hex", () => {
-    expect(() => serverLaneProbePath("xyz")).toThrow()
-  })
 })

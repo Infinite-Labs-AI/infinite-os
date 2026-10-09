@@ -110,7 +110,7 @@ export function gradeWords(check: CheckResult, host: string | null): string {
     case "no_pii":
       return "sends personal data"
     case "held_by_consent":
-      return "waits for consent (not counted as a problem)"
+      return "kept off by your cookie banner until a visitor accepts"
     case "previews_send_data":
       return "fires on previews"
     default:
@@ -242,7 +242,7 @@ export function liveTodayColumnInput(source: LiveTodaySource): LiveTodayColumnIn
 
   // 9 consent_recorded.
   const consent = source.keys.infinite.consentMode
-  facts.push({ input: "keys.consent_mode", state: consent ? "pass" : "problem", display: consent ? consentWords(consent) : "not recorded", at })
+  facts.push({ input: "keys.consent_mode", state: "info", display: consent ? consentWords(consent) : "not recorded", at })
 
   // 11 ga4_key_events_received.
   const keyEvents = source.baseline?.ga4.keyEvents ?? null
@@ -284,7 +284,7 @@ function ga4PageViewsPerVisit(dry: LiveTodaySource["dryLive"]): number | null {
 }
 
 function consentWords(mode: "not_required" | "required"): string {
-  return mode === "required" ? "ask first (consent required)" : "collect by default"
+  return mode === "required" ? "waits for your banner's yes" : "starts with your site's own analytics, or on page load if it has none"
 }
 
 function rowsFor(
@@ -366,8 +366,8 @@ function rowsFor(
   // Consent setting.
   const consent = source.keys.infinite.consentMode
   rows.consent_setting = consent
-    ? { value: consent, display: consentWords(consent), state: "pass", source: "cloud_read", at }
-    : { value: "not recorded", display: "not recorded", state: "problem", source: "cloud_read", at }
+    ? { value: consent, display: consentWords(consent), state: "info", source: "cloud_read", at }
+    : { value: "not recorded", display: "not recorded", state: "info", source: "cloud_read", at }
 
   // Live test per tool.
   const graded = tools.map((tool) => grades[tool]).filter((grade): grade is CheckResult => grade !== undefined)

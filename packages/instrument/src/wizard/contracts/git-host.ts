@@ -66,10 +66,10 @@ export interface GitOps {
   /** Never `-n`, `--no-verify`, `--no-gpg-sign` or `--amend`. Hooks run. */
   commit(input: { message: string; trailers: Record<string, string> }): Promise<{ sha: string; hookRewrote: string[] }>
   /** Never `-f`; never the base. */
-  push(branch: string): Promise<void>
+  push(branch: string, sha?: string): Promise<void>
   /** §3g.4 step 5: after `gh pr update-branch`, `git pull --ff-only origin <branch>` (never a merge commit or rebase). */
   pullFfOnly(branch: string): Promise<{ headSha: string }>
-  worktreeAddDetached(sha: string): Promise<{ dir: string }>
+  worktreeAddDetached(sha: string, purpose?: "baseline"): Promise<{ dir: string }>
   worktreeRemove(dir: string): Promise<void>
   diff(from: string, to: string): Promise<string>
   isAncestor(ancestor: string, descendant: string): Promise<boolean>
@@ -113,8 +113,12 @@ export interface GitHostAdapter {
   kind: GitHostKind
   auth(): Promise<{ ok: boolean; login: string | null }>
   /** `homepageUrl` (§3y.1, optional): the repo's homepage, a hint for the live-site ask only. */
-  repoFacts(): Promise<{ isPrivate: boolean; defaultBranch: string | null; viewerPermission: string | null; homepageUrl?: string | null } | Unsupported>
-  findPr(branch: string): Promise<PrSummary | null | Unsupported>
+  repoFacts(): Promise<{ isPrivate: boolean; defaultBranch: string | null; viewerPermission: string | null; homepageUrl?: string | null; allowForking?: boolean | null; nameWithOwner?: string | null } | Unsupported>
+  /** Creates the viewer's fork only after the early shipping choice was approved. */
+  createFork?(preferSsh: boolean): Promise<{ remoteUrl: string; headOwner: string }>
+  findPr(branch: string, headOwner?: string | null): Promise<PrSummary | null | Unsupported>
+  /** Read-only notice of this author's older marked wizard PRs on other branches. */
+  olderWizardPrs?(branch: string): Promise<Array<{ number: number }>>
   createDraftPr(input: { base: string; head: string; title: string; bodyFile: string }): Promise<PrSummary | Unsupported>
   readPr(number: number): Promise<PrSummary | Unsupported>
   readThreads(number: number): Promise<ReviewThread[] | Unsupported>
@@ -131,6 +135,8 @@ export interface GitHostAdapter {
   /** Merge-commit default; never `--rebase`. */
   updateBranch(number: number): Promise<void | Unsupported>
   previewUrl(sha: string): Promise<string | null | Unsupported>
+  /** A terminal Vercel preview failure for this SHA; optional on non-GitHub hosts and older adapters. */
+  previewFailure?(sha: string): Promise<{ reason: string; blocked: boolean } | null | Unsupported>
   rules(base: string): Promise<{ requiresReview: boolean; mergeQueue: boolean } | Unsupported>
 }
 
@@ -149,6 +155,13 @@ export interface StatusEntry {
 
 /** `GitOps` plus what the PR loop, the fence and the resume need (lane O4's `createGitOps` implements it). */
 export interface WizardGitOps extends GitOps {
+  commitsBetween?(from: string, to: string): Promise<Array<{ sha: string; subject: string; runId: string | null }>>
+  ownsBaselineWorktree?(dir: string, root: string): boolean
+  worktreeList?(): Promise<string[]>
+  isIgnored?(path: string): Promise<boolean>
+  /** The validated fork destination for pushes and review fast-forwards; origin stays the production base. */
+  setPushRemote?(remoteUrl: string | null): void
+  pushCommand?(branch: string, sha?: string): string
   /** `git status --porcelain=v1 -z --untracked-files=all` (ignored files excluded). */
   statusEntries(): Promise<StatusEntry[]>
   /** The file at a revision (`git show <rev>:<path>`), or null when it does not exist there. */
@@ -168,7 +181,7 @@ export interface WizardGitOps extends GitOps {
   /** `git merge-base <a> <b>`, or null (no common commit). B25: a run rebuilt from its PR marker re-derives its base SHA. */
   mergeBase?(a: string, b: string): Promise<string | null>
   /** GitLab: push with merge-request push options (§3g.2). */
-  pushWithOptions(branch: string, pushOptions: readonly string[]): Promise<void>
+  pushWithOptions(branch: string, pushOptions: readonly string[], sha?: string): Promise<void>
   /** True once the user owns the terminal (SSH may then prompt for a passphrase). */
   setTtyHandedOver(handedOver: boolean): void
   /** The base recorded by `createBranch` (or `setBase` on resume): pushes to it are refused. */

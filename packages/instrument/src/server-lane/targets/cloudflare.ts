@@ -25,11 +25,10 @@ import { SERVER_LANE_SECRET_ENV, SERVER_LANE_SOURCE_KEY_ENV } from "../helpers.j
 import {
   edgeLaneCoreSource,
   managedGeneratedFile,
-  outcomeHelperSource,
-  outcomeHelperTarget,
   type ServerLaneTargetDefinition,
   type TargetBuildInput
 } from "./shared.js"
+import { outcomeHelperOptionsFor, outcomeHelperSource } from "./outcome-helper.js"
 
 export const CLOUDFLARE_MIDDLEWARE_PATH = "functions/_middleware.ts"
 export const CLOUDFLARE_OUTCOME_PATH = "lib/infinite-outcome.ts"
@@ -49,11 +48,15 @@ export function cloudflarePagesMiddlewareSource(input: TargetBuildInput): string
     String.raw`${edgeLaneCoreSource({ ...input, exported: false })}
 
 /** The Pages Functions context: https://developers.cloudflare.com/pages/functions/api-reference/ */
+function infiniteIgnoreTaskFailure(task: Promise<unknown>): void {
+  void task.catch(() => undefined)
+}
+
 interface InfiniteCloudflareContext {
   request: Request
   env: Record<string, string | undefined>
   next: () => Promise<Response>
-  waitUntil: (promise: Promise<unknown>) => void
+  waitUntil: typeof infiniteIgnoreTaskFailure
 }
 
 export const onRequest = async (context: InfiniteCloudflareContext): Promise<Response> => {
@@ -61,13 +64,13 @@ export const onRequest = async (context: InfiniteCloudflareContext): Promise<Res
     const request = context.request
     const path = new URL(request.url).pathname
     if (isInfiniteDocumentRequest(request, path)) {
-      context.waitUntil(
-        recordInfiniteDocumentRequest(request, {
+      const task = recordInfiniteDocumentRequest(request, {
           secret: context.env[${JSON.stringify(SERVER_LANE_SECRET_ENV)}] ?? "",
           sourceKey: context.env[${JSON.stringify(SERVER_LANE_SOURCE_KEY_ENV)}] ?? "",
           clientIp: request.headers.get("cf-connecting-ip") ?? undefined
-        })
-      )
+      })
+      if (typeof context.waitUntil === "function") context.waitUntil(task)
+      else infiniteIgnoreTaskFailure(task)
     }
   } catch {
     // The lane never affects the response.
@@ -82,11 +85,11 @@ export const cloudflarePagesTarget: ServerLaneTargetDefinition = {
   label: "Cloudflare Pages functions/_middleware.ts",
   installPackages: [],
   files: (appRootAbsolute) => [
-    { path: outcomeHelperTarget(appRootAbsolute).path, role: "module" },
+    { path: outcomeHelperOptionsFor(appRootAbsolute).path, role: "module" },
     { path: CLOUDFLARE_MIDDLEWARE_PATH, role: "entry" }
   ],
   build: (input, appRootAbsolute) => {
-    const outcome = outcomeHelperTarget(appRootAbsolute)
+    const outcome = outcomeHelperOptionsFor(appRootAbsolute)
     return {
       [outcome.path]: outcomeHelperSource(input, outcome),
       [CLOUDFLARE_MIDDLEWARE_PATH]: cloudflarePagesMiddlewareSource(input)

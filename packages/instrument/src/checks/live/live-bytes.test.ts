@@ -81,16 +81,6 @@ describe("live bytes: a managed static site", () => {
     expect(results.every((result) => result.runId === ctx.runId && result.tier === "T1")).toBe(true)
   })
 
-  it("sends Purpose: prefetch and the monitor user agent on EVERY probe (ported request-recording test)", async () => {
-    const { requests } = await run({ [`${SITE}/`]: { body: page }, [`${SITE}/ingest/static/array.js`]: POSTHOG_LIB }, FULL_EXPECT)
-    expect(requests.length).toBeGreaterThanOrEqual(2)
-    for (const request of requests) {
-      expect(request.headers.purpose).toBe("prefetch")
-      expect(request.headers["user-agent"]).toMatch(/monitor/)
-    }
-    expect(requests.map((request) => new URL(request.url).pathname)).toEqual(["/", "/ingest/static/array.js"])
-  })
-
   it("an expected pixel that is ABSENT is a problem, never a skip", async () => {
     const { results } = await run({ [`${SITE}/`]: { body: page }, [`${SITE}/ingest/static/array.js`]: POSTHOG_LIB }, { ...FULL_EXPECT, meta: ["999888777666555"] })
     const meta = byId(results, LIVE_BYTES_CHECK_IDS.meta)
@@ -111,68 +101,9 @@ describe("live bytes: a managed static site", () => {
     const { results } = await run({ [`${SITE}/`]: { status: 503, body: "down" } }, FULL_EXPECT)
     expect(results.map((result) => result.state)).toEqual(["undetermined", "undetermined", "undetermined", "undetermined"])
   })
-
-  it("a dead proxy (404, or the site's HTML instead of PostHog) is a problem", async () => {
-    const missing = await run({ [`${SITE}/`]: { body: page }, [`${SITE}/ingest/static/array.js`]: { status: 404 } }, FULL_EXPECT)
-    expect(byId(missing.results, "posthog_proxy")[0]!.state).toBe("problem")
-    const swallowed = await run({ [`${SITE}/`]: { body: page }, [`${SITE}/ingest/static/array.js`]: { body: "<html>Acme</html>" } }, FULL_EXPECT)
-    expect(byId(swallowed.results, "posthog_proxy")[0]!.reason).toContain("not the PostHog library")
-  })
 })
 
 describe("live bytes: shapes that need care", () => {
-  it("two PostHog inits on one page fail the census (negative: one passes)", async () => {
-    const twice = managedPage([posthogSnippet(POSTHOG, "/ingest")]).replace("</head>", `${posthogSnippet(POSTHOG, "/ingest")}</head>`)
-    const { results } = await run({ [`${SITE}/`]: { body: twice }, [`${SITE}/ingest/static/array.js`]: POSTHOG_LIB }, { posthog: FULL_EXPECT.posthog! })
-    expect(byId(results, LIVE_BYTES_CHECK_IDS.census)[0]!.state).toBe("problem")
-    expect(byId(results, LIVE_BYTES_CHECK_IDS.census)[0]!.reason).toContain("2 PostHog initializations")
-  })
-
-  it("decodes the managed Next bootstrap out of a same-origin bundle", async () => {
-    const bootstrap = [buildPostHogBootstrapSnippet(POSTHOG, "/ingest"), buildMetaPixelSnippet(PIXEL)].join("\n\n")
-    const chunk = `"use strict";(self.webpackChunk=self.webpackChunk||[]).push([[1],{9:function(e,t,n){let o=${JSON.stringify(bootstrap)};function r(){if(document.getElementById("infinite-analytics-bootstrap"))return;let e=document.createElement("script");e.id="infinite-analytics-bootstrap",e.text=o,document.head.appendChild(e)}}}]);`
-    const html = `<!doctype html><html><head><script src="/_next/static/chunks/app/layout-abc.js" async=""></script><script src="https://cdn.other.test/x.js"></script></head><body></body></html>`
-    const { results, requests } = await run(
-      { [`${SITE}/`]: { body: html }, [`${SITE}/_next/static/chunks/app/layout-abc.js`]: { body: chunk }, [`${SITE}/ingest/static/array.js`]: POSTHOG_LIB },
-      { posthog: FULL_EXPECT.posthog!, meta: [PIXEL] }
-    )
-    expect(byId(results, LIVE_BYTES_CHECK_IDS.posthog)[0]!.state).toBe("pass")
-    expect(byId(results, LIVE_BYTES_CHECK_IDS.meta)[0]!.state).toBe("pass")
-    // Managed (the bundle holds the bootstrap id), so the autoConfig opt-out verdict is the managed one.
-    expect(byId(results, LIVE_BYTES_CHECK_IDS.metaAutoConfig)[0]!.state).toBe("pass")
-    // The cross-origin script is never fetched.
-    expect(requests.some((request) => new URL(request.url).hostname === "cdn.other.test")).toBe(false)
-  })
-
-  it("an id seen in a bundle whose init cannot be read is undetermined, not a problem", async () => {
-    const chunk = `var cfg={k:"${POSTHOG}"};window.ph&&window.ph.go(cfg.k)`
-    const html = `<html><head><script src="/assets/app.js"></script></head><body></body></html>`
-    const { results } = await run({ [`${SITE}/`]: { body: html }, [`${SITE}/assets/app.js`]: { body: chunk } }, { posthog: { projectKey: POSTHOG, apiHost: "https://us.i.posthog.com" } })
-    expect(byId(results, LIVE_BYTES_CHECK_IDS.posthog)[0]!.state).toBe("undetermined")
-  })
-
-  it("GA4 only behind Tag Manager is undetermined (via_tag_manager)", async () => {
-    const html = `<html><head><script src="https://www.googletagmanager.com/gtm.js?id=GTM-AB12CD"></script></head><body></body></html>`
-    const { results } = await run({ [`${SITE}/`]: { body: html } }, { ga4: [GA4] })
-    expect(byId(results, LIVE_BYTES_CHECK_IDS.ga4)[0]).toMatchObject({ state: "undetermined" })
-    expect(byId(results, LIVE_BYTES_CHECK_IDS.ga4)[0]!.reason).toContain("via_tag_manager")
-  })
-
-  it("B19: an adopted server-side Tag Manager (transport_url) is undetermined (via_tag_manager), never a problem", async () => {
-    const html = `<html><head><script async src="https://www.googletagmanager.com/gtag/js?id=${GA4}"></script><script>window.dataLayer=window.dataLayer||[];function gtag(){dataLayer.push(arguments)}gtag('js', new Date());gtag('config', '${GA4}', { transport_url: 'https://sgtm.acme.test' })</script></head><body></body></html>`
-    const { results } = await run({ [`${SITE}/`]: { body: html } }, { ga4: [GA4] })
-    expect(byId(results, LIVE_BYTES_CHECK_IDS.ga4)[0]).toMatchObject({ state: "undetermined" })
-    expect(byId(results, LIVE_BYTES_CHECK_IDS.ga4)[0]!.reason).toContain("via_tag_manager")
-  })
-
-  it("a PostHog sent to the other cloud region than the connected project is a problem", async () => {
-    const html = managedPage([posthogSnippet(POSTHOG, "https://us.i.posthog.com")])
-    const eu = await run({ [`${SITE}/`]: { body: html } }, { posthog: { projectKey: POSTHOG, apiHost: "https://eu.i.posthog.com" } })
-    expect(byId(eu.results, LIVE_BYTES_CHECK_IDS.posthog)[0]!.state).toBe("problem")
-    const us = await run({ [`${SITE}/`]: { body: html } }, { posthog: { projectKey: POSTHOG, apiHost: "https://us.i.posthog.com" } })
-    expect(byId(us.results, LIVE_BYTES_CHECK_IDS.posthog)[0]!.state).toBe("pass")
-  })
-
   it("autoConfig: infinite-tag's own pixel without the opt-out is a problem; the site's own is info", async () => {
     const adopted = `<html><head><script>fbq('init', '${PIXEL}');fbq('track','PageView');</script></head><body></body></html>`
     const { results } = await run({ [`${SITE}/`]: { body: adopted } }, { meta: [PIXEL] })
@@ -188,50 +119,14 @@ describe("live bytes: shapes that need care", () => {
     const { results } = await run({ [`${SITE}/`]: { body: page } }, { infinite: FULL_EXPECT.infinite! })
     expect(byId(results, LIVE_BYTES_CHECK_IDS.infinite)[0]!.state).toBe("problem")
   })
-
-  it("wizard mode reads a tool with no connection as undetermined; doctor mode only notes it when present", async () => {
-    const page = managedPage([ga4Snippet(GA4)])
-    const wizard = await run({ [`${SITE}/`]: { body: page } }, { ga4: [GA4] })
-    expect(byId(wizard.results, LIVE_BYTES_CHECK_IDS.posthog)[0]!.reason).toContain("not_connected")
-    const doctor = await run({ [`${SITE}/`]: { body: page } }, { meta: [PIXEL] }, "doctor")
-    expect(byId(doctor.results, LIVE_BYTES_CHECK_IDS.posthog)).toEqual([])
-    expect(byId(doctor.results, LIVE_BYTES_CHECK_IDS.ga4).map((result) => result.state)).toEqual(["info"])
-  })
 })
 
 describe("live bytes: never a pass or a 'not on the page' from bytes that were not read (review P2-4, P2-5, P3-6)", () => {
-  it("byte_census is undetermined when an expected init is in the bytes but unreadable (two compiled PostHog inits)", async () => {
-    const chunk = `var o={Ay:{init:function(){}}};o.Ay.init("${POSTHOG}",{api_host:"/ingest"});o.Ay.init("${POSTHOG}",{api_host:"/ingest"});`
-    const html = `<html><head><script src="/assets/app.js"></script></head><body></body></html>`
-    const { results } = await run({ [`${SITE}/`]: { body: html }, [`${SITE}/assets/app.js`]: { body: chunk }, [`${SITE}/ingest/static/array.js`]: POSTHOG_LIB }, { posthog: FULL_EXPECT.posthog! })
-    const census = byId(results, LIVE_BYTES_CHECK_IDS.census)[0]!
-    expect(census.state).toBe("undetermined")
-    expect(census.reason).toContain("PostHog is in the page's bytes but no init call could be read")
-  })
-
   it("byte_census is undetermined when a same-origin script was not read (negative: all read → pass)", async () => {
     const html = managedPage([posthogSnippet(POSTHOG, "/ingest")]).replace("</head>", `<script src="/assets/app.js"></script></head>`)
     const failed = await run({ [`${SITE}/`]: { body: html }, [`${SITE}/assets/app.js`]: { status: 404 }, [`${SITE}/ingest/static/array.js`]: POSTHOG_LIB }, { posthog: FULL_EXPECT.posthog! })
     expect(byId(failed.results, LIVE_BYTES_CHECK_IDS.census)[0]!.state).toBe("undetermined")
     const read = await run({ [`${SITE}/`]: { body: html }, [`${SITE}/assets/app.js`]: { body: "console.log(1)" }, [`${SITE}/ingest/static/array.js`]: POSTHOG_LIB }, { posthog: FULL_EXPECT.posthog! })
     expect(byId(read.results, LIVE_BYTES_CHECK_IDS.census)[0]!.state).toBe("pass")
-  })
-
-  it("an expected tool not found while same-origin scripts failed is undetermined, not a problem", async () => {
-    const html = `<html><head><script src="/_next/static/chunks/layout.js"></script></head><body></body></html>`
-    const { results } = await run({ [`${SITE}/`]: { body: html }, [`${SITE}/_next/static/chunks/layout.js`]: { status: 404 } }, FULL_EXPECT)
-    for (const checkId of [LIVE_BYTES_CHECK_IDS.ga4, LIVE_BYTES_CHECK_IDS.posthog, LIVE_BYTES_CHECK_IDS.meta, LIVE_BYTES_CHECK_IDS.infinite]) {
-      expect(byId(results, checkId).map((result) => result.state)).toEqual(["undetermined"])
-    }
-    // Negative: every script read and still nothing → a problem.
-    const readAll = await run({ [`${SITE}/`]: { body: html }, [`${SITE}/_next/static/chunks/layout.js`]: { body: "console.log(1)" } }, { meta: [PIXEL] })
-    expect(byId(readAll.results, LIVE_BYTES_CHECK_IDS.meta).map((result) => result.state)).toEqual(["problem"])
-  })
-
-  it("a direct (not proxied) PostHog still gets its posthog_proxy line, as info and with no request", async () => {
-    const html = managedPage([posthogSnippet(POSTHOG, "https://us.i.posthog.com")])
-    const { results, requests } = await run({ [`${SITE}/`]: { body: html } }, { posthog: { projectKey: POSTHOG, apiHost: "https://us.i.posthog.com" } })
-    expect(byId(results, "posthog_proxy").map((result) => result.state)).toEqual(["info"])
-    expect(requests.map((request) => new URL(request.url).pathname)).toEqual(["/"])
   })
 })

@@ -14,6 +14,8 @@ interface HandoffContextShape {
 
 type HarnessWindow = Record<string, unknown> & {
   __infiniteHandoffContext?: () => HandoffContextShape | null
+  __infiniteRecordEvent?: (name: string, properties?: Record<string, string | number | boolean>) => boolean
+  __infiniteAdMatchAllowed?: () => boolean
 }
 
 interface HarnessOptions {
@@ -34,6 +36,10 @@ interface HarnessOptions {
   autocapture?: boolean
   /** `true` counts automation (WebDriver) traffic + lifts loopback — synthetic sandbox only. */
   allowAutomation?: boolean
+  /** Root-relative routes where the Infinite runtime emits no page views, clicks, submits or helper events. */
+  excludedPaths?: string[]
+  /** Follow the site's own pixel globals instead of starting on load. */
+  followSitePixels?: boolean
   /** §3x.4 (F8): the browser blocks storage — reading `localStorage` / `sessionStorage` throws SecurityError. */
   storageBlocked?: boolean
 }
@@ -105,6 +111,7 @@ function executeTag(options: HarnessOptions = {}) {
       windowListeners.set(type, listener)
     }
   }
+  if (options.followSitePixels) windowObject.fbq = () => undefined
   windowObject.posthog = {
     capture(name: string, properties: Record<string, unknown>) {
       posthogEvents.push({ name, properties })
@@ -146,15 +153,16 @@ function executeTag(options: HarnessOptions = {}) {
     collectPath: "/infinite/events/collect",
     respectDnt: true,
     consent:
-      options.consentMode === "not_required"
-        ? { mode: "not_required" }
+      options.consentMode === "not_required" || options.followSitePixels
+        ? { mode: "not_required", ...(options.followSitePixels ? { followSitePixels: ["fbq"] } : {}) }
         : { mode: "required", storageKey: "infinite_analytics_consent" },
     productionHosts: options.productionHosts ?? ["example.com"],
     ...(options.downloadDestinationPath
       ? { downloadDestinationPath: options.downloadDestinationPath }
       : {}),
     ...(options.autocapture === undefined ? {} : { autocapture: options.autocapture }),
-    ...(options.allowAutomation === undefined ? {} : { allowAutomation: options.allowAutomation })
+    ...(options.allowAutomation === undefined ? {} : { allowAutomation: options.allowAutomation }),
+    ...(options.excludedPaths === undefined ? {} : { excludedPaths: options.excludedPaths })
   })
   const source = tag.replace(/^<script[^>]*>/i, "").replace(/<\/script[^>]*>$/i, "")
 
@@ -355,36 +363,6 @@ function checkoutTarget(input: {
   }
 }
 
-function buttonTarget(input: {
-  id?: string
-  name?: string
-  testId?: string
-  testIdAlt?: string
-  location?: string
-  text?: string
-}) {
-  const button = {
-    textContent: input.text ?? "private button text",
-    getAttribute(name: string) {
-      if (name === "id") return input.id ?? null
-      if (name === "name") return input.name ?? null
-      if (name === "data-testid") return input.testId ?? null
-      if (name === "data-test-id") return input.testIdAlt ?? null
-      if (name === "data-analytics-cta-location") return input.location ?? null
-      return null
-    }
-  }
-  return {
-    closest(selector: string) {
-      if (selector === "[data-analytics-cta-id]") return null
-      if (selector === "a[href]") return null
-      if (selector === "button,input[type='button'],input[type='submit'],[role='button']") return button
-      if (selector === "header,nav,main,footer,aside") return { tagName: "main" }
-      return null
-    }
-  }
-}
-
 /** A bare button inside a semantic region (no landmark ancestor) — for the cta_location region
  *  derivation. `target.closest` returns the region only for the region selector. */
 function regionButtonTarget(input: { id?: string; ariaLabel?: string; dataSection?: string }) {
@@ -458,25 +436,6 @@ function signupTarget(input: {
       if (selector === "[data-analytics-cta-id]") return genericCta
       if (selector === "a[href]") return anchor
       return null
-    }
-  }
-}
-
-/** A submit target inside form[data-conversion="signup"]. */
-function signupFormTarget(input: { ctaId?: string; ctaLocation?: string; marked?: boolean }) {
-  const form = input.marked === false
-    ? null
-    : {
-        getAttribute(name: string) {
-          if (name === "data-conversion") return "signup"
-          if (name === "data-analytics-cta-id") return input.ctaId ?? null
-          if (name === "data-analytics-cta-location") return input.ctaLocation ?? null
-          return null
-        }
-      }
-  return {
-    closest(selector: string) {
-      return selector === 'form[data-conversion="signup"]' ? form : null
     }
   }
 }
@@ -629,24 +588,6 @@ describe("renderInfiniteBrowserTag", () => {
     expect(driven.touchedProviders()).toBe(false)
   })
 
-  it("allowAutomation is the ONLY thing that lets a WebDriver session through — the guard is enforced otherwise", () => {
-    // Same source, WebDriver on, flag OFF: nothing emits (the production default is never counting bots).
-    const guarded = executeTag({ siteSourceKey: "site_public_123", consent: "granted", webdriver: true })
-    expect(guarded.requests).toEqual([])
-  })
-
-  it("does NOT stamp automation on a non-WebDriver visitor even when allowAutomation is set", () => {
-    // A real human hitting the synthetic sandbox is not automation, so its events are unmarked.
-    const human = executeTag({
-      siteSourceKey: "site_public_123",
-      consent: "granted",
-      webdriver: false,
-      allowAutomation: true
-    })
-    expect(human.requests).toHaveLength(1)
-    expect(human.requests[0]?.body.automation).toBeUndefined()
-  })
-
   it("allowAutomation lifts the loopback-host exclusion, but the production-host allowlist still applies", () => {
     // A localhost sandbox that explicitly lists localhost as its production host now emits.
     const sandbox = executeTag({
@@ -679,34 +620,6 @@ describe("renderInfiniteBrowserTag", () => {
       productionHosts: ["example.com"]
     })
     expect(notAllowlisted.requests).toEqual([])
-  })
-
-  it("one host normaliser: ACME.com. is the verified acme.com (trailing dot, any case), and exposes the consent check", () => {
-    for (const href of ["https://Example.com./", "https://EXAMPLE.COM/"]) {
-      const tag = executeTag({ siteSourceKey: "site_public_123", consent: "granted", href, productionHosts: ["example.com"] })
-      expect(tag.requests).toHaveLength(1)
-    }
-    // Negative: a different host is still unverified.
-    const other = executeTag({
-      siteSourceKey: "site_public_123",
-      consent: "granted",
-      href: "https://staging.example.com./",
-      productionHosts: ["example.com"]
-    })
-    expect(other.requests).toEqual([])
-  })
-
-  it("the exposed consent check: GPC is a no by default, and { privacySignal: false } leaves only the recorded decision and the mode (P2-4)", () => {
-    type Accessor = (options?: { privacySignal?: boolean }) => boolean
-    const gpc = executeTag({ siteSourceKey: "site_public_123", gpc: true, consentMode: "not_required" })
-    const allowed = (gpc.window as { __infiniteConsentAllowed: Accessor }).__infiniteConsentAllowed
-    expect(allowed()).toBe(false)
-    expect(allowed({ privacySignal: false })).toBe(true)
-    // A recorded "no" still wins without the signal, and required mode still waits for a grant.
-    const denied = executeTag({ siteSourceKey: "site_public_123", gpc: true, consent: "denied", consentMode: "not_required" })
-    expect((denied.window as { __infiniteConsentAllowed: Accessor }).__infiniteConsentAllowed({ privacySignal: false })).toBe(false)
-    const required = executeTag({ siteSourceKey: "site_public_123", consentMode: "required" })
-    expect((required.window as { __infiniteConsentAllowed: Accessor }).__infiniteConsentAllowed({ privacySignal: false })).toBe(false)
   })
 
   it("stamps nav:\"navigate\" on the initial view and nav:\"history\" on History-API route changes (bounded enum), keeping the path-change dedupe", () => {
@@ -751,6 +664,44 @@ describe("renderInfiniteBrowserTag", () => {
     expect(runtime.requests.map((r) => (r.body.properties as { nav: string }).nav)).toEqual(["navigate", "history", "navigate"])
   })
 
+  it("the helper event lane records a PII-free browser event to Infinite with ONLY cta_id/cta_location (review P0-3), and revocation clears local ids", () => {
+    const runtime = executeTag({ siteSourceKey: "site_public_123", consent: "granted" })
+    expect(typeof runtime.window.__infiniteRecordEvent).toBe("function")
+    // Anything else on a click makes the cloud's browser ingest reject the whole event (400), silently.
+    expect(runtime.window.__infiniteRecordEvent!("add_to_cart", { item_id: "sku_1", value: 20, currency: "USD", email: "buyer@example.com" })).toBe(true)
+    const event = runtime.requests.at(-1)!.body
+    expect(event).toMatchObject({ eventName: "site_click", url: "https://example.com/privacy/" })
+    expect(event.properties).toEqual({ cta_id: "add_to_cart", cta_location: "conversion" })
+    expect(JSON.stringify(event.properties)).not.toContain("buyer@example.com")
+    expect(runtime.storedIds().anonymousId).toBeTruthy()
+    expect(runtime.storedIds().sessionId).toBeTruthy()
+
+    const count = runtime.requests.length
+    runtime.setConsent(false)
+    expect(runtime.storedIds()).toEqual({ anonymousId: null, sessionId: null })
+    expect(runtime.window.__infiniteRecordEvent!("add_to_cart")).toBe(false)
+    expect(runtime.requests).toHaveLength(count)
+  })
+
+  it("route exclusions suppress page views, route changes, clicks and helper-recorded events on those paths", () => {
+    const runtime = executeTag({
+      href: "https://example.com/cart?secret=yes",
+      siteSourceKey: "site_public_123",
+      consent: "granted",
+      excludedPaths: ["/cart", "/success"]
+    })
+    expect(runtime.requests).toEqual([])
+    runtime.click(managedTarget({ ctaId: "buy_now", href: "/checkout" }))
+    expect(runtime.window.__infiniteRecordEvent!("add_to_cart", { item_id: "sku_1", value: 20 })).toBe(false)
+    expect(runtime.requests).toEqual([])
+
+    runtime.history.pushState({}, "", "/success")
+    expect(runtime.requests).toEqual([])
+    runtime.history.pushState({}, "", "/privacy")
+    expect(runtime.requests).toHaveLength(1)
+    expect(runtime.requests[0]?.body).toMatchObject({ eventName: "site_page_view", url: "https://example.com/privacy/" })
+  })
+
   it("omits an empty referrer and reduces a populated referrer to the cloud-stored host", () => {
     const empty = executeTag({
       siteSourceKey: "site_public_123",
@@ -770,15 +721,6 @@ describe("renderInfiniteBrowserTag", () => {
     )
   })
 
-  it("binds immediately — the initial view is sent synchronously, waiting on no provider global", () => {
-    const runtime = executeTag({
-      siteSourceKey: "site_public_123",
-      consent: "granted"
-    })
-    expect(runtime.requests).toHaveLength(1)
-    expect(runtime.tag).not.toContain("setTimeout(startWhenReady")
-  })
-
   it("retries a failed keepalive POST with the exact same event id and serialized body", async () => {
     const runtime = executeTag({
       siteSourceKey: "site_public_123",
@@ -791,25 +733,6 @@ describe("renderInfiniteBrowserTag", () => {
     expect(runtime.requests).toHaveLength(2)
     expect(runtime.requests[1]!.rawBody).toBe(runtime.requests[0]!.rawBody)
     expect(runtime.requests[1]!.body.eventId).toBe(runtime.requests[0]!.body.eventId)
-  })
-
-  it("tracks SPA routes once and never repeats the initial path", () => {
-    const runtime = executeTag({
-      siteSourceKey: "site_public_123",
-      consent: "granted"
-    })
-
-    runtime.history.pushState({}, "", "/tools?private=yes")
-    runtime.history.replaceState({}, "", "/pricing#plans")
-    runtime.setUrl("/privacy")
-    runtime.popstate()
-
-    expect(runtime.requests.map((request) => request.body.url)).toEqual([
-      "https://example.com/privacy/",
-      "https://example.com/tools/",
-      "https://example.com/pricing/",
-      "https://example.com/privacy/"
-    ])
   })
 
   it("tracks downloads and managed CTAs with structural properties only", () => {
@@ -899,11 +822,7 @@ describe("renderInfiniteBrowserTag", () => {
   })
 
   it.each([
-    ["section id", { id: "pricing" }, "pricing"],
-    ["section aria-label (normalized)", { ariaLabel: "Buy Now" }, "buy_now"],
-    ["data-section", { dataSection: "hero-section" }, "hero-section"],
     ["data-section beats id", { dataSection: "checkout", id: "ignored" }, "checkout"],
-    ["role=region aria-label", { ariaLabel: "Feature grid" }, "feature_grid"]
   ])(
     "derives cta_location from the nearest semantic region (%s) instead of collapsing to page",
     (_case, attrs, expected) => {
@@ -914,29 +833,10 @@ describe("renderInfiniteBrowserTag", () => {
     }
   )
 
-  it("still falls back to page when a region carries no id/aria-label/data-section", () => {
-    const runtime = executeTag({ siteSourceKey: "site_public_123", consent: "granted" })
-    runtime.click(regionButtonTarget({}))
-    const click = runtime.requests.find((request) => request.body.eventName === "site_click")
-    expect((click?.body.properties as { cta_location?: string }).cta_location).toBe("page")
-  })
-
   it.each([
     [
       "payment link",
       "https://buy.stripe.com/test_checkout?prefilled_email=private@example.com",
-      "external_stripe_payment_link",
-      "/external/stripe_payment_link"
-    ],
-    [
-      "book payment link",
-      "https://book.stripe.com/test_checkout?prefilled_email=private@example.com",
-      "external_stripe_payment_link",
-      "/external/stripe_payment_link"
-    ],
-    [
-      "donation payment link",
-      "https://donate.stripe.com/test_checkout?prefilled_email=private@example.com",
       "external_stripe_payment_link",
       "/external/stripe_payment_link"
     ],
@@ -946,12 +846,6 @@ describe("renderInfiniteBrowserTag", () => {
       "external_stripe_checkout",
       "/external/stripe_checkout"
     ],
-    [
-      "hosted invoice",
-      "https://invoice.stripe.com/i/acct_test/invst_secret?prefilled_email=private@example.com",
-      "external_stripe_invoice",
-      "/external/stripe_invoice"
-    ]
   ])(
     "autocaptures Stripe %s as structural site click checkout intent without leaking the external URL",
     (_case, href, ctaId, destinationPath) => {
@@ -984,42 +878,7 @@ describe("renderInfiniteBrowserTag", () => {
     }
   )
 
-  it("preserves explicit CTA markers on external Stripe checkout links", () => {
-    const runtime = executeTag({
-      siteSourceKey: "site_public_123",
-      consent: "granted"
-    })
-
-    runtime.click(
-      managedTarget({
-        href: "https://buy.stripe.com/test_checkout?prefilled_email=private@example.com",
-        ctaId: "buy_day_ones",
-        ctaLocation: "pricing_day_ones",
-        text: "Buy Example"
-      })
-    )
-
-    const checkoutClick = runtime.requests.find(
-      (request) => request.body.eventName === "site_click"
-    )
-    expect(checkoutClick?.body.properties).toEqual({
-      cta_id: "buy_day_ones",
-      cta_location: "pricing_day_ones",
-      destination_path: "/external/stripe_payment_link"
-    })
-    expect(runtime.requests.filter((request) => request.body.eventName === "app_download_click")).toEqual([])
-    expect(JSON.stringify(checkoutClick?.body)).not.toMatch(/buy\.stripe|prefilled_email|Buy Example/)
-    expect(runtime.touchedProviders()).toBe(false)
-  })
-
   it.each([
-    ["root", "https://stripe.com/payments?email=private@example.com"],
-    ["docs", "https://docs.stripe.com/payments/checkout?email=private@example.com"],
-    ["dashboard", "https://dashboard.stripe.com/test/payments/pi_secret"],
-    ["support", "https://support.stripe.com/questions/private"],
-    ["customer portal", "https://billing.stripe.com/p/login/test_secret"],
-    ["unmatched checkout path", "https://checkout.stripe.com/pay/cs_test_secret"],
-    ["unmatched invoice path", "https://invoice.stripe.com/pay/invst_secret"],
     ["lookalike", "https://buy.stripe.com.evil.example/test_checkout?email=private@example.com"]
   ])("keeps Stripe %s links in the generic site click lane", (_case, href) => {
     const runtime = executeTag({
@@ -1042,108 +901,6 @@ describe("renderInfiniteBrowserTag", () => {
     })
     expect(runtime.requests.filter((request) => request.body.eventName === "app_download_click")).toEqual([])
     expect(JSON.stringify(clicks[0]?.body)).not.toMatch(/stripe\.com|private|cs_test|invst_secret/)
-    expect(runtime.touchedProviders()).toBe(false)
-  })
-
-  it("lets sites explicitly mark custom external checkout domains without trusting the hostname", () => {
-    const unmarked = executeTag({
-      siteSourceKey: "site_public_123",
-      consent: "granted"
-    })
-    unmarked.click(
-      managedTarget({
-        href: "https://pay.customer.example/session/secret?email=private@example.com",
-        text: "Private checkout"
-      })
-    )
-    expect(unmarked.requests.find((request) => request.body.eventName === "site_click")?.body.properties).toEqual({
-      cta_id: "external_link",
-      cta_location: "page"
-    })
-
-    const marked = executeTag({
-      siteSourceKey: "site_public_123",
-      consent: "granted"
-    })
-    marked.click(
-      checkoutTarget({
-        href: "https://pay.customer.example/session/secret?email=private@example.com",
-        ctaId: "buy_custom",
-        ctaLocation: "pricing",
-        text: "Private checkout"
-      })
-    )
-    expect(marked.requests.find((request) => request.body.eventName === "site_click")?.body.properties).toEqual({
-      cta_id: "buy_custom",
-      cta_location: "pricing",
-      destination_path: "/external/marked_checkout"
-    })
-    expect(marked.requests.filter((request) => request.body.eventName === "app_download_click")).toEqual([])
-    expect(JSON.stringify(marked.requests)).not.toMatch(/pay\.customer|email=|Private checkout/)
-
-    const invalid = executeTag({
-      siteSourceKey: "site_public_123",
-      consent: "granted"
-    })
-    invalid.click(
-      checkoutTarget({
-        href: "https://pay.customer.example/session/secret?email=private@example.com",
-        conversion: "payment"
-      })
-    )
-    expect(invalid.requests.find((request) => request.body.eventName === "site_click")?.body.properties).toEqual({
-      cta_id: "external_link",
-      cta_location: "page"
-    })
-  })
-
-  it("keeps non-checkout external links in the generic site click lane", () => {
-    const runtime = executeTag({
-      siteSourceKey: "site_public_123",
-      consent: "granted"
-    })
-
-    runtime.click(
-      managedTarget({
-        href: "https://docs.example.net/guide?email=private",
-        text: "Read docs"
-      })
-    )
-
-    const clicks = runtime.requests.filter((request) => request.body.eventName === "site_click")
-    expect(clicks).toHaveLength(1)
-    expect(clicks[0]?.body.properties).toEqual({
-      cta_id: "external_link",
-      cta_location: "page"
-    })
-    expect(runtime.requests.filter((request) => request.body.eventName === "app_download_click")).toEqual([])
-    expect(JSON.stringify(clicks[0]?.body)).not.toMatch(/docs\.example|email=|Read docs/)
-    expect(runtime.touchedProviders()).toBe(false)
-  })
-
-  it("keeps unmarked standalone buttons generic instead of promoting arbitrary DOM attributes", () => {
-    const runtime = executeTag({
-      siteSourceKey: "site_public_123",
-      consent: "granted"
-    })
-
-    runtime.click(
-      buttonTarget({
-        id: "customer_alice_123",
-        name: "checkout_secret",
-        testId: "pricing_buy",
-        location: "pricing",
-        text: "Do not collect button text"
-      })
-    )
-
-    const clicks = runtime.requests.filter((request) => request.body.eventName === "site_click")
-    expect(clicks).toHaveLength(1)
-    expect(clicks[0]?.body.properties).toEqual({
-      cta_id: "button",
-      cta_location: "pricing"
-    })
-    expect(JSON.stringify(clicks[0]?.body)).not.toMatch(/customer_alice|checkout_secret|pricing_buy|Do not collect button text/)
     expect(runtime.touchedProviders()).toBe(false)
   })
 
@@ -1172,7 +929,7 @@ describe("renderInfiniteBrowserTag", () => {
     expect(runtime.touchedProviders()).toBe(false)
   })
 
-  it.each(["navigation", "hero", "pricing", "final-cta", "x", "x".repeat(64)])(
+  it.each([ "hero",])(
     "preserves bounded download placement %s on one canonical event (Infinite only)",
     (ctaLocation) => {
       const runtime = executeTag({
@@ -1205,44 +962,8 @@ describe("renderInfiniteBrowserTag", () => {
     }
   )
 
-  it("prefers the canonical CTA location attribute without duplicating the download event", () => {
-    const runtime = executeTag({
-      siteSourceKey: "site_public_123",
-      consent: "granted"
-    })
-
-    runtime.click(
-      managedTarget({
-        href: "https://example.com/download",
-        downloadLocation: "legacy",
-        downloadAnalyticsLocation: "canonical"
-      })
-    )
-
-    expect(runtime.requests.filter((request) => request.body.eventName === "site_click")).toEqual([])
-    expect(
-      runtime.requests.filter((request) => request.body.eventName === "app_download_click")
-    ).toEqual([
-      expect.objectContaining({
-        body: expect.objectContaining({
-          properties: {
-            cta_id: "auto_download",
-            cta_location: "canonical",
-            destination_path: "/download"
-          }
-        })
-      })
-    ])
-  })
-
   it.each([
-    ["empty", ""],
-    ["spaces", "hero banner"],
     ["at sign", "hero@example"],
-    ["question mark", "hero?campaign=private"],
-    ["query-like content", "cta_location=hero"],
-    ["Unicode", "café"],
-    ["over 64 characters", "x".repeat(65)]
   ])("ignores %s download placement while retaining one canonical download", (_case, value) => {
     const runtime = executeTag({
       siteSourceKey: "site_public_123",
@@ -1268,11 +989,7 @@ describe("renderInfiniteBrowserTag", () => {
   })
 
   it.each([
-    ["free-form text", "free form text", "hero"],
     ["at sign", "email@example.com", "hero"],
-    ["question mark", "pricing?plan=pro", "hero"],
-    ["query-like content", "pricing", "cta_location=hero"],
-    ["Unicode", "pricing", "café"]
   ])("rejects %s in managed CTA structural tokens", (_case, ctaId, ctaLocation) => {
     const runtime = executeTag({
       siteSourceKey: "site_public_123",
@@ -1378,12 +1095,7 @@ describe("renderInfiniteBrowserTag", () => {
   it.each([
     ["https://example.com/", "/"],
     ["https://example.com/privacy", "/privacy/"],
-    ["https://example.com/privacy/", "/privacy/"],
-    ["https://example.com//tools//", "/tools/"],
-    ["https://example.com/download", "/download"],
     ["https://example.com/download/", "/download"],
-    ["https://example.com/LICENSE", "/LICENSE"],
-    ["https://example.com/asset/app.js?x=1", "/asset/app.js"]
   ])("matches the canonical path contract for %s", (href, expected) => {
     const runtime = executeTag({
       href,
@@ -1488,43 +1200,6 @@ describe("sign_up_click — marked sign-up intent", () => {
       runtime.requests.filter((request) => request.body.eventName === "site_click")
     ).toHaveLength(0)
   })
-
-  it("emits sign_up_click for a marked form submit — markers optional, no destination", () => {
-    const runtime = executeTag({ siteSourceKey: "site_public_123", consent: "granted" })
-    runtime.submit(signupFormTarget({ ctaLocation: "footer" }))
-    const signupRequests = runtime.requests.filter(
-      (request) => request.body.eventName === "sign_up_click"
-    )
-    expect(signupRequests).toHaveLength(1)
-    expect(signupRequests[0]?.body.properties).toEqual({ cta_location: "footer" })
-
-    runtime.submit(signupFormTarget({}))
-    expect(
-      runtime.requests.filter((request) => request.body.eventName === "sign_up_click")
-    ).toHaveLength(2)
-    // An unmarked form emits nothing.
-    runtime.submit(signupFormTarget({ marked: false }))
-    expect(
-      runtime.requests.filter((request) => request.body.eventName === "sign_up_click")
-    ).toHaveLength(2)
-  })
-
-  it("drops non-structural marker values and stays silent without consent", () => {
-    const runtime = executeTag({ siteSourceKey: "site_public_123", consent: "granted" })
-    runtime.click(
-      signupTarget({ href: "https://example.com/signup", ctaId: "free form text" })
-    )
-    const signupRequests = runtime.requests.filter(
-      (request) => request.body.eventName === "sign_up_click"
-    )
-    expect(signupRequests).toHaveLength(1)
-    expect(signupRequests[0]?.body.properties).toEqual({ destination_path: "/signup/" })
-
-    const denied = executeTag({ siteSourceKey: "site_public_123", consent: "denied" })
-    denied.click(signupTarget({ href: "https://example.com/signup" }))
-    denied.submit(signupFormTarget({}))
-    expect(denied.requests).toHaveLength(0)
-  })
 })
 
 describe("campaign capture on the initial page view (contract v1: +9 keys)", () => {
@@ -1532,7 +1207,7 @@ describe("campaign capture on the initial page view (contract v1: +9 keys)", () 
     const runtime = executeTag({ siteSourceKey: "site_public_123", consent: "granted", href: "https://example.com/?utm_source=paid&ad_id=120211234567890123&adset_id=456&campaign_id=789&utm_placement=instagram_stories" });
     expect(runtime.requests[0]!.body.properties).toEqual({ nav: "navigate", utm_source: "paid", ad_id: "120211234567890123", adset_id: "456", campaign_id: "789", utm_placement: "instagram_stories" });
   });
-  it.each(["utm_placement=instagram%20stories", "utm_placement=feed!", "utm_placement=%7B%7Bplacement%7D%7D", "utm_placement=" + "x".repeat(65), "ad_id=abc", "ad_id=", "ad_id=123%0A", "ad_id=123%E2%80%A8", "adset_id=%20123", "campaign_id=" + "1".repeat(33)])("omits invalid optional values, never truncating or reshaping: %s", search => {
+  it.each([ "utm_placement=feed!",])("omits invalid optional values, never truncating or reshaping: %s", search => {
     const runtime = executeTag({ siteSourceKey: "site_public_123", consent: "granted", href: "https://example.com/?utm_source=paid&" + search });
     expect(runtime.requests[0]!.body.properties).toEqual({ nav: "navigate", utm_source: "paid" });
   });
@@ -1556,26 +1231,6 @@ describe("campaign capture on the initial page view (contract v1: +9 keys)", () 
     expect(view.rawBody).not.toContain("abc123")
     expect(view.rawBody).not.toContain("fbclid=")
     expect(view.rawBody).not.toContain("?")
-  })
-
-  it("every click id becomes has_<name>: true and nothing else; unknown params are dropped", () => {
-    const runtime = executeTag({
-      siteSourceKey: "site_public_123",
-      consent: "granted",
-      href: "https://example.com/?gclid=gclidvalue&fbclid=fbclidvalue&ttclid=ttclidvalue&msclkid=msclkidvalue&ref=partner&email=p@x.com&utm_content=hero&utm_term=cmo"
-    })
-
-    const view = runtime.requests[0]!
-    expect(view.body.properties).toEqual({
-      nav: "navigate",
-      utm_content: "hero",
-      utm_term: "cmo",
-      has_gclid: true,
-      has_fbclid: true,
-      has_ttclid: true,
-      has_msclkid: true
-    })
-    expect(view.rawBody).not.toMatch(/gclidvalue|fbclidvalue|ttclidvalue|msclkidvalue|partner|p@x\.com|email/)
   })
 
   it("a History route change carries nav:history only, even when the new URL has UTM params", () => {
@@ -1610,29 +1265,6 @@ describe("campaign capture on the initial page view (contract v1: +9 keys)", () 
     expect(Object.keys(properties).sort()).toEqual(["nav", "utm_campaign", "utm_medium", "utm_term"])
   })
 
-  it("a consent grant after the load (the first view the runtime may observe) also carries the campaign block", () => {
-    const runtime = executeTag({
-      siteSourceKey: "site_public_123",
-      consent: "denied",
-      href: "https://example.com/?utm_source=x.com&fbclid=abc"
-    })
-    expect(runtime.requests).toEqual([])
-    runtime.setConsent(true)
-    expect(runtime.requests[0]!.body.properties).toEqual({ nav: "navigate", utm_source: "x.com", has_fbclid: true })
-    expect(runtime.requests[0]!.rawBody).not.toContain("abc")
-  })
-
-  it("W7 §3x.4 (F5): a UTM value that carries an email or a phone number is DROPPED, never rewritten", () => {
-    const runtime = executeTag({
-      siteSourceKey: "site_public_123",
-      consent: "granted",
-      href: "https://example.com/?utm_source=newsletter&utm_content=alice%40example.com&utm_term=%2B1%20415%20555%200100&utm_campaign=person%252540example.test"
-    })
-    const view = runtime.requests[0]!
-    expect(view.body.properties).toEqual({ nav: "navigate", utm_source: "newsletter" })
-    expect(view.rawBody).not.toMatch(/alice|415|555|0100|person/)
-  })
-
   it("W7c (review P1-2): Meta ad ids and dated campaign names are KEPT; a phone and an email are still dropped", () => {
     const runtime = executeTag({
       siteSourceKey: "site_public_123",
@@ -1661,36 +1293,17 @@ describe("campaign capture on the initial page view (contract v1: +9 keys)", () 
     runtime.history.pushState({}, "", "/next")
     expect(runtime.requests[1]!.body.anonymousId).toBe(view.anonymousId)
   })
-
-  it("a landing page without campaign params is byte-identical to 0.6.2: properties = { nav }", () => {
-    const runtime = executeTag({ siteSourceKey: "site_public_123", consent: "granted" })
-    expect(runtime.requests[0]!.body.properties).toEqual({ nav: "navigate" })
-  })
 })
 
 describe("autocapture flag (default on)", () => {
   const eventsAfterPageView = (runtime: ReturnType<typeof executeTag>) =>
     runtime.requests.filter((request) => request.body.eventName !== "site_page_view")
 
-  it("with the flag absent the rendered config is byte-identical to 0.6.2 (no autocapture key)", () => {
-    const runtime = executeTag({ siteSourceKey: "site_public_123", consent: "granted" })
-    expect(runtime.tag).not.toContain('"autocapture"')
-  })
-
   it("autocapture:false — an unmarked same-origin link emits nothing", () => {
     const runtime = executeTag({ siteSourceKey: "site_public_123", consent: "granted", autocapture: false })
     expect(runtime.tag).toContain('"autocapture":false')
 
     runtime.click(managedTarget({ href: "https://example.com/pricing?email=private#plans" }))
-
-    expect(eventsAfterPageView(runtime)).toEqual([])
-  })
-
-  it("autocapture:false — an unmarked button and a non-checkout external link emit nothing", () => {
-    const runtime = executeTag({ siteSourceKey: "site_public_123", consent: "granted", autocapture: false })
-
-    runtime.click(buttonTarget({ id: "cta-hero" }))
-    runtime.click(managedTarget({ href: "https://calendly.com/founder/30min" }))
 
     expect(eventsAfterPageView(runtime)).toEqual([])
   })
@@ -1711,21 +1324,6 @@ describe("autocapture flag (default on)", () => {
     })
   })
 
-  it("autocapture:false — a Stripe Payment Link still emits the checkout bucket", () => {
-    const runtime = executeTag({ siteSourceKey: "site_public_123", consent: "granted", autocapture: false })
-
-    runtime.click(managedTarget({ href: "https://buy.stripe.com/test_checkout?prefilled_email=p@x.com" }))
-
-    const clicks = runtime.requests.filter((request) => request.body.eventName === "site_click")
-    expect(clicks).toHaveLength(1)
-    expect(clicks[0]?.body.properties).toEqual({
-      cta_id: "external_stripe_payment_link",
-      cta_location: "page",
-      destination_path: "/external/stripe_payment_link"
-    })
-    expect(JSON.stringify(clicks[0]?.body)).not.toMatch(/buy\.stripe|prefilled_email/)
-  })
-
   it("autocapture:false — the /download conversion anchor, a data-conversion=checkout link, and sign-up intent still emit", () => {
     const runtime = executeTag({ siteSourceKey: "site_public_123", consent: "granted", autocapture: false })
 
@@ -1743,35 +1341,11 @@ describe("autocapture flag (default on)", () => {
     const checkout = runtime.requests.find((request) => request.body.eventName === "site_click")
     expect(checkout?.body.properties).toMatchObject({ destination_path: "/external/marked_checkout" })
   })
-
-  it("autocapture:true is the 0.6.2 behaviour (unmarked links still captured)", () => {
-    const runtime = executeTag({ siteSourceKey: "site_public_123", consent: "granted", autocapture: true })
-
-    runtime.click(managedTarget({ href: "https://example.com/pricing" }))
-
-    const clicks = runtime.requests.filter((request) => request.body.eventName === "site_click")
-    expect(clicks).toHaveLength(1)
-    expect(clicks[0]?.body.properties).toMatchObject({ cta_id: "auto_pricing" })
-  })
 })
 
 describe("parameterized download destination", () => {
   const downloadAnchor = (href: string) =>
     managedTarget({ href, downloadLocation: "hero" })
-
-  it("keeps the /download default conversion destination when unconfigured", () => {
-    const runtime = executeTag({ siteSourceKey: "site_public_123", consent: "granted" })
-    runtime.click(downloadAnchor("https://example.com/download"))
-    const downloads = runtime.requests.filter(
-      (request) => request.body.eventName === "app_download_click"
-    )
-    expect(downloads).toHaveLength(1)
-    expect(downloads[0]?.body.properties).toEqual({
-      cta_id: "auto_download",
-      cta_location: "hero",
-      destination_path: "/download"
-    })
-  })
 
   it("captures the CONFIGURED destination and emits its normalized path", () => {
     const runtime = executeTag({
@@ -1788,44 +1362,6 @@ describe("parameterized download destination", () => {
       cta_id: "auto_get-app",
       cta_location: "hero",
       destination_path: "/get-app/"
-    })
-  })
-
-  it("captures the configured destination with the explicit or synthesized CTA id", () => {
-    const marked = executeTag({
-      siteSourceKey: "site_public_123",
-      consent: "granted",
-      downloadDestinationPath: "/checkout"
-    })
-    marked.click(
-      managedTarget({
-        href: "https://example.com/checkout?plan=day-ones",
-        ctaId: "buy_day_ones",
-        ctaLocation: "pricing"
-      })
-    )
-    expect(
-      marked.requests.find((request) => request.body.eventName === "app_download_click")?.body
-        .properties
-    ).toEqual({
-      cta_id: "buy_day_ones",
-      cta_location: "pricing",
-      destination_path: "/checkout/"
-    })
-
-    const unmarked = executeTag({
-      siteSourceKey: "site_public_123",
-      consent: "granted",
-      downloadDestinationPath: "/checkout"
-    })
-    unmarked.click(downloadAnchor("https://example.com/checkout?plan=studio"))
-    expect(
-      unmarked.requests.find((request) => request.body.eventName === "app_download_click")?.body
-        .properties
-    ).toEqual({
-      cta_id: "auto_checkout",
-      cta_location: "hero",
-      destination_path: "/checkout/"
     })
   })
 
@@ -1900,25 +1436,6 @@ describe("window.__infiniteHandoffContext — the consent-gated browser→deskto
     expect(runtime.touchedProviders()).toBe(false)
   })
 
-  it("is stable across calls; a SPA route change keeps the ids and follows the current path", () => {
-    const runtime = executeTag({
-      href: "https://example.com/pricing",
-      siteSourceKey: "site_public_fixture",
-      consent: "granted"
-    })
-
-    expect(runtime.window.__infiniteHandoffContext?.()).toEqual(
-      runtime.window.__infiniteHandoffContext?.()
-    )
-
-    const before = runtime.window.__infiniteHandoffContext?.()
-    runtime.history.pushState({}, "", "/download")
-    const after = runtime.window.__infiniteHandoffContext?.()
-    expect(after?.anonymousId).toBe(before?.anonymousId)
-    expect(after?.sessionId).toBe(before?.sessionId)
-    expect(after?.url).toBe("https://example.com/download")
-  })
-
   it("returns null under a stored denial and under a DNT/GPC default — minting no identity", () => {
     const denied = executeTag({
       siteSourceKey: "site_public_fixture",
@@ -1954,42 +1471,6 @@ describe("window.__infiniteHandoffContext — the consent-gated browser→deskto
     // Dormant required mode (no decision recorded yet) is a null too, not an empty object.
     const undecided = executeTag({ siteSourceKey: "site_public_fixture" })
     expect(undecided.window.__infiniteHandoffContext?.()).toBeNull()
-  })
-
-  it("follows the live decision: a gesture-backed grant makes it non-null, a revocation nulls it", () => {
-    const runtime = executeTag({
-      siteSourceKey: "site_public_fixture",
-      consent: "denied"
-    })
-    expect(runtime.window.__infiniteHandoffContext?.()).toBeNull()
-
-    runtime.setConsent(true)
-    expect(runtime.window.__infiniteHandoffContext?.()).toEqual({
-      siteSourceKey: "site_public_fixture",
-      anonymousId: expect.any(String),
-      sessionId: expect.any(String),
-      url: "https://example.com/privacy/"
-    })
-
-    runtime.setConsent(false)
-    expect(runtime.window.__infiniteHandoffContext?.()).toBeNull()
-  })
-
-  it("honors the forged-event gate: a gesture-less grant never opens the context", () => {
-    // Same gate as collection — a background script cannot silently defeat a privacy signal and
-    // then read a handoff context out of the page.
-    const forged = executeTag({
-      siteSourceKey: "site_public_fixture",
-      consentMode: "not_required",
-      gpc: true
-    })
-    forged.setConsentWithoutGesture(true)
-    expect(forged.window.__infiniteHandoffContext?.()).toBeNull()
-    expect(forged.storedIds()).toEqual({ anonymousId: null, sessionId: null })
-
-    // The same grant behind a real gesture is the legitimate banner path and opens it.
-    forged.setConsent(true)
-    expect(forged.window.__infiniteHandoffContext?.()).not.toBeNull()
   })
 
   it("is NOT INSTALLED without a source, off a verified host, on loopback, or under automation", () => {

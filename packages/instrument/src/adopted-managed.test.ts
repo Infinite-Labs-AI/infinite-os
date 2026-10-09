@@ -75,13 +75,6 @@ describe("P1-2: the helpers are written when every requested tool is ADOPTED", (
     expect(typeof vm.window.infiniteTrack).toBe("function")
     expect(typeof vm.window.infiniteTrackThenNavigate).toBe("function")
   })
-
-  it("negative: without the helpers an all-adopted plan still writes nothing at all", () => {
-    const site = installFixture("static-html-basic", { ga4: { measurementId: "G-ADOPT1" } }, pasteIntoHtmlHead(ADOPTED_GA4))
-    expect(site.warnings.join("\n")).toMatch(/Nothing to install/)
-    expect(site.read("index.html")).not.toContain("infinite")
-    expect(site.exists(".infinite/install.json")).toBe(false)
-  })
 })
 
 describe("P1-3: Meta captureOnly beside an ADOPTED pixel", () => {

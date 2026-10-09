@@ -55,7 +55,7 @@
 //   - No host guard (founder decision 15): it writes one first-party cookie and sends nothing, and
 //     previews must still be able to test it.
 //   - No banner and no consent gate of its own: see `./consent.ts`.
-import { consentAllowsSource, consentGateSource, type MetaBrowserGate } from "./consent.js"
+import { captureConsentDecisionSource, consentAllowsSource, consentGateSource, type MetaBrowserGate } from "./consent.js"
 
 /** The global the capture defines. One per page; the census checks it. */
 export const META_CLICK_ID_ACCESSOR = "infiniteMetaClickId"
@@ -87,7 +87,8 @@ export function buildMetaClickIdCaptureScript(options: MetaClickIdCaptureOptions
     "  var FB_COOKIE = /^fb\\.[0-9]{1,2}\\.[0-9]{1,20}\\.[A-Za-z0-9_%.-]{1,512}$/;",
     "  var FBCLID = /^[A-Za-z0-9_%.-]{1,400}$/;",
     `  var MAX_AGE = ${META_CLICK_ID_MAX_AGE_SECONDS};`,
-    ...indent(consentAllowsSource(gate)),
+    ...indent(captureConsentDecisionSource(gate)),
+    ...indent(consentAllowsSource(gate, gate.kind === "infinite-consent")),
     ...indent(consentGateSource(gate)),
     "  // EVERY _fbc the browser exposes, in its order. usableOnly drops values Meta would reject.",
     "  function storedFbcs(usableOnly) {",
@@ -154,6 +155,20 @@ export function buildMetaClickIdCaptureScript(options: MetaClickIdCaptureOptions
     '    for (var size = 2; size <= labels.length; size += 1) domains.push(labels.slice(labels.length - size).join("."));',
     "    return domains;",
     "  }",
+    '  var ownedFbcValue = "", ownedFbcDomain = "";',
+    ...(gate.kind === "infinite-consent" ? [
+      '  try { window.addEventListener("infinite:analytics-consent-change", function () {',
+      "    var event = arguments[0];",
+      "    if (!event || !event.detail || event.detail.granted !== false) return;",
+      "    try {",
+      "      var visibleFbcs = storedFbcs(false);",
+      "      if (ownedFbcValue && visibleFbcs.length === 1 && visibleFbcs[0] === ownedFbcValue) {",
+      '        document.cookie = "_fbc=;path=/;max-age=0;samesite=Lax" + (ownedFbcDomain ? ";domain=" + ownedFbcDomain : "") + (location.protocol === "https:" ? ";secure" : "");',
+      "      }",
+      "    } catch (_error) {}",
+      '    ownedFbcValue = ""; ownedFbcDomain = "";',
+      "  }); } catch (_error) {}"
+    ] : []),
     `  window.${META_CLICK_ID_ACCESSOR} = function () {`,
     '    if (!infiniteConsentAllows()) return "";',
     "    var fresh = newClick();",
@@ -175,6 +190,7 @@ export function buildMetaClickIdCaptureScript(options: MetaClickIdCaptureOptions
     "        var value = format(domainIndex(domains[index]), fbclid);",
     '        document.cookie = "_fbc=" + value + ";domain=" + domains[index] + attributes;',
     "        if (storedFbcs(true).indexOf(value) === -1) continue;",
+    "        ownedFbcValue = value; ownedFbcDomain = domains[index];",
     "        // Rule 3 on a subdomain: a copy on a NARROWER domain than the one just written",
     "        // (www.acme.com beside acme.com) would still be listed first if it is older.",
     "        if (storedFbcs(false).length > 1) {",
@@ -185,11 +201,28 @@ export function buildMetaClickIdCaptureScript(options: MetaClickIdCaptureOptions
     "        return;",
     "      }",
     "      // No Domain cookie was accepted (localhost, an IP): host-only, indexed by the host itself.",
-    '      document.cookie = "_fbc=" + format(domainIndex(hostName()), fbclid) + attributes;',
+    '      var hostValue = format(domainIndex(hostName()), fbclid);',
+    '      document.cookie = "_fbc=" + hostValue + attributes;',
+    '      if (storedFbcs(false).indexOf(hostValue) !== -1) { ownedFbcValue = hostValue; ownedFbcDomain = ""; }',
     "    } catch (_error) {}",
     "  });",
     "})();"
   ].join("\n")
+}
+
+/** The same capture in a strict TypeScript module with an imperative adopted pixel. */
+export function buildMetaClickIdCaptureTypescript(options: MetaClickIdCaptureOptions = {}): string {
+  return buildMetaClickIdCaptureScript(options)
+    .replace("(function () {", "(function () {\n  if (typeof globalThis.window === \"undefined\") return;\n  const window: any = globalThis.window;\n  const navigator: any = globalThis.navigator;")
+    .replace("function infiniteConsentGate(start)", "function infiniteConsentGate(start: () => void)")
+    .replace("function storedFbcs(usableOnly)", "function storedFbcs(usableOnly: boolean)")
+    .replace("function format(index, fbclid)", "function format(index: number, fbclid: string)")
+    .replace("function domainIndex(domain)", "function domainIndex(domain: string)")
+}
+
+/** The browser capture as a top-level JS module statement, safe to import during SSR. */
+export function buildMetaClickIdCaptureJavascript(options: MetaClickIdCaptureOptions = {}): string {
+  return buildMetaClickIdCaptureScript(options).replace("(function () {", "(function () {\n  if (typeof window === \"undefined\") return;")
 }
 
 function indent(source: string): string[] {

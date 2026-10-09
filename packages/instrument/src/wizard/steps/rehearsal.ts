@@ -1,3 +1,4 @@
+import { loadPlanApprovals } from "../../install/step-inputs.js"
 // Step 8 `rehearsal` (§3d.1, lane O4): commit → push → draft PR → wait for the Vercel preview → rehearse it
 // under the production hostname (nothing sent) + load the preview's own URL → grade (O6's grader) → PATCH the
 // run (PR fields, phase `in_pr`, `clickTestedConversions`) → mark GA4 key events for the rehearsal-click-tested
@@ -6,6 +7,7 @@ import type { ChecklistItem } from "../contracts/jobs.js"
 import { homedir } from "node:os"
 import { finalSealPath } from "../../agents/paths.js"
 import { verifyFinalSeal } from "../../agents/fence.js"
+import { buildVerdict } from "../../checks/build.js"
 import { createHash } from "node:crypto"
 import { join } from "node:path"
 
@@ -18,6 +20,7 @@ import { verdictFactsFor } from "../verdict-facts.js"
 import type { TestTool } from "../contracts/test-engine.js"
 import { wizardGitExtras, type WizardGitOps } from "../../git/index.js"
 import { canPush } from "../../github/repo.js"
+import { forkTargetMatches } from "../push-target.js"
 import { resolveVercelSignal } from "../vercel-signal.js"
 import { isUnsupported } from "../../hosts/other.js"
 import { howToReviewSection } from "../../review/brief.js"
@@ -78,7 +81,7 @@ export function announceRehearsal(ctx: WizardContext, step: "rehearsal" | "revie
     if (!result) continue
     ctx.emit.emit("check.result", { checkId: result.checkId, tier: "RH", state: result.state, ...(result.reason ? { reason: result.reason } : {}), runId })
   }
-  for (const line of rehearsalLines(outcome)) sub(ctx, step, line.text, line.tone)
+  for (const line of rehearsalLines(outcome, ctx.state.get().jobs)) sub(ctx, step, line.text, line.tone)
 }
 
 /** The rehearsal-click-tested bookkeeping (§3d.1): PATCH first (append-only), then GA4 key events for exactly those names ∩ approved. */
@@ -87,6 +90,7 @@ export async function recordClickTests(
   deps: WizardDeps,
   input: { step: "rehearsal" | "review"; runId: string; outcome: RehearsalOutcome; approved: readonly string[] }
 ): Promise<void> {
+  if (!ctx.state.get().plan?.lines.some(line => line.id === "account_settings:ga4" && line.approved === true)) return
   const approved = new Set(input.approved)
   const names = input.outcome.ga4ClickTested.filter((name) => approved.has(name))
   if (names.length === 0 || !deps.bridge.has("tag.ga4-key-events.v1")) return
@@ -154,17 +158,23 @@ export async function prepareShip(ctx: WizardContext, deps: WizardDeps): Promise
     const auth = await deps.host.auth()
     ghReady = auth.ok
     if (ghReady) {
-      const repo = await deps.host.repoFacts()
-      if (!isUnsupported(repo)) {
+      const repo = await deps.host.repoFacts().catch(() => null)
+      if (repo && !isUnsupported(repo)) {
         isPrivate = repo.isPrivate
-        if (!canPush(repo.viewerPermission)) {
+        if (repo.viewerPermission !== null && !canPush(repo.viewerPermission) && state.pushTarget?.kind !== "fork") {
           return failed(
             "INF_WIZ_PUSH_REFUSED",
-            `Your GitHub access to this repo is ${repo.viewerPermission ?? "unknown"}, so the wizard cannot push a branch. Ask for write access; the wizard never forks.`
+            `Your GitHub access to this repo is ${repo.viewerPermission ?? "unknown"}, and no fork was approved before the agent step. Run npx infinite-tag again to choose a fork, or ask for write access.`
           )
         }
       }
     }
+  }
+  if (state.pushTarget?.kind === "fork") {
+    if (!forkTargetMatches(state.pushTarget)) return failed("INF_WIZ_PUSH_REFUSED", "The saved fork destination is invalid.")
+    if (!ghReady) return failed("INF_WIZ_PUSH_REFUSED", "GitHub is not signed in, so the fork pull request cannot be opened. Run gh auth login, then npx infinite-tag again.")
+    if (!git.setPushRemote) return failed("INF_WIZ_PUSH_REFUSED", "The approved fork destination could not be restored.")
+    git.setPushRemote(state.pushTarget.remoteUrl)
   }
   return { runId, git, facts, scanner, remoteUrl, repoLabel: repoLabelFrom(remoteUrl, ctx.root), ghReady, isPrivate }
 }
@@ -205,12 +215,25 @@ async function run(ctx: WizardContext, deps: WizardDeps): Promise<StepOutcome> {
   }
 }
 
+/** Existing runs remain the owner's choice; this helper never closes or changes a PR. */
+export async function olderWizardPrNotes(host: WizardDeps["host"], branch: string): Promise<string[]> {
+  if (!host.olderWizardPrs) return []
+  try {
+    const rows = await host.olderWizardPrs(branch)
+    return [...new Set(rows.map(row => row.number).filter(number => Number.isSafeInteger(number) && number > 0))]
+      .map(number => `Older wizard pull request #${number} is still open on another branch. To close it yourself: gh pr close ${number}`)
+  } catch {
+    return ["Could not check for older open wizard pull requests; review your repository's open pull requests."]
+  }
+}
+
 async function rehearsalRun(ctx: WizardContext, deps: WizardDeps): Promise<StepOutcome> {
   const prepared = await prepareShip(ctx, deps)
   if (!isShipContext(prepared)) return prepared
   const { runId, git, facts, scanner } = prepared
   const state = ctx.state.get()
   const gitState = state.git!
+  for (const note of await olderWizardPrNotes(deps.host, gitState.branch)) sub(ctx, "rehearsal", note, "info")
   const { managed, npmFiles } = await manifestFiles(deps, ctx.root)
   const allowlist = allowlistUnion(state.jobs)
 
@@ -224,6 +247,31 @@ async function rehearsalRun(ctx: WizardContext, deps: WizardDeps): Promise<StepO
       reason: `Files changed after the agent's last turn (${seal.changed.slice(0, 3).join(", ")}${seal.changed.length > 3 ? ", …" : ""}); a process it started may still be running. Nothing was committed.`
     }
   }
+
+  // Run the site's build AND lint scripts on the final tree before opening a PR. A missing local
+  // executable is unmeasured, never the same red baseline; a new failure cannot ride into customer CI.
+  const before = await readBeforeFactsFile(deps.fs, ctx.root, runId)
+  const validate = async () => before?.facts.localValidation === "not_measured"
+    ? { state: "undetermined" as const, reason: "local validation not measured; PR checks decide" }
+    : buildVerdict(await deps.checks.build(), async () => before?.facts.baselineBuild ?? { failureSignature: [] })
+  let validation = await validate()
+  const worker = state.agent?.worker ?? null
+  for (let round = 1; validation.state === "problem" && worker && round <= PR_LOOP_LIMITS.maxFixRounds; round += 1) {
+    const reason = validation.reason ?? "site validation failed"
+    const generated = managed.filter((file) => reason.includes(file))
+    if (generated.length > 0) break // Infinite's own emitted source is never delegated to the site's agent.
+    const fixable = allowlist.filter((file) => reason.includes(file))
+    if (fixable.length === 0) break
+    sub(ctx, "rehearsal", `${worker === "codex" ? "Codex" : "Claude Code"} is fixing ${fixable.length} new site-check failure(s) before the pull request…`, "pending")
+    const item = hookFixItem(fixable, reason)
+    ctx.emit.emit("job.seeded", { item })
+    const fix = await runFixRound(ctx, deps, { step: "rehearsal", worker, items: [item], scanner })
+    if (fix.run.outcome === "out_of_usage") return { kind: "parked", code: "INF_WIZ_AGENT_OUT_OF_USAGE", reason: "The worker agent is out of usage while fixing site validation.", resumeHint: "Run `npx infinite-tag` again when your plan resets." }
+    if (fix.run.edits.length > 0) await deps.installer.recordEdits(fix.run.edits)
+    validation = await validate()
+  }
+  if (validation.state !== "pass" && !(validation.state === "undetermined" && before?.facts.localValidation === "not_measured"))
+    return failed("INF_WIZ_VALIDATION_FAILED", `${validation.state === "undetermined" ? "The working-tree build or lint could not be measured" : "The site's build or lint found a new failure"}: ${scanner.redact(validation.reason ?? "not checked").text}. Resolve this before resuming.`)
 
   sub(ctx, "rehearsal", "Committing the changes…", "pending")
   const commitOnce = () =>
@@ -243,7 +291,6 @@ async function rehearsalRun(ctx: WizardContext, deps: WizardDeps): Promise<StepO
     })
   let commit = await commitOnce()
   // §3g.1: a commit hook that fails on the wizard's OWN files gets a fix round through the worker (≤ 2).
-  const worker = state.agent?.worker ?? null
   for (let round = 1; commit.kind === "hook_failed" && commit.ourFiles.length > 0 && worker !== null && round <= PR_LOOP_LIMITS.maxFixRounds; round += 1) {
     const fixable = commit.ourFiles.filter((file) => allowlist.includes(file) || managed.includes(file))
     if (fixable.length === 0) break
@@ -272,11 +319,13 @@ async function rehearsalRun(ctx: WizardContext, deps: WizardDeps): Promise<StepO
     if (draft.git) draft.git.headSha = head
   })
 
-  const title = `Infinite: set up analytics so the site collects properly (${state.displayId})`
+  const unwired = (await loadPlanApprovals(ctx, deps))?.ownerWiring?.canWire === false
+  const title = unwired ? `Infinite tag NOT installed: other analytics changes (${state.displayId})` : `Infinite: set up analytics so the site collects properly (${state.displayId})`
   sub(ctx, "rehearsal", "Pushing the branch…", "pending")
   const pushed = await pushBranch({ ctx, deps, git, scanner, hostKind: deps.host.kind, base: gitState.base, branch: gitState.branch, title })
   if (pushed.kind === "failed") return failed("INF_WIZ_PUSH_REFUSED", pushed.message)
 
+  const reportFacts = await verdictFactsFor(ctx, deps)
   const report = deps.report.build({
     runId,
     tagVersion: deps.tagVersion,
@@ -285,11 +334,14 @@ async function rehearsalRun(ctx: WizardContext, deps: WizardDeps): Promise<StepO
     provenLivePending: "deploy",
     day7: null,
     notes: [],
-    verdictFacts: await verdictFactsFor(ctx, deps)
+    verdictFacts: reportFacts
   })
   const diffText = await git.diff(gitState.baseSha, head)
   const bodyInput = {
-    reportMarkdown: deps.report.renderMarkdown(report),
+    reportMarkdown: deps.report.renderMarkdown(report, reportFacts.ownerBoundary, reportFacts.jobs, reportFacts.excludedLines, { ownerSteps: reportFacts.ownerSteps ?? null, findings: reportFacts.openFindings }),
+    ownerBoundary: reportFacts.ownerBoundary,
+    // P0-6: the owner's steps for server conversions (the hand-off file the install wrote), above the review notes.
+    // The owner's setup steps are in the report above ("Before purchases reach Meta, do these steps"), said once.
     howToReview: howToReviewSection(),
     runId,
     isPrivate: prepared.isPrivate,
@@ -303,7 +355,7 @@ async function rehearsalRun(ctx: WizardContext, deps: WizardDeps): Promise<StepO
   }
   const body = buildPrBody(bodyInput)
   sub(ctx, "rehearsal", "Opening draft pull request…", "pending")
-  const pr = await ensurePr({ deps, remoteUrl: prepared.remoteUrl, base: gitState.base, branch: gitState.branch, title, body, root: ctx.root, ghReady: prepared.ghReady })
+  const pr = await ensurePr({ deps, remoteUrl: prepared.remoteUrl, base: gitState.base, branch: gitState.branch, title, body, root: ctx.root, ghReady: prepared.ghReady, headOwner: state.pushTarget?.kind === "fork" ? state.pushTarget.headOwner : null })
   if (pr.kind === "failed") return failed("INF_WIZ_PR_CREATE_FAILED", pr.message)
   if (pr.kind === "pr") {
     ctx.state.update((draft) => {
@@ -360,7 +412,7 @@ async function rehearsalRun(ctx: WizardContext, deps: WizardDeps): Promise<StepO
 
   // The initial body makes no promise of a rehearsal. Only name checks once they ran,
   // and never replace a body edited by the repo owner in the meantime.
-  const measured = rehearsalCheckResults(outcome, { at: ctx.now().toISOString(), runId })
+  const measured = rehearsalCheckResults(outcome, { at: ctx.now().toISOString(), runId, jobs: ctx.state.get().jobs })
   const measuredIds = new Set(measured.shared.filter(check => check.state === "pass" || check.state === "problem").map(check => check.checkId))
   const checkedJobs = state.jobs.filter(job => job.checks.some(check => check.tier === "RH" && measuredIds.has(check.id))).map(job => job.id)
   const oldNotes = notCheckedNotes(state.jobs)
@@ -391,8 +443,11 @@ async function rehearsalRun(ctx: WizardContext, deps: WizardDeps): Promise<StepO
   // R4-10: the one count the report's "Live test per tool" cell uses (never every graded tool).
   const count = rehearsalToolCount(outcome)
   const prLabel = prState?.number ? `Pull request #${prState.number}` : "Branch pushed"
+  // P0-2: a preview behind Vercel's login was not tried; the line above already says why, in plain words.
   const line =
-    outcome.state === "undetermined"
+    outcome.state === "undetermined" && outcome.reason === "preview_protected"
+      ? `${prLabel} · not tried before merge`
+      : outcome.state === "undetermined"
       ? `${prLabel} · rehearsal undetermined (${outcome.reason?.replace(/_/g, " ")})`
       : `${prLabel} · rehearsal: ${rehearsalCountWords(count)} · nothing sent`
   status(ctx, "rehearsal", line)

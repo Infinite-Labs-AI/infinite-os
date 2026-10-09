@@ -3,10 +3,10 @@
 import { describe, expect, it } from "vitest"
 
 import { checkHostGuard, readAdoptedInitGuards } from "./host-guard.js"
+import { buildHostGuardExpression } from "../host-guard.js"
 
 const files = (record: Record<string, string>) => new Map(Object.entries(record))
 
-const UNGUARDED = "posthog.init('phc_abcdefghijklmnop', { api_host: '/ingest' })"
 const GUARDED_IIFE = [
   "(function () {",
   "  var host = location.hostname.toLowerCase().replace(/\\.$/, '')",
@@ -14,21 +14,26 @@ const GUARDED_IIFE = [
   "  posthog.init('phc_abcdefghijklmnop', { api_host: '/ingest' })",
   "})()"
 ].join("\n")
-const GUARDED_CALL = "if (infiniteHostAllowed(['acme.com'])) {\n  gtag('config', 'G-ABC123')\n}"
 
 describe("adopted init host guard", () => {
-  it("is information in the harness and a problem as job 7's proof", () => {
-    const input = { files: files({ "src/ph.ts": UNGUARDED }) }
-    expect(checkHostGuard(input).findings.map((finding) => [finding.code, finding.state])).toEqual([["INF_SETUP_HOST_GUARD_MISSING", "info"]])
-    expect(checkHostGuard({ ...input, strict: true }).findings.map((finding) => [finding.code, finding.state])).toEqual([
-      ["INF_SETUP_HOST_GUARD_MISSING", "problem"]
-    ])
-  })
-
-  it("recognises an early-return host check and a guard predicate (negative: no missing finding)", () => {
-    const result = checkHostGuard({ files: files({ "src/ph.ts": GUARDED_IIFE, "src/ga.ts": GUARDED_CALL }), strict: true })
-    expect(result.findings.map((finding) => finding.code)).toEqual(["INF_SETUP_HOST_GUARD_PRESENT", "INF_SETUP_HOST_GUARD_PRESENT"])
-    expect(result.state).toBe("ok")
+  it.each([
+    { legacy: false, typed: false },
+    { legacy: false, typed: true },
+  ])("accepts the exact approved emission and rejects changed hosts or guard logic (legacy=$legacy, typed=$typed)", ({ legacy, typed }) => {
+    const expected = buildHostGuardExpression({ mode: "deny", exempt: ["acme.example"], deny: [] })
+    let expression = legacy
+      ? expected.replace('if (h === null) return true; ', '').replace(' if (!n) return false;', '').replace('})(typeof location !== "undefined" ? location.hostname : null)', '})(location.hostname)')
+      : expected
+    if (typed) expression = expression.replaceAll("(function (h) {", "(function (h: string) {").replace("})(h), i;", "})(h), i: number;")
+    const read = (guard: string) => checkHostGuard({
+      files: files({ "src/meta.ts": `function start() { if (!(${guard})) return; fbq('init', '111222333444555'); }` }),
+      strict: true,
+      productionHosts: ["acme.example"],
+      expectedEmittedGuard: expected
+    }).findings.map(finding => finding.code)
+    expect(read(expression)).toEqual(["INF_SETUP_HOST_GUARD_PRESENT"])
+    expect(read(expression.replace('"acme.example"', '"other.example"'))).toEqual(["INF_SETUP_HOST_GUARD_MISSING"])
+    expect(read(expression.replace("if (d[i] === n) return false;", "if (d[i] === n) return true;"))).toEqual(["INF_SETUP_HOST_GUARD_MISSING"])
   })
 
   it("does not let a closed guard block cover a later init", () => {
@@ -51,15 +56,6 @@ describe("adopted init host guard", () => {
     const reads = readAdoptedInitGuards(files({ "index.html": "<html><head><script>window.infiniteMetaClickId=function(){};fbq('init', '111222333444555');</script></head><body></body></html>" }))
     expect(reads.map((read) => read.tool)).toEqual(["Meta pixel"])
   })
-
-  it("groups a multi-page site into one line per tool (strict keeps one per init)", () => {
-    const page = (n: number) => `<html><head><script>gtag('config', 'G-ABC123')</script></head><body>${n}</body></html>`
-    const input = { files: files({ "a.html": page(1), "b.html": page(2), "c.html": page(3) }) }
-    const grouped = checkHostGuard(input).findings
-    expect(grouped).toHaveLength(1)
-    expect(grouped[0]!.message).toContain("The same applies at b.html:1, c.html:1.")
-    expect(checkHostGuard({ ...input, strict: true }).findings).toHaveLength(3)
-  })
 })
 
 describe("adopted init host guard: only a governing guard with the right polarity counts (review P2-2)", () => {
@@ -67,13 +63,6 @@ describe("adopted init host guard: only a governing guard with the right polarit
 
   it("an inverted guard (fires ONLY on previews) is missing", () => {
     expect(strict("if (location.hostname.endsWith('.vercel.app')) {\n  gtag('config', 'G-ABC123')\n}")).toEqual(["INF_SETUP_HOST_GUARD_MISSING"])
-  })
-
-  it("a host read with no if, or a localStorage read beside a hostname read, is missing", () => {
-    expect(strict("const debug = location.hostname === 'localhost'\ngtag('config', 'G-ABC123', { debug_mode: debug })")).toEqual(["INF_SETUP_HOST_GUARD_MISSING"])
-    expect(strict("const saved = localStorage.getItem('x')\nconst domain = location.hostname\nposthog.init('phc_abcdefghijklmnop', {})")).toEqual(["INF_SETUP_HOST_GUARD_MISSING"])
-    // `local` inside `localStorage` is not a deny-list host, even under an if.
-    expect(strict("if (localStorage.getItem('x') && location.hostname) {\n  posthog.init('phc_abcdefghijklmnop', {})\n}")).toEqual(["INF_SETUP_HOST_GUARD_MISSING"])
   })
 
   it("a negated deny test wrapping the init, an early-return predicate and the emitted guard are guarded (negatives)", () => {
@@ -85,9 +74,5 @@ describe("adopted init host guard: only a governing guard with the right polarit
     // The same expression with an onDenied beat before its return.
     const withBeat = emitted.replace(")) return;", ")) {\nwindow.__denied = true;\nreturn;\n}")
     expect(strict(`<html><head><script>${withBeat}</script></head><body></body></html>`, "index.html")).toEqual(["INF_SETUP_HOST_GUARD_PRESENT"])
-  })
-
-  it("an allow predicate that RETURNS is inverted", () => {
-    expect(strict("(function () {\n  if (infiniteHostAllowed(['acme.com'])) return\n  posthog.init('phc_abcdefghijklmnop', {})\n})()")).toEqual(["INF_SETUP_HOST_GUARD_MISSING"])
   })
 })

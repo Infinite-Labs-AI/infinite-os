@@ -11,6 +11,8 @@ export interface ExitLineInput {
   exitCode: number
   prUrl: string | null
   reportPath: string | null
+  code?: string | null
+  reason?: string | null
 }
 
 const EXIT_WORD: Record<number, string> = {
@@ -32,7 +34,22 @@ function exitParts(input: ExitLineInput, styles: Styles): string[] {
 }
 
 export function exitLine(input: ExitLineInput, styles: Styles): string {
-  return exitParts(input, styles).join(" · ")
+  return [...exitParts(input, styles), ...(input.exitCode !== 0 && input.code ? [`${input.code}: ${input.reason ?? ""}`] : [])].join(" · ")
+}
+
+function wrapReason(text: string, width: number): string[] {
+  const rows: string[] = []
+  let row = "  "
+  for (const word of text.split(/\s+/).filter(Boolean)) {
+    if (row.trim() && visibleWidth(`${row} ${word}`) >= width) {
+      rows.push(row)
+      row = `  ${word}`
+    } else {
+      row += row.trim() ? ` ${word}` : word
+    }
+  }
+  if (row.trim()) rows.push(row)
+  return rows
 }
 
 /**
@@ -53,5 +70,6 @@ export function exitLines(input: ExitLineInput, styles: Styles, width: number): 
     }
   }
   if (row) rows.push(row)
+  if (input.exitCode !== 0 && input.code) rows.push(...wrapReason(`${input.code}: ${input.reason ?? ""}`, width))
   return rows
 }

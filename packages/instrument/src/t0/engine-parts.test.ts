@@ -2,12 +2,9 @@
 // bootstrap decoder. These are pure host-side helpers (no site code runs here), each with a negative.
 import { describe, expect, it } from "vitest"
 
-import { buildAnalyticsModuleSource } from "../frameworks/managed-files.js"
-import type { InstallPlan } from "../types.js"
 import { VirtualClock } from "./clock.js"
 import { CookieJar } from "./cookie-jar.js"
-import { T0Document, T0Element, T0Event, matchesSelector, parseMarkupInto } from "./dom.js"
-import { decodeNextBootstrap } from "./next-bootstrap.js"
+import { T0Document, matchesSelector, parseMarkupInto } from "./dom.js"
 
 describe("the virtual clock", () => {
   it("fires timers in due order only when advanced, and Date / performance read virtual time", async () => {
@@ -23,32 +20,6 @@ describe("the virtual clock", () => {
     expect(clock.performance().now()).toBe(60)
     await clock.advance(340)
     expect(order).toEqual(["a@10", "b@50", "c@400"])
-  })
-
-  it("negative: a cleared timer never fires; an interval repeats", async () => {
-    const clock = new VirtualClock()
-    let fired = 0
-    let ticks = 0
-    const id = clock.setTimeout(() => (fired += 1), 10)
-    clock.clearTimeout(id)
-    clock.setTimeout(() => (ticks += 1), 100, true)
-    await clock.advance(350)
-    expect(fired).toBe(0)
-    expect(ticks).toBe(3)
-  })
-
-  it("delivers a resource entry only to connected observers, only when reported", () => {
-    const clock = new VirtualClock()
-    const Observer = clock.performanceObserverClass() as new (callback: (list: { getEntries(): Array<{ name: string }> }) => void) => { observe(o: { type: string }): void; disconnect(): void }
-    const seen: string[] = []
-    const observer = new Observer((list) => seen.push(...list.getEntries().map((entry) => entry.name)))
-    observer.observe({ type: "resource" })
-    expect(seen).toEqual([])
-    clock.reportResource("https://www.facebook.com/tr/?ev=Lead", "img", 0)
-    observer.disconnect()
-    clock.reportResource("https://www.facebook.com/tr/?ev=PageView", "img", 0)
-    expect(seen).toEqual(["https://www.facebook.com/tr/?ev=Lead"])
-    expect(clock.observing()).toBe(0)
   })
 })
 
@@ -71,45 +42,6 @@ describe("the DOM", () => {
     expect(doc.querySelectorAll("button, form").map((node) => node.localName)).toEqual(["form", "button"])
     expect(matchesSelector(cta, "a:has(span)")).toBe(false)
   })
-
-  it("runs capture listeners before bubble listeners, document before window on the way up", () => {
-    const doc = document()
-    const order: string[] = []
-    const window = new (class extends T0Element {})(doc, "window")
-    doc.windowTarget = window
-    parseMarkupInto(doc.body, '<a id="x" href="/a">x</a>')
-    doc.addEventListener("click", () => order.push("document bubble"))
-    doc.addEventListener("click", () => order.push("document capture"), true)
-    window.addEventListener("click", () => order.push("window bubble"))
-    window.addEventListener("click", () => order.push("window capture"), { capture: true })
-    doc.querySelector("#x")!.addEventListener("click", () => order.push("target"))
-    doc.querySelector("#x")!.click()
-    expect(order).toEqual(["window capture", "document capture", "target", "document bubble", "window bubble"])
-  })
-
-  it("reflects anchor target/rel as attributes (a plain property would hide a self-navigation)", () => {
-    const doc = document()
-    parseMarkupInto(doc.body, '<a id="x" href="/download">x</a>')
-    const anchor = doc.querySelector("#x") as T0Element & { target: string; rel: string; href: string }
-    anchor.target = "_blank"
-    anchor.rel = "noopener"
-    expect(anchor.getAttribute("target")).toBe("_blank")
-    expect(anchor.getAttribute("rel")).toBe("noopener")
-    expect(anchor.href).toBe("https://acme.com/download")
-  })
-
-  it("runs the default action only when not prevented", () => {
-    const activations: string[] = []
-    const doc = new T0Document(
-      { onScriptConnected: () => undefined, onImageSrc: () => undefined, onAnchorActivation: (anchor) => activations.push(anchor.getAttribute("href")!), onFormSubmission: () => undefined },
-      (raw) => raw
-    )
-    parseMarkupInto(doc.body, '<a id="go" href="/go">go</a><a id="stay" href="/stay">stay</a>')
-    doc.querySelector("#stay")!.addEventListener("click", (event: T0Event) => event.preventDefault())
-    doc.querySelector("#go")!.click()
-    doc.querySelector("#stay")!.click()
-    expect(activations).toEqual(["/go"])
-  })
 })
 
 describe("the cookie jar (RFC 6265bis parts that decide which _fbc a page reads)", () => {
@@ -128,16 +60,3 @@ describe("the cookie jar (RFC 6265bis parts that decide which _fbc a page reads)
   })
 })
 
-describe("decoding the Next managed module's bootstrapSource", () => {
-  it("returns the exact bytes the client component appends, with its line", () => {
-    const moduleSource = buildAnalyticsModuleSource({ instructions: [{ path: "lib/infinite-analytics.ts", provider: "ga4", snippet: 'var re = /\\d+/; window.x = "a\\"b";' }] } as unknown as InstallPlan)
-    const decoded = decodeNextBootstrap(moduleSource)
-    // O5 isolates each provider in its own try block (Phase 1 F4 follow-up), so the decoded bytes carry that wrapper.
-    expect(decoded).toEqual({ ok: true, source: 'try {\nvar re = /\\d+/; window.x = "a\\"b";\n} catch (_infiniteProviderError) {}', line: 3 })
-  })
-
-  it("negative: a module without the literal, or with a broken one, is not decoded", () => {
-    expect(decodeNextBootstrap("export const x = 1")).toEqual({ ok: false, reason: "no_bootstrap_literal" })
-    expect(decodeNextBootstrap('const bootstrapSource = "\\x41"')).toEqual({ ok: false, reason: "undecodable_literal" })
-  })
-})

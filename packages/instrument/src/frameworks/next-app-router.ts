@@ -3,6 +3,9 @@ import { join } from "node:path"
 
 import type { FrameworkAdapter } from "../types.js"
 import { infiniteProxySpec } from "../workspace-artifacts.js"
+import { ownerWiringRequirement, policyWiringRequirement, policyUninstallWarning } from "./owner-boundary.js"
+import { recordGeneratedApi } from "../jobs/generated-api.js"
+import { upsertLayoutSource, CLIENT_IMPORT_LINE as clientImportLine, CLIENT_TAG as clientTag } from "./entry-wiring.js"
 
 import {
   buildAnalyticsModuleSource,
@@ -45,8 +48,6 @@ const pagesRouterCandidates = [
 const layoutFilePath = "app/layout.tsx"
 const clientComponentPath = "lib/infinite-analytics-client.tsx"
 const analyticsModulePath = "lib/infinite-analytics.ts"
-const clientImportLine = 'import { InfiniteAnalyticsClient } from "../lib/infinite-analytics-client"'
-const clientTag = "<InfiniteAnalyticsClient />"
 const missingLayoutBlocker =
   "Next.js App Router apply requires a root app/layout.* file so the managed client component can be mounted safely."
 
@@ -83,7 +84,7 @@ export const nextAppRouterAdapter: FrameworkAdapter = {
     const layoutFile = firstExistingPath(root, layoutCandidates)
     const proxy = { posthog: options?.posthogProxy, infinite: options?.infiniteProxy }
     const proxyPlan = proxy.posthog || proxy.infinite
-      ? planNextConfigProxy(root, proxy, options?.configOwnership, { deferUnmanaged: options?.deferUnmanagedNextConfig === true })
+      ? planNextConfigProxy(root, proxy, options?.configOwnership, { deferUnmanaged: options?.deferUnmanagedNextConfig === true, previousManifest: options?.previousManifest })
       : null
 
     if (!layoutFile) {
@@ -147,6 +148,8 @@ export const nextAppRouterAdapter: FrameworkAdapter = {
   },
   apply(context) {
     const appRoot = context.appRoot === "." ? context.root : join(context.root, context.appRoot)
+    const policy = policyWiringRequirement(normalizeAppRelativePath(context.appRoot, layoutFilePath), `${clientImportLine}\n\n${clientTag}`, context.appRoot)
+    if (policy) return { changedFiles: [], warnings: [policy.reason], requiresManual: [policy] }
     const currentLayout = readRequiredFile(appRoot, layoutFilePath)
     if (!currentLayout.includes("<body")) {
       throw new Error("Next.js App Router apply requires app/layout.tsx to render a <body> element.")
@@ -175,10 +178,13 @@ export const nextAppRouterAdapter: FrameworkAdapter = {
     const nextLayout = upsertLayoutSource(currentLayout)
     const nextClientComponent = buildClientComponentSource()
     const nextAnalyticsModule = buildAnalyticsModuleSource(context.plan)
+    recordGeneratedApi(context.root, normalizeAppRelativePath(context.appRoot, analyticsModulePath), nextAnalyticsModule)
+    recordGeneratedApi(context.root, normalizeAppRelativePath(context.appRoot, clientComponentPath), nextClientComponent)
 
     const changedFiles: string[] = []
     const configOwnership = {}
-    if (writeFileIfChanged(appRoot, layoutFilePath, nextLayout)) {
+    const manual = ownerWiringRequirement(normalizeAppRelativePath(context.appRoot, layoutFilePath), currentLayout, nextLayout, `${clientImportLine}\n\n${clientTag}`, context.appRoot)
+    if (!manual && writeFileIfChanged(appRoot, layoutFilePath, nextLayout)) {
       changedFiles.push(normalizeAppRelativePath(context.appRoot, layoutFilePath))
     }
     if (writeFileIfChanged(appRoot, clientComponentPath, nextClientComponent)) {
@@ -210,12 +216,15 @@ export const nextAppRouterAdapter: FrameworkAdapter = {
 
     return {
       changedFiles,
-      warnings: [],
+      warnings: manual ? [manual.reason] : [],
+      ...(manual ? { requiresManual: [manual] } : {}),
       configOwnership
     }
   },
   uninstall(context) {
     const appRoot = context.appRoot === "." ? context.root : join(context.root, context.appRoot)
+    const policyWarning = policyUninstallWarning(normalizeAppRelativePath(context.appRoot, layoutFilePath), context.appRoot)
+    if (policyWarning) return { removedFiles: [], restoredFiles: [], warnings: [policyWarning] }
     const removedFiles: string[] = []
     const restoredFiles: string[] = []
     const warnings: string[] = []
@@ -278,18 +287,5 @@ export const nextAppRouterAdapter: FrameworkAdapter = {
 function removeLayoutWiring(source: string): string {
   let next = source.replace(`${clientImportLine}\n`, "")
   next = next.replace(`\n        ${clientTag}`, "")
-  return next
-}
-
-function upsertLayoutSource(source: string): string {
-  let next = source
-  if (!next.includes(clientImportLine)) {
-    next = `${clientImportLine}\n${next}`
-  }
-
-  if (!next.includes(clientTag)) {
-    next = next.replace(/<body\b[^>]*>/, (match) => `${match}\n        ${clientTag}`)
-  }
-
   return next
 }

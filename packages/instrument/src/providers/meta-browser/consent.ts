@@ -1,10 +1,10 @@
 // The consent hook the managed Meta browser helpers share.
 //
 // THIS IS NOT A CONSENT GATE AND NOT A BANNER. Infinite never adds, changes or checks a cookie
-// banner; it records `consent_mode` and nothing else. infinite.fast wraps every Meta byte in its own
+// banner. It records this run's `consent_mode` and accepts the owner's explicit yes/no signal. infinite.fast wraps every Meta byte in its own
 // `__infiniteConsentGate`, which is part of its banner and is deliberately NOT ported here. What the
 // helpers take instead is an OPTIONAL hook: by default they run whenever the pixel itself runs, and
-// the one built-in hook reads the decision the Infinite runtime already records.
+// the one built-in hook reads Infinite's decision, not an arbitrary site's banner state.
 //
 // TWO STRENGTHS (`privacySignal`): the Meta helpers and the campaign capture treat DNT/GPC without a
 // grant as no; the GA4/PostHog conversion helpers do not, because GA4's and PostHog's own page views do
@@ -20,7 +20,7 @@
 // WHERE THE RUNTIME DOES NOT RUN (a preview host, a site with no Infinite source) the hook falls back to
 // the same three lines, in the same order, over what the runtime would have PERSISTED:
 //   1. an explicit decision the visitor made on this site (`infinite_analytics_consent` in
-//      localStorage, written by the runtime only after a real gesture) wins, in either direction;
+//      localStorage, written after a recent gesture by the runtime or the capture-only listener) wins;
 //   2. otherwise a DNT / GPC signal means no;
 //   3. otherwise `not_required` means yes and `required` means no.
 // The fallback can only ever be stricter than the runtime, never looser.
@@ -51,12 +51,35 @@ export const INFINITE_CONSENT_ACCESSOR = "__infiniteConsentAllowed"
 /** The event the site's own consent UI dispatches; the runtime persists the decision it carries. */
 export const INFINITE_CONSENT_EVENT = "infinite:analytics-consent-change"
 
+/** The capture can be installed without Infinite's tag. Only our own decision key is written. */
+export function captureConsentDecisionSource(gate: MetaBrowserGate): string {
+  if (gate.kind === "none") return ""
+  return [
+    'var captureConsentDecision = "";',
+    "var lastConsentGestureAt = -1;",
+    "function recordConsentGesture() { lastConsentGestureAt = Date.now(); }",
+    "try {",
+    'document.addEventListener("pointerdown", recordConsentGesture, true);',
+    'document.addEventListener("keydown", recordConsentGesture, true);',
+    `window.addEventListener("${INFINITE_CONSENT_EVENT}", function () {`,
+    "  var event = arguments[0];",
+    '  if (!event || !event.detail || typeof event.detail.granted !== "boolean") return;',
+    "  if (event.detail.granted && (lastConsentGestureAt < 0 || Date.now() - lastConsentGestureAt > 10000)) return;",
+    '  captureConsentDecision = event.detail.granted ? "granted" : "denied";',
+    // A refusal also governs capture when storage cannot be written. The runtime owns its own key.
+    `  if (typeof window.${INFINITE_CONSENT_ACCESSOR} === "function") { if (event.detail.granted) captureConsentDecision = ""; return; }`,
+    `  try { localStorage.setItem("${INFINITE_CONSENT_STORAGE_KEY}", event.detail.granted ? "granted" : "denied"); } catch (_error) {}`,
+    "});",
+    "} catch (_error) {}"
+  ].join("\n")
+}
+
 /**
  * Browser source for `function infiniteConsentAllows()` under the given gate. Plain ES5 with no
  * backticks, no `${` and no `</`, so it can sit in an HTML `<script>` and in the Next module's
  * string literal alike.
  */
-export function consentAllowsSource(gate: MetaBrowserGate): string {
+export function consentAllowsSource(gate: MetaBrowserGate, captureDecision = false): string {
   if (gate.kind === "none") {
     return "function infiniteConsentAllows() { return true; }"
   }
@@ -64,9 +87,11 @@ export function consentAllowsSource(gate: MetaBrowserGate): string {
   const ignoreSignal = gate.privacySignal === "ignored"
   return [
     "function infiniteConsentAllows() {",
+    ...(captureDecision ? ['  if (captureConsentDecision === "denied") return false;'] : []),
     "  try {",
     `    if (typeof window.${INFINITE_CONSENT_ACCESSOR} === "function") return window.${INFINITE_CONSENT_ACCESSOR}(${ignoreSignal ? "{ privacySignal: false }" : ""}) === true;`,
     "  } catch (_error) { return false; }",
+    ...(captureDecision ? ['  if (captureConsentDecision === "granted") return true;'] : []),
     "  var decision = null;",
     `  try { decision = localStorage.getItem("${INFINITE_CONSENT_STORAGE_KEY}"); } catch (_error) { decision = null; }`,
     '  if (decision === "granted") return true;',
@@ -84,8 +109,8 @@ export function consentAllowsSource(gate: MetaBrowserGate): string {
 }
 
 /**
- * Browser source for `function infiniteConsentGate(start)`: runs `start` once, now or after a later
- * grant. Under the Infinite hook a grant is noticed through the runtime's consent event and then
+ * Browser source for `function infiniteConsentGate(start)`: runs `start` once per grant, now or later.
+ * Withdrawal resets it so a later valid grant can capture again. A grant is noticed through the event and then
  * re-read from storage a tick later — so only a decision the runtime accepted (gesture-checked) and
  * persisted can open it, and the order in which the two listeners run does not matter.
  */
@@ -95,10 +120,12 @@ export function consentGateSource(gate: MetaBrowserGate): string {
   }
   return [
     "function infiniteConsentGate(start) {",
-    "  if (infiniteConsentAllows()) { start(); return; }",
-    "  var started = false;",
+    "  var started = infiniteConsentAllows();",
+    "  if (started) start();",
     "  try {",
     `    window.addEventListener("${INFINITE_CONSENT_EVENT}", function () {`,
+    "      var event = arguments[0];",
+    "      if (event && event.detail && event.detail.granted === false) started = false;",
     "      setTimeout(function () {",
     "        if (started || !infiniteConsentAllows()) return;",
     "        started = true;",

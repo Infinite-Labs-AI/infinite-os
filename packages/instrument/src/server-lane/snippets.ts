@@ -1,6 +1,7 @@
 // Reference implementations for stacks infinite-tag does not patch automatically. Code only —
 // every sentence of prose lives in copy.ts. Contract values are interpolated from helpers.ts and
 // workspace-artifacts.ts so the snippets can never disagree with the Node recipe.
+import { leadRouteEdit } from "./recipes.js"
 import { infiniteServerEventsDestination } from "../workspace-artifacts.js"
 
 import {
@@ -320,60 +321,37 @@ void sendInfiniteServerEvent({
 }
 
 /**
- * Reporting an outcome from a serverless route with the generated `lib/infinite-outcome` helper —
- * the three lines a Vercel `api/` function needs.
+ * Reporting a lead from a server route with the generated `lib/infinite-outcome` helper.
  *
- * The import specifier and the example route's extension follow the emitted helper: a TS project
- * imports `../lib/infinite-outcome` (bundler-resolved), while a JS project imports it WITH the
- * extension (`.js`/`.mjs`) — the exact resolution the module-format fix exists to guarantee.
+ * The import specifier follows the emitted helper: a TS project imports `../lib/infinite-outcome`
+ * (bundler-resolved), while a JS project imports it WITH the extension (`.js`/`.mjs`), the exact
+ * resolution the module-format fix exists to guarantee.
  */
 export function outcomeRouteSnippet(
   options: { importSpecifier?: string; language?: "ts" | "js" } = {}
 ): string {
-  const specifier = options.importSpecifier ?? "../lib/infinite-outcome"
-  const js = options.language === "js"
-  const routeExtension = js ? "js" : "ts"
-  const outcomeImportLine = `import { postInfiniteOutcome } from "${specifier}"`
-  const handlerSignature = js
-    ? "export default async function handler(request) {"
-    : "export default async function handler(request: Request): Promise<Response> {"
-  return String.raw`// api/checkout-status.${routeExtension} — a Vercel serverless function confirming a paid session.
-${outcomeImportLine}
-
-${handlerSignature}
-  const session = await stripe.checkout.sessions.retrieve(new URL(request.url).searchParams.get("id"))
-  if (session.payment_status !== "paid") return Response.json({ paid: false })
-
-  await postInfiniteOutcome({
-    type: "purchase",              // the exact name from Infinite -> Conversions
-    path: "/checkout",             // pathname only
-    eventId: "purchase:" + session.id, // Infinite's idempotency key: a retry is counted once
-    accountKey: session.customer,  // optional; hashed at rest by Infinite
-    visitKeyInputs: request        // same visitKey as the page view -> same-lane conversion rate
+  return leadRouteEdit({
+    language: options.language === "js" ? "js" : "ts",
+    router: "web",
+    importSpecifier: options.importSpecifier ?? "../lib/infinite-outcome",
+    fallbackPath: "/signup"
   })
-  // Running Meta ads without PostHog? Then report the purchase from your PAYMENT WEBHOOK INSTEAD of
-  // here — the SAME eventId ("purchase:" + session.id), plus the adMatch block captured at checkout
-  // (see "Optional: forward the conversion to Meta") — and delete this call, so one purchase is
-  // reported once. A purchase is a server event only: no fbq('track', 'Purchase') in the page, and
-  // never an event ID built here.
-
-  return Response.json({ paid: true })
-}
-`
 }
 
-/** Reporting an outcome from Next.js with the managed module. */
-export function nextOutcomeSnippet(moduleImportPath: string): string {
-  return String.raw`// app/api/signup/route.ts (or a server action / webhook) — after the outcome is REAL:
-import { sendInfiniteServerEvent } from ${JSON.stringify(moduleImportPath)}
+/** Reporting a sign-up from a Next.js App Router route with the outcome helper. */
+export function nextOutcomeSnippet(helperImportPath: string): string {
+  return String.raw`// app/api/signup/route.ts: after the account is REAL (stored), never on the click.
+import { reportInfiniteLead } from ${JSON.stringify(helperImportPath)}
 
 export async function POST(request: Request) {
-  const user = await createUser(await request.json())
-  void sendInfiniteServerEvent({
-    eventName: "sign_up",          // the exact name from Infinite → Conversions
-    eventId: "signup:" + user.id,  // stable per outcome, so retries dedupe
-    accountKey: user.id,           // optional; account-deduped outcomes
-    request                        // carries the same visitKey as the page view
+  const body = await request.json()
+  const user = await createUser(body)
+  await reportInfiniteLead(request, {
+    type: "sign_up",                       // the exact name declared in Infinite -> Conversions
+    email: body.email,                     // hashed in the helper; never sent, stored or logged
+    trackingAllowed: body.adMatch === true, // the page's signal that the visitor allowed tracking
+    fallbackPath: "/signup",
+    fallbackId: user.id                    // used only when LEAD_ID_SECRET is not set
   })
   return Response.json({ ok: true })
 }

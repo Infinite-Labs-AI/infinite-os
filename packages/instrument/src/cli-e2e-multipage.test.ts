@@ -1,4 +1,4 @@
-import { execFileSync } from "node:child_process"
+import { spawnSync } from "node:child_process"
 import { cpSync, existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { dirname, join, relative } from "node:path"
@@ -10,7 +10,8 @@ import { afterEach, describe, expect, it } from "vitest"
 const here = dirname(fileURLToPath(import.meta.url))
 const builtCli = join(here, "../dist/src/cli.js")
 const fixtureRoot = join(here, "../test/fixtures")
-const PAGES = ["index.html", "about.html", "privacy/index.html"]
+const PAGES = ["index.html", "about.html"]
+const POLICY_PAGE = "privacy/index.html"
 
 const tempRoots: string[] = []
 
@@ -38,15 +39,20 @@ function snapshotTree(root: string): Map<string, string> {
   return snapshot
 }
 
-function runBuiltCli(args: string[]): void {
+function runBuiltCli(args: string[], expectedExit = 0): string {
   // An empty artifacts dir keeps a bare install from discovering the dev's real
   // ~/.infinite/artifacts. Non-git temp dir ⇒ the dirty-tree gate never fires.
   const emptyArtifactsDir = mkdtempSync(join(tmpdir(), "instrument-e2e-artifacts-"))
   tempRoots.push(emptyArtifactsDir)
-  execFileSync(process.execPath, [builtCli, ...args], {
+  const result = spawnSync(process.execPath, [builtCli, ...args], {
     encoding: "utf8",
     env: { ...process.env, INFINITE_ARTIFACTS_DIR: emptyArtifactsDir }
   })
+  if (result.error) throw result.error
+  const diagnostic = `stdout:\n${result.stdout}\nstderr:\n${result.stderr}`
+  expect(result.signal, diagnostic).toBeNull()
+  expect(result.status, diagnostic).toBe(expectedExit)
+  return result.stdout
 }
 
 afterEach(() => {
@@ -56,7 +62,7 @@ afterEach(() => {
 })
 
 describe("built CLI e2e — multipage, all five providers", () => {
-  it("wires every page with all five providers, then uninstall restores byte-exact", () => {
+  it("wires ordinary pages with all five providers, leaves policy for the owner, and uninstalls byte-exactly", () => {
     if (!existsSync(builtCli)) {
       throw new Error(
         `Build the package before running this test — missing ${builtCli}. Run: pnpm -C packages/instrument run build`
@@ -66,7 +72,7 @@ describe("built CLI e2e — multipage, all five providers", () => {
     const root = copyFixture("static-html-multipage")
     const before = snapshotTree(root)
 
-    runBuiltCli([
+    const output = runBuiltCli([
       "install",
       "--root", root,
       "--workspace", "ws_e2e_pixel",
@@ -81,12 +87,18 @@ describe("built CLI e2e — multipage, all five providers", () => {
       "--x-event-tag-id", "tw-e2e-1",
       "--meta-pixel-id", "1234567890123456",
       "--yes"
-    ])
+    ], 2)
 
-    // Every page carries all five providers.
+    expect(output).toContain("Kept privacy/index.html as it is: it is a policy page")
+    expect(output).toContain("policy pages were left unchanged")
+    expect(output).not.toContain("nothing loads")
+    expect(output).not.toContain("pixel not yet live")
+    expect(readFileSync(join(root, POLICY_PAGE), "utf8")).toBe(before.get(POLICY_PAGE))
+
+    // Every ordinary page carries all five providers.
     for (const page of PAGES) {
       const html = readFileSync(join(root, page), "utf8")
-      // shared runtime — present on EVERY page, self-contained and source-bound
+      // Shared runtime is present on each ordinary page, self-contained and source-bound.
       expect(html).toContain("data-infinite-runtime")
       expect(html).toContain("site_public_e2e")
       expect(html).toContain("/infinite/ledger")
@@ -106,6 +118,14 @@ describe("built CLI e2e — multipage, all five providers", () => {
     // Manifest records all five providers.
     const manifest = JSON.parse(readFileSync(join(root, ".infinite/install.json"), "utf8"))
     expect(manifest.providers.sort()).toEqual(["ga4", "infinite", "meta", "posthog", "x"])
+    expect(manifest.files).not.toContain(POLICY_PAGE)
+    expect(manifest.requiresManual).toEqual([expect.objectContaining({ path: POLICY_PAGE, ownerBoundary: expect.objectContaining({ kind: "policy_page" }), snippet: expect.stringContaining("site_public_e2e") })])
+    expect(output).toContain(`Verified ${manifest.files.length} managed runtime files`)
+
+    const verified = runBuiltCli(["verify", "--root", root], 2)
+    expect(verified).toContain(POLICY_PAGE)
+    expect(verified).toContain("manual wiring remains for the files listed below")
+    expect(verified).not.toContain("the pixel is not live yet")
 
     // Uninstall restores the tree byte-for-byte.
     runBuiltCli(["uninstall", "--root", root, "--yes"])
@@ -117,19 +137,28 @@ describe("built CLI e2e — multipage, all five providers", () => {
     expect(existsSync(join(root, ".infinite"))).toBe(false)
   })
 
-  it("omits the Meta pixel on every page when no --meta-pixel-id is passed", () => {
+  it("omits Meta on ordinary pages and preserves the owner policy when no --meta-pixel-id is passed", () => {
     if (!existsSync(builtCli)) {
       throw new Error(`Build the package before running this test — missing ${builtCli}.`)
     }
 
     const root = copyFixture("static-html-multipage")
-    runBuiltCli([
+    const before = snapshotTree(root)
+    const output = runBuiltCli([
       "install",
       "--root", root,
       "--workspace", "ws_e2e_pixel",
       "--ga4-measurement-id", "G-E2E12345",
       "--yes"
-    ])
+    ], 2)
+
+    expect(output).toContain("Kept privacy/index.html as it is: it is a policy page")
+    expect(output).toContain("policy pages were left unchanged")
+    expect(output).toContain("Verified 2 managed runtime files")
+    expect(output).not.toContain("nothing loads")
+    expect(readFileSync(join(root, POLICY_PAGE), "utf8")).toBe(before.get(POLICY_PAGE))
+    const manifest = JSON.parse(readFileSync(join(root, ".infinite/install.json"), "utf8"))
+    expect(manifest.requiresManual).toEqual([expect.objectContaining({ path: POLICY_PAGE, ownerBoundary: expect.objectContaining({ kind: "policy_page" }), snippet: expect.stringContaining("G-E2E12345") })])
 
     for (const page of PAGES) {
       const html = readFileSync(join(root, page), "utf8")
@@ -141,5 +170,8 @@ describe("built CLI e2e — multipage, all five providers", () => {
       // meta absent — no pixel id given
       expect(html).not.toContain("fbevents.js")
     }
+    runBuiltCli(["uninstall", "--root", root, "--yes"])
+    expect(snapshotTree(root)).toEqual(before)
+    expect(existsSync(join(root, ".infinite"))).toBe(false)
   })
 })

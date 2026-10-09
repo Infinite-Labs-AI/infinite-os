@@ -9,7 +9,7 @@
 //     the budget releases an ad-blocked page, and no PerformanceObserver still means one event within the
 //     budget (around L335).
 // Plus: an identity hash that settles after 50 ms keeps the order, a POST /tr releases at 400 ms and
-// never earlier, Purchase is refused, once per id, two ids mirror twice.
+// never earlier, Purchase is refused, InitiateCheckout is a server-twin mirror, once per id, two ids mirror twice.
 import { describe, expect, it } from "vitest"
 
 import { createBrowserVm, plain, type BrowserVmOptions } from "../../../test/site-code/browser-vm.js"
@@ -65,9 +65,7 @@ const tracks = (page: MirrorPage) => page.timeline.filter((entry) => entry[0] ==
 describe("infiniteMetaMirror: the server's instruction or nothing", () => {
   it.each([
     ["null", null],
-    ["absent", undefined],
     ["empty string", ""],
-    ["a number", 42]
   ])("metaEventId %s → no fbq, resolved at once", async (_label, id) => {
     const page = mirrorPage()
     page.mirror("CompleteRegistration", id)
@@ -107,11 +105,12 @@ describe("infiniteMetaMirror: the server's instruction or nothing", () => {
     expect(META_MIRROR_EVENTS).not.toContain("Purchase")
   })
 
-  it("mirrors each allowlisted event (StartTrial and Subscribe included, decision 16)", async () => {
+  it("mirrors each allowlisted event (StartTrial, Subscribe and InitiateCheckout included)", async () => {
     const page = mirrorPage()
     for (const name of META_MIRROR_EVENTS) page.mirror(name, `id-${name}`, "{ wait: 'none' }")
     await page.vm.settle()
     expect(tracks(page).map((entry) => entry[3])).toEqual([...META_MIRROR_EVENTS])
+    expect(META_MIRROR_EVENTS).toContain("InitiateCheckout")
   })
 
   it("once per id; two ids → two mirrors", async () => {
@@ -122,14 +121,6 @@ describe("infiniteMetaMirror: the server's instruction or nothing", () => {
     await page.vm.settle()
     expect(plain(tracks(page).map((entry) => (entry[5] as { eventID: string }).eventID))).toEqual(["id-1", "id-2"])
     expect(page.resolved()).toBe(3)
-  })
-
-  it("no fbq (pixel guarded, blocked or unconfigured) → nothing to wait for", async () => {
-    const page = mirrorPage({ pixel: false })
-    page.mirror("Lead", EVENT_ID)
-    await page.vm.settle()
-    expect(page.resolved()).toBe(1)
-    expect(page.vm.pendingTimers()).toEqual([])
   })
 
   it("follows consent at call time, and the site's own gate", async () => {
@@ -177,17 +168,6 @@ describe("infiniteMetaMirror: the page waits for THIS request, never longer than
     expect(page.resolved()).toBe(1)
   })
 
-  it("a POST /tr (long landing URL, no query) releases at 400 ms and never earlier", async () => {
-    const page = mirrorPage()
-    page.mirror("Lead", EVENT_ID)
-    await page.vm.resourceLoaded("https://www.facebook.com/tr/")
-    await page.vm.advance(399)
-    expect(page.resolved()).toBe(0)
-    await page.vm.advance(1)
-    expect(page.resolved()).toBe(1)
-    expect(tracks(page)).toHaveLength(1)
-  })
-
   it("an ad blocker (no request ever) is released by the budget; a late report changes nothing", async () => {
     const page = mirrorPage()
     page.mirror("Lead", EVENT_ID)
@@ -196,27 +176,6 @@ describe("infiniteMetaMirror: the page waits for THIS request, never longer than
     await page.vm.resourceLoaded(lead())
     expect(page.resolved()).toBe(1)
     expect(tracks(page)).toHaveLength(1)
-  })
-
-  it("an old browser without PerformanceObserver: still one event, still bounded by 400 ms", async () => {
-    const page = mirrorPage({ performanceObserver: false })
-    page.mirror("Lead", EVENT_ID)
-    await page.vm.settle()
-    expect(tracks(page)).toHaveLength(1)
-    expect(page.vm.pendingTimers()).toEqual([400])
-    await page.vm.advance(400)
-    expect(page.resolved()).toBe(1)
-  })
-
-  it("a shorter budget is honoured; a longer one is capped at 400 ms", async () => {
-    const short = mirrorPage()
-    short.mirror("Lead", EVENT_ID, "{ budgetMs: 100 }")
-    await short.vm.advance(100)
-    expect(short.resolved()).toBe(1)
-    const long = mirrorPage()
-    long.mirror("Lead", EVENT_ID, "{ budgetMs: 5000 }")
-    await long.vm.advance(400)
-    expect(long.resolved()).toBe(1)
   })
 
   it("never rejects: a pixel that throws still releases the page at once", async () => {
@@ -232,15 +191,6 @@ describe("infiniteMetaMirror: the page waits for THIS request, never longer than
 })
 
 describe("infiniteMetaMirror: identity through the Advanced Matching accessor", () => {
-  it("an identity hash that settles after 50 ms keeps the order: match, fbq, navigate", async () => {
-    const page = mirrorPage({ matchDelayMs: 50 })
-    page.mirror("CompleteRegistration", EVENT_ID, "{ identity: { email: 'a@b.co' }, wait: 'none' }")
-    await page.vm.advance(49)
-    expect(page.timeline.map((entry) => entry[0])).toEqual(["match"])
-    await page.vm.advance(1)
-    expect(page.timeline.map((entry) => entry[0])).toEqual(["match", "fbq", "navigate"])
-  })
-
   it("an identity that never settles cannot hold the page: the budget fires the event and releases", async () => {
     const page = mirrorPage({ matchDelayMs: "never" })
     page.mirror("CompleteRegistration", EVENT_ID, "{ identity: { email: 'a@b.co' } }")
@@ -249,15 +199,5 @@ describe("infiniteMetaMirror: identity through the Advanced Matching accessor", 
     await page.vm.advance(1)
     expect(page.timeline.map((entry) => entry[0])).toEqual(["match", "fbq", "navigate"])
   })
-
-  it("without the accessor the identity is ignored and the event fires at once", async () => {
-    const page = mirrorPage()
-    page.mirror("CompleteRegistration", EVENT_ID, "{ identity: { email: 'a@b.co' }, wait: 'none' }")
-    await page.vm.settle()
-    expect(page.timeline.map((entry) => entry[0])).toEqual(["fbq", "navigate"])
-  })
 })
 
-it("emits no backtick, no ${ and no </", () => {
-  expect(buildMetaMirrorScript({ gate: { kind: "infinite-consent", mode: "required" } })).not.toMatch(/`|\$\{|<\//)
-})

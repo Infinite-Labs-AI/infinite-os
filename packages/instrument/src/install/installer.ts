@@ -7,7 +7,10 @@
 // the bridge; this module only reads and writes the repo).
 import { spawnSync } from "node:child_process"
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from "node:fs"
-import { join } from "node:path"
+import { recordGeneratedApi } from "../jobs/generated-api.js"
+import { previewOwnerWiring, type OwnerWiringPreview } from "../frameworks/owner-wiring-preview.js"
+import { planManagedCapture, applyManagedCapture, type ManagedCapturePlan } from "./managed-capture.js"
+import { dirname, join } from "node:path"
 
 import { restoreSnapshot, snapshotFiles, type FileSnapshot } from "../apply.js"
 import { frameworkAdapters, isSupportedFramework } from "../frameworks/index.js"
@@ -23,6 +26,8 @@ import {
 import { scanSourceFiles } from "../harness/scan.js"
 import { buildVerdict } from "../checks/build.js"
 import { detectSensitivePages, readAppSources } from "../setup-checks/index.js"
+import { isRoutePathList } from "../runtime/infinite-browser.js"
+import { INFINITE_CURRENCY_PATTERN } from "../conversions/track.js"
 import type { ResolvedKeys } from "../harness/types.js"
 import {
   computeContentHash,
@@ -33,12 +38,14 @@ import {
   writeInstallManifest
 } from "../manifest.js"
 import { packageInstallCommandLine, type CommandSpawner } from "../package-manager.js"
-import { planServerLane } from "../server-lane/install.js"
+import { buildServerLaneFiles, planServerLane, SERVER_LANE_MODULE_IMPORT_PATH } from "../server-lane/install.js"
 import type {
   DeferredConfigRewrite,
   ImproveLine,
   InspectResult,
   InstallManifest,
+  ManualRequirement,
+  ManagedCaptureRecord,
   ProviderId,
   SupportedFramework,
   WorkspaceInstallArtifacts
@@ -62,11 +69,15 @@ import type {
 import { beforeTextOf, makeEditRecord, refreshFromHead } from "./edits.js"
 import { applyImproveEdit, detectAdoptedFacts, improveLinesFor, withSensitivePaths, type AdoptedFacts } from "./improve.js"
 import { artifactsFromKeys, manifestIdsFor, posthogProxyFor, withConversionHelpers, wizardInstallWorkspaceId, type WizardInstallArtifacts } from "./keys-adapter.js"
+import { buildCreatedMiddlewareSource, buildServerLaneModuleSource } from "../server-lane/runtime-source.js"
 import { SERVER_LANE_GUIDE_FILE } from "../server-lane/copy.js"
-import { normalizeAppRelativePath } from "../frameworks/shared.js"
+import { buildEventInventory } from "../scan/event-inventory.js"
+import { snapshotFromFiles } from "../jobs/repo-files.js"
+import { renderServerEventsHandoff, SERVER_EVENTS_HANDOFF_FILE, serverConversionsOf, withHandoffInReceipt } from "../server-lane/handoff.js"
+import { hasDependency, normalizeAppRelativePath, writeFileAtomic } from "../frameworks/shared.js"
 import { DEFAULT_POSTHOG_PROXY_PATH, INFINITE_API_ORIGIN, infiniteCollectDestination } from "../workspace-artifacts.js"
-import { hasExactNextConfigRewrites, type ManagedProxySpec } from "../frameworks/vercel-config.js"
-import { isManagedInfiniteFile } from "../frameworks/managed-files.js"
+import { buildManualNextConfigInstruction, hasExactNextConfigRewrites, type ManagedProxySpec } from "../frameworks/vercel-config.js"
+import { buildAnalyticsModuleSource, buildClientComponentSource, hasExistingUnmanagedFile, isManagedInfiniteFile } from "../frameworks/managed-files.js"
 import { findLockfile, runNpmJob } from "./npm.js"
 import { proofFileBlockedText, proofFileTarget } from "./proof-file.js"
 import {
@@ -104,6 +115,8 @@ export const SENSITIVE_PAGES_CHECK_ID = "sensitive_pages" as const
 
 /** `Installer.scan` plus everything the plan and the install read (lanes may add optional fields). */
 export interface WizardScanResult extends ScanResult {
+  ownerWiring?: OwnerWiringPreview
+  managedCapture?: ManagedCapturePlan
   appRootSource: AppRootSource
   /** Workspace packages that look like web apps (more than one = an ambiguous monorepo: job 2). */
   appRootCandidates: string[]
@@ -125,6 +138,12 @@ export interface WizardScanResult extends ScanResult {
   unmanagedNextConfig?: string | null
   /** D17: the app's sensitive routes (`detectSensitivePages`), for the sensitive-pages plan lines. */
   sensitivePaths?: string[]
+  /**
+   * The commerce facts the browser wiring reads (`BrowserScanFacts`), from the scan's event inventory
+   * (`EventInventory.pixelRestrictedRoutes` / `siteCurrency`): one source, never a second detector.
+   */
+  pixelRestrictedRoutes?: string[]
+  siteCurrency?: string | null
 }
 
 export interface InstallerOptions {
@@ -187,6 +206,9 @@ function cacheEditBefores(root: string, records: readonly WizardEditRecord[]): v
 }
 
 export interface WizardApplyResult extends InstallerApplyResult {
+  managedCapture?: ManagedCaptureRecord
+  /** Deterministic edits refused before writing owner source; never dispatched to a worker. */
+  ownerRequirements?: ManualRequirement[]
   /** Repo-root-relative files written this run (managed + improve + npm), for the status line. */
   changedFiles: string[]
   warnings: string[]
@@ -216,6 +238,7 @@ function gitShow(root: string, rev: string, path: string): string | null {
 }
 
 const repoRelative = (appRoot: string, file: string): string => (appRoot === "." ? file : `${appRoot}/${file}`)
+const toAppRelativePath = (appRoot: string, file: string): string => (appRoot === "." || !file.startsWith(`${appRoot}/`) ? file : file.slice(appRoot.length + 1))
 
 /** The D17 detector's routes (`detectSensitivePages`) over the app's own source: login, checkout, … pages. */
 export function sensitiveRoutesOf(appRootAbsolute: string): string[] {
@@ -288,7 +311,14 @@ export class WizardInstaller implements Installer {
         ? { commandLine: packageInstallCommandLine(lockfile.lockfile.manager, serverLane.installPackages) }
         : { refused: lockfile.reason === "no_lockfile" ? "no lockfile, so the package manager is unknown" : `${lockfile.reason.replace("_", " ")}: ${lockfile.detail}` }
     }
+    // The commerce facts the browser wiring reads come from the scan's ONE event inventory (`src/scan/event-inventory.ts`,
+    // the same function the before step and the plan run): the routes the site keeps its pixels off, and its currency.
+    const commerce = buildEventInventory(
+      snapshotFromFiles(Object.fromEntries(source.files.map((file) => [normalizeAppRelativePath(phase.inspect.appRoot, file), readFileSync(join(phase.appRootAbsolute, file), "utf8")])), { appRoot: phase.inspect.appRoot })
+    )
     const result: WizardScanResult = {
+      pixelRestrictedRoutes: commerce.pixelRestrictedRoutes,
+      siteCurrency: commerce.siteCurrency,
       unmanagedNextConfig: unmanagedNextConfigOf(phase.appRootAbsolute, phase.inspect.appRoot, framework),
       sensitivePaths: sensitiveRoutesOf(phase.appRootAbsolute),
       root: opts.root,
@@ -311,6 +341,7 @@ export class WizardInstaller implements Installer {
       warnings
     }
     this.lastScan = result
+    result.managedCapture = planManagedCapture({ root: result.root, appRoot: result.appRoot, framework: result.framework, pixels: result.facts.meta, htmlPages: result.inspect.detectedFiles.filter(file => /\.html?$/i.test(file)) })
     return result
   }
 
@@ -327,7 +358,7 @@ export class WizardInstaller implements Installer {
     const beforeFacts = before as WizardBeforeFacts
     const sensitivePaths = sensitivePathsFor(wizardScan, before)
     const served = siteServing(wizardScan, beforeFacts, keys)
-    const improve = improveLinesFor(wizardScan.facts, { framework: wizardScan.framework, keys, sensitivePaths, vercelServed: served.vercelServed })
+    const improve = improveLinesFor(wizardScan.facts, { framework: wizardScan.framework, keys, sensitivePaths, vercelServed: served.vercelServed }).map(entry => entry.kind === "capture_beside_adopted_pixel" && wizardScan.managedCapture ? { ...entry, owner: "code" as const } : entry)
     const managed = new Set<ProviderId>((wizardScan.manifest?.providers ?? []) as ProviderId[])
     const run = this.options.runFacts?.() ?? null
     // §3y.2: on the claim path the proof file must be served at the site's root; a static site that builds into
@@ -337,7 +368,9 @@ export class WizardInstaller implements Installer {
       const target = proofFileTarget(wizardScan.root, wizardScan.appRoot, wizardScan.framework)
       if ("blocked" in target) infiniteBlocked = proofFileBlockedText(target.blocked)
     }
-    const facts: PlanScanFacts = {
+    const facts: PlanScanFacts & { ownerWiring?: OwnerWiringPreview; managedCapture?: ManagedCapturePlan } = {
+      managedCapture: wizardScan.managedCapture,
+      sources: Object.fromEntries(scanSourceFiles(join(wizardScan.root, wizardScan.appRoot), { includePublic: wizardScan.framework === "static-html" }).files.map(file => [normalizeAppRelativePath(wizardScan.appRoot, file), readFileSync(join(wizardScan.root, wizardScan.appRoot, file), "utf8")])),
       framework: wizardScan.framework,
       managedProviders: [...managed],
       adopted: wizardScan.detected
@@ -354,11 +387,12 @@ export class WizardInstaller implements Installer {
       // Review I1 P1-2: an installer blocker is said on the plan screen, before anything is approved or written.
       installBlocked: this.dryInstallFailure(
         wizardScan,
-        artifactsFromKeys(keys, { consentMode: "not_required", conversionNames: [], privacyText: null, npmInstall: null }, { posthogProxy: served.posthogProxy }),
+        artifactsFromKeys(keys, { consentMode: "not_required", conversionNames: [], privacyText: null, npmInstall: null }, { posthogProxy: served.posthogProxy, infiniteExcludedPaths: sensitivePaths }),
         wizardScan.serverLane !== null,
         beforeFacts
       )
     }
+    facts.ownerWiring = wizardScan.ownerWiring
     const model = buildPlanModel({
       scan: facts,
       keys,
@@ -369,7 +403,7 @@ export class WizardInstaller implements Installer {
       productionDeniedConflict: this.options.productionDeniedConflict,
       run
     })
-    this.internals.set(model, { scan: wizardScan, keys, before: beforeFacts, candidates, improve })
+    this.internals.set(model, { scan: wizardScan, keys, before: beforeFacts, candidates: model.scopedCandidates ?? candidates, improve })
     return model
   }
 
@@ -385,13 +419,13 @@ export class WizardInstaller implements Installer {
     const answers = resolvePlanAnswers(plan, approvals, { consentFlag: this.options.consentFlag() })
     const approved = new Set(answers.lines.filter((entry) => entry.approved === true).map((entry) => entry.id))
     const served = siteServing(scan, internals.before, keys)
-    const all = artifactsFromKeys(keys, { ...plan.decisions, consentMode: answers.consentMode ?? "not_required" }, { posthogProxy: served.posthogProxy })
+    const all = followSitePixels(artifactsFromKeys(keys, { ...plan.decisions, metaAdvancedMatching: answers.metaAdvancedMatching, consentMode: answers.consentMode ?? "not_required" }, { posthogProxy: served.posthogProxy }), scan.detected, pixelFreePathsOf(scan))
     const artifacts: WizardInstallArtifacts = { ...(all.productionHosts ? { productionHosts: all.productionHosts } : {}) }
     for (const tool of ["infinite", "ga4", "posthog", "meta"] as const) {
       const lineForTool = plan.lines.find((entry) => entry.kind === "install_provider" && (entry.id === `install_provider:${tool}` || entry.id.startsWith(`install_provider:${tool}:`)))
       if (lineForTool && approved.has(lineForTool.id) && all[tool]) (artifacts as Record<string, unknown>)[tool] = all[tool]
     }
-    return this.dryInstallFailure(scan, artifacts, approved.has("server_lane") && artifacts.infinite !== undefined && scan.serverLane !== null, internals.before)
+    return this.dryInstallFailure(scan, withMetaRouteChangePageViews(artifacts, scan), approved.has("server_lane") && artifacts.infinite !== undefined && scan.serverLane !== null, internals.before)
   }
 
   /** The harness plan's failure for these artifacts, planned exactly as `apply` plans them, with no write. */
@@ -413,6 +447,7 @@ export class WizardInstaller implements Installer {
       for (const tool of ["infinite", "ga4", "posthog", "meta"] as const) if (artifacts[tool]) resolvedKeys.sources[tool] = "infinite-connection"
       const classifications = classifyPhase({ manifest: phase.manifest, detected: phase.detected, keys: resolvedKeys, adoptExisting: true, serverLane, improve: {} })
       const result = planPhase({ root: scan.root, inspect: phase.inspect, classifications, keys: resolvedKeys, workspaceId: wizardInstallWorkspaceId(this.options.repoFingerprint), serverLane, deferUnmanagedNextConfig: true })
+      scan.ownerWiring = previewOwnerWiring({ root: scan.root, appRoot: scan.appRoot, framework: scan.framework, plan: result.plan })
       return result.failure && !result.nothingToInstall ? result.failure.message : null
     } catch (error) {
       return error instanceof Error ? error.message : String(error)
@@ -423,7 +458,7 @@ export class WizardInstaller implements Installer {
   // apply
   // ---------------------------------------------------------------------------------------------
 
-  async apply(plan: PlanModel, approvals: PlanApprovals): Promise<WizardApplyResult> {
+  private prepareApply(plan: PlanModel, approvals: PlanApprovals) {
     const internals = this.internals.get(plan)
     if (!internals) throw new Error("apply needs a plan built by this installer (buildPlan) in this process.")
     const model = plan as WizardPlanModel
@@ -439,7 +474,7 @@ export class WizardInstaller implements Installer {
 
     // ---- the artifacts: approved tools from the connections; an already-managed tool whose update
     // was not approved is KEPT exactly as the receipt recorded it (never dropped from the page) ----
-    const all = artifactsFromKeys(keys, { ...plan.decisions, consentMode: answers.consentMode }, { posthogProxy: served.posthogProxy })
+    const all = followSitePixels(artifactsFromKeys(keys, { ...plan.decisions, metaAdvancedMatching: answers.metaAdvancedMatching, consentMode: answers.consentMode }, { posthogProxy: served.posthogProxy }), scan.detected, pixelFreePathsOf(scan))
     const installLine = (tool: ProviderId) =>
       plan.lines.find((entry) => entry.kind === "install_provider" && (entry.id === `install_provider:${tool}` || entry.id.startsWith(`install_provider:${tool}:`)))
     const previous = scan.manifest
@@ -451,7 +486,7 @@ export class WizardInstaller implements Installer {
         continue
       }
       if (!previous?.providers.includes(tool)) continue
-      const kept = answers.consentMode === null ? "the plan has no consent answer for it" : keptArtifact(tool, previous, keys, answers.consentMode)
+      const kept = answers.consentMode === null ? "the plan has no consent answer for it" : keptArtifact(tool, previous, keys, answers.consentMode, answers.metaAdvancedMatching)
       if (typeof kept === "string") {
         return this.failed(artifacts, warnings, `${TOOL_LABEL[tool]} is already installed here and its update was not approved, but ${kept}. Approve "Update ${TOOL_LABEL[tool]}", or remove it with uninstall first.`, false)
       }
@@ -467,7 +502,8 @@ export class WizardInstaller implements Installer {
     }
     if (approved.has("sensitive_pages:posthog:managed")) artifacts = withSensitivePaths(artifacts, sensitivePathsFor(internals.scan, internals.before))
     // §3x.3 (B3): the conversion helpers, by the one rule (`withConversionHelpers`), on what this install really writes.
-    artifacts = withConversionHelpers(artifacts, answers.conversions)
+    artifacts = withSiteCurrency(withConversionHelpers(artifacts, answers.conversions), scan)
+    artifacts = withMetaRouteChangePageViews(artifacts, scan)
     const serverLane = approved.has("server_lane") && artifacts.infinite !== undefined && scan.serverLane !== null
 
     // ---- snapshot everything this install can touch (full rollback on any failure) ----
@@ -516,6 +552,13 @@ export class WizardInstaller implements Installer {
     const npmFiles =
       lockfile?.ok === true ? [repoRelative(scan.appRoot, "package.json"), lockfile.lockfile.file] : []
     const p = planResult.plan
+    return { root, scan, runId, artifacts, warnings, previous, internals, keys, answers, served, codeImprove, npmApproved, workspaceId, improveFiles, npmFiles, planResult, p }
+  }
+
+  async apply(plan: PlanModel, approvals: PlanApprovals): Promise<WizardApplyResult> {
+    const prepared = this.prepareApply(plan, approvals)
+    if (!("p" in prepared)) return prepared
+    const { root, scan, runId, artifacts, warnings, previous, internals, keys, answers, served, codeImprove, npmApproved, workspaceId, improveFiles, npmFiles, planResult, p } = prepared
     // Every file the server lane can write (brief, guide, module, middleware, created entries) is in the
     // snapshot too, so a rollback leaves nothing half-installed (P3-21).
     const laneFiles = p.serverLane
@@ -528,9 +571,10 @@ export class WizardInstaller implements Installer {
         ]
       : []
     const carriedEdits = previous?.edits ?? []
+    const capturePlan = codeImprove.some(entry => entry.kind === "capture_beside_adopted_pixel") ? planManagedCapture({ root, appRoot: scan.appRoot, framework: scan.framework, pixels: scan.facts.meta, htmlPages: scan.inspect.detectedFiles.filter(file => /\.html?$/i.test(file)) }) : undefined
     const carriedFiles = [...new Set(carriedEdits.map((edit) => edit.file))]
     const snapshot: FileSnapshot[] = snapshotFiles(root, [
-      ...new Set([...p.files, ...laneFiles, installManifestRelativePath, ...improveFiles, ...npmFiles, ...carriedFiles])
+      ...new Set([...p.files, ...laneFiles, repoRelative(scan.appRoot, SERVER_EVENTS_HANDOFF_FILE), installManifestRelativePath, ...improveFiles, ...npmFiles, ...carriedFiles, ...(capturePlan ? [capturePlan.module, ...capturePlan.entrypoints] : [])])
     ])
     const rollback = (): boolean => {
       try {
@@ -544,6 +588,8 @@ export class WizardInstaller implements Installer {
     const edits: WizardEditRecord[] = []
     const changedFiles: string[] = []
     let openJobs: string[] = []
+    const ownerRequirements: ManualRequirement[] = []
+    let managedCapture: ManagedCaptureRecord | undefined
     let seq = 0
     try {
       // 1. the managed install (the harness's own apply + static verification + rollback)
@@ -555,7 +601,8 @@ export class WizardInstaller implements Installer {
         }
         changedFiles.push(...(applied.applyResult?.changedFiles ?? []))
         warnings.push(...(applied.applyResult?.warnings ?? []))
-        openJobs = applied.openJobs.map((requirement) => requirement.path)
+        ownerRequirements.push(...applied.openJobs.filter(requirement => requirement.ownerBoundary))
+        openJobs = applied.openJobs.filter(requirement => !requirement.ownerBoundary).map((requirement) => requirement.path)
         // A file an EARLIER run's recorded edits live in, changed by this run's managed re-render: that
         // change is recorded too, so uninstall (newest first) walks back through it to the earlier
         // edits instead of finding them "changed since" (P1-3).
@@ -570,6 +617,16 @@ export class WizardInstaller implements Installer {
 
       // 2. approved improve-in-place code edits (each recorded, reversible)
       for (const entry of codeImprove) {
+        if (entry.kind === "capture_beside_adopted_pixel") {
+          // Following the site's pixels, the click-id module waits for the tag's start instead of running at import.
+          if (answers.consentMode === null) throw new Error("The capture requires the owner's recorded consent-mode answer")
+          const applied = applyManagedCapture({ root, appRoot: scan.appRoot, framework: scan.framework, pixels: scan.facts.meta, htmlPages: scan.inspect.detectedFiles.filter(file => /\.html?$/i.test(file)), mode: artifacts.infinite?.followSitePixels === true ? "required" : answers.consentMode, runId, seq })
+          ownerRequirements.push(...applied.plan?.requirements ?? [])
+          edits.push(...applied.edits); seq += applied.edits.length
+          changedFiles.push(...applied.changedFiles)
+          managedCapture = applied.record
+          continue
+        }
         const result = applyImproveEdit({
           root,
           appRoot: scan.appRoot,
@@ -582,7 +639,9 @@ export class WizardInstaller implements Installer {
           vercelServed: served.vercelServed
         })
         if (!result.ok) {
-          warnings.push(`${entry.id}: not changed — ${result.reason}`)
+          if (result.ownerRequirement) ownerRequirements.push(result.ownerRequirement)
+          // Plain words on screen: the line as the plan showed it, never its internal id.
+          warnings.push(`${entry.text}: the install could not write this change itself, so it is left ${result.ownerRequirement ? "for you" : "for your coding agent"} (${result.reason}).`)
           continue
         }
         if (result.record) {
@@ -606,7 +665,7 @@ export class WizardInstaller implements Installer {
 
       // 4. the build check: a failure NEW against the baseline rolls everything back
       let build: WizardApplyResult["build"] = "not_run"
-      if (this.options.build) {
+      if (this.options.build && internals.before.localValidation !== "not_measured") {
         const result = await this.options.build()
         // ONE rule with the jobs step and the review's fix rounds (B26, `buildVerdict`): a build that could not
         // run (or ended red with no failure signature) is UNDETERMINED: never "passed", never "red before this
@@ -616,25 +675,37 @@ export class WizardInstaller implements Installer {
         if (verdict.state === "pass") build = result.ok ? "passed" : "failed_baseline"
         else if (verdict.state === "undetermined") {
           build = "not_run"
-          warnings.push(`The build could not run (${verdict.reason ?? "test_error"}); it is checked again in the draft pull request.`)
+          warnings.push(`The build could not run here (${verdict.reason ?? "test_error"}); the pull request's own checks will be the judge.`)
         } else {
           const known = new Set(baselineBuild?.failureSignature ?? [])
           const fresh = result.failureSignature.filter((signature) => !known.has(signature))
           const restored = rollback()
           return this.failed(artifacts, warnings, `The build failed after the install${fresh.length > 0 ? ` (${fresh.slice(0, 3).join("; ")})` : ""}; every change was rolled back.`, restored)
         }
-      } else {
-        warnings.push("No build check ran (none wired); the build is checked again in the draft pull request.")
+      } else if (internals.before.localValidation !== "not_measured") {
+        warnings.push("No local build check is available; the pull request's own checks will be the judge.")
       }
 
       // 5. the receipt: the earlier runs' edits carried over, this run's edits, and the public ids the
       // page now carries (this run's approvals plus every kept tool)
       this.writeReceipt(root, scan, workspaceId, edits, manifestIdsFor(artifacts), carriedEdits)
+      if (managedCapture) {
+        const receipt = readInstallManifest(root)
+        if (!receipt) throw new Error("The managed capture has no install receipt")
+        const files = [...new Set([...receipt.files, managedCapture.module, ...managedCapture.entrypoints])]
+        writeInstallManifest(root, { ...receipt, managedCapture, files, contentHashes: { ...receipt.contentHashes, ...computeContentHashes(root, files) } })
+      }
+      // 6. P0-6: the owner's steps for server conversions, as a file in the pull request. The agent writes the
+      // server code either way; it stays inert until the owner does these steps.
+      const handoff = p.serverLane ? this.writeServerEventsHandoff(root, scan, keys, artifacts, answers.conversions) : null
+      if (handoff) changedFiles.push(handoff)
       return {
         ok: true,
         rolledBack: false,
         edits,
         openJobs,
+        ...(ownerRequirements.length ? { ownerRequirements } : {}),
+        ...(managedCapture ? { managedCapture } : {}),
         changedFiles: [...new Set(changedFiles)],
         warnings,
         reason: null,
@@ -646,6 +717,108 @@ export class WizardInstaller implements Installer {
     } catch (error) {
       const restored = rollback()
       return this.failed(artifacts, warnings, error instanceof Error ? error.message : String(error), restored)
+    }
+  }
+
+  /**
+   * Write `docs/infinite-server-events.md` (the owner's steps) when the plan reports conversions from the
+   * server, and record it in the receipt as a lane-created file (committed with the lane, removed by
+   * uninstall only while unedited). Never overwrites a file Infinite does not manage. Returns its path.
+   */
+  private writeServerEventsHandoff(
+    root: string,
+    scan: WizardScanResult,
+    keys: TagKeys,
+    artifacts: WizardInstallArtifacts,
+    conversionNames: readonly string[]
+  ): string | null {
+    const conversions = serverConversionsOf(conversionNames)
+    if (conversions.length === 0) return null
+    const appRootAbsolute = join(root, scan.appRoot)
+    if (hasExistingUnmanagedFile(appRootAbsolute, SERVER_EVENTS_HANDOFF_FILE)) return null
+    const receipt = readInstallManifest(root)
+    if (!receipt) return null
+    const contents = renderServerEventsHandoff({
+      conversions,
+      productionHost: artifacts.infinite?.productionHosts?.[0] ?? keys.infinite.productionHosts[0] ?? null,
+      siteSourceKey: artifacts.infinite?.siteSourceKey || keys.infinite.siteSourceKey || null,
+      envSetByInfinite: keys.serverLane.envWriteGranted,
+      metaConnected: keys.meta.status === "connected",
+      usesStripe: hasDependency(appRootAbsolute, "stripe"),
+      usesPosthog: artifacts.posthog !== undefined || scan.detected.some((entry) => entry.provider === "posthog"),
+      webhookUrlPath: "/api/stripe-webhook"
+    })
+    const path = repoRelative(scan.appRoot, SERVER_EVENTS_HANDOFF_FILE)
+    mkdirSync(dirname(join(root, path)), { recursive: true })
+    writeFileAtomic(join(root, path), contents)
+    writeInstallManifest(root, withHandoffInReceipt(receipt, path, contents))
+    return path
+  }
+
+  /** Re-render whole owned modules only. Entry points, npm and improve edits are never replayed. */
+  async refreshManaged(plan: PlanModel, approvals: PlanApprovals): Promise<{ changedFiles: string[]; blocked: string[] }> {
+    const prepared = this.prepareApply(plan, approvals)
+    if (!("p" in prepared)) throw new Error(prepared.reason ?? "Could not rebuild the managed install plan")
+    const { root, scan, p, runId } = prepared
+    const readBlob = this.options.readBlob ?? gitShow
+    const committedReceipt = readBlob(root, "HEAD", installManifestRelativePath)
+    if (!committedReceipt) return { changedFiles: [], blocked: [] }
+    const previous = JSON.parse(committedReceipt) as InstallManifest
+    const current = readInstallManifest(root)
+    if (previous.runId && previous.runId !== runId) return { changedFiles: [], blocked: [installManifestRelativePath] }
+    if (!current || readFileSync(join(root, installManifestRelativePath), "utf8") !== committedReceipt) return { changedFiles: [], blocked: [installManifestRelativePath] }
+    const expected = new Map<string, string>()
+    for (const file of previous.files) {
+      if (/(?:^|\/)lib\/infinite-analytics\.ts$/.test(file)) expected.set(file, buildAnalyticsModuleSource(p))
+      if (/(?:^|\/)lib\/infinite-analytics-client\.tsx$/.test(file)) expected.set(file, buildClientComponentSource())
+    }
+    for (const instruction of p.instructions) {
+      if (/(?:^|\/)next\.config\.[cm]?js$/.test(instruction.path) && previous.configOwnership?.[instruction.path]?.kind === "created" && isManagedInfiniteFile(instruction.snippet)) expected.set(instruction.path, instruction.snippet)
+    }
+    const lane = p.serverLane
+    const infinite = p.artifacts.infinite
+    const options = { siteSourceKey: infinite?.siteSourceKey || undefined, productionHosts: infinite?.productionHosts ?? p.artifacts.productionHosts ?? [], ...(infinite?.apiOrigin ? { apiOrigin: infinite.apiOrigin } : {}), ...(infinite?.collectPath ? { collectPath: infinite.collectPath } : {}) }
+    if (lane?.mode === "next-middleware") {
+      if (lane.modulePath && previous.serverLane?.module === lane.modulePath) expected.set(lane.modulePath, buildServerLaneModuleSource(options))
+      if (lane.middleware && previous.configOwnership?.[lane.middleware.path]?.kind === "created") expected.set(lane.middleware.path, buildCreatedMiddlewareSource({ moduleImportPath: SERVER_LANE_MODULE_IMPORT_PATH }))
+    }
+    if (lane?.created && lane.created.length > 0) {
+      // Every whole file the lane wrote, Next's and the brief-only outcome helper included.
+      const appRootAbsolute = join(root, scan.appRoot)
+      const built = buildServerLaneFiles(lane.mode, options, appRootAbsolute, lane.created.map((entry) => toAppRelativePath(scan.appRoot, entry.path)))
+      for (const [file, source] of Object.entries(built)) {
+        const path = normalizeAppRelativePath(scan.appRoot, file)
+        if (previous.serverLane?.created?.includes(path) && previous.configOwnership?.[path]?.kind === "created") expected.set(path, source)
+      }
+    }
+    const blocked: string[] = []
+    const changed: Array<{ file: string; before: string; after: string }> = []
+    for (const [file, after] of expected) {
+      const before = existsSync(join(root, file)) ? readFileSync(join(root, file), "utf8") : null
+      const committed = readBlob(root, "HEAD", file)
+      const ownership = previous.configOwnership?.[file]
+      const hash = ownership?.kind === "created" ? ownership.installedHash : previous.contentHashes[file]
+      if (!hash || before === null || committed === null || computeContentHash(before) !== hash || computeContentHash(committed) !== hash || !isManagedInfiniteFile(before)) {
+        blocked.push(file)
+      } else if (before !== after) changed.push({ file, before, after })
+    }
+    // Check every candidate before writing any: a hand edit never leaves a half-refreshed install.
+    if (blocked.length > 0 || changed.length === 0) return { changedFiles: [], blocked }
+    const snapshot = snapshotFiles(root, [...changed.map(entry => entry.file), installManifestRelativePath])
+    try {
+      for (const entry of changed) {
+        recordGeneratedApi(root, entry.file, entry.after)
+        writeFileAtomic(join(root, entry.file), entry.after)
+      }
+      const edits = changed.map((entry, seq) => makeEditRecord({ ...entry, jobId: null, planLineId: "managed_resume_refresh", by: "wizard", runId, seq: (current.edits?.length ?? 0) + seq }))
+      const configOwnership = { ...current.configOwnership }
+      for (const entry of changed) if (configOwnership[entry.file]?.kind === "created") configOwnership[entry.file] = { kind: "created", installedHash: computeContentHash(entry.after) }
+      cacheEditBefores(root, edits)
+      writeInstallManifest(root, { ...current, runId, edits: [...(current.edits ?? []), ...edits], configOwnership, contentHashes: { ...current.contentHashes, ...Object.fromEntries(changed.map(entry => [entry.file, computeContentHash(entry.after)])) } })
+      return { changedFiles: [...changed.map(entry => entry.file), installManifestRelativePath], blocked: [] }
+    } catch (error) {
+      restoreSnapshot(root, snapshot)
+      throw error
     }
   }
 
@@ -757,6 +930,7 @@ export class WizardInstaller implements Installer {
     if (merged.length === 0 && ids === null && current) return
     writeInstallManifest(root, {
       ...base,
+      runId: this.requireRunId(),
       contentHashes: { ...base.contentHashes, ...computeContentHashes(root, base.files) },
       ...(merged.length > 0 ? { edits: merged } : {}),
       ...(ids ? { ids } : base.ids ? { ids: base.ids } : {})
@@ -856,7 +1030,9 @@ function keptArtifact(
   tool: "infinite" | "ga4" | "posthog" | "meta",
   previous: InstallManifest,
   keys: TagKeys,
-  consentMode: "required" | "not_required"
+  consentMode: "required" | "not_required",
+  /** The same default a new install gets (`keys-adapter`, parity gap 5), so a kept pixel's bytes do not change. */
+  metaAdvancedMatching = true
 ): NonNullable<WizardInstallArtifacts[typeof tool]> | string {
   const ids = previous.ids
   if (!ids) return "its receipt does not record the installed ids"
@@ -864,7 +1040,7 @@ function keptArtifact(
     case "ga4":
       return ids.ga4.length === 1 ? { measurementId: ids.ga4[0]! } : "its receipt does not record exactly one GA4 id"
     case "meta":
-      return ids.meta.length === 1 ? { pixelId: ids.meta[0]! } : "its receipt does not record exactly one pixel id"
+      return ids.meta.length === 1 ? { pixelId: ids.meta[0]!, consentMode, ...(metaAdvancedMatching ? { advancedMatching: true } : {}) } : "its receipt does not record exactly one pixel id"
     case "posthog": {
       if (!ids.posthog) return "its receipt does not record the PostHog project"
       const { projectKey, apiHost } = ids.posthog
@@ -918,8 +1094,74 @@ function ownConfigHas(root: string, file: string, proxy: ManagedProxySpec | null
  * Review I1 P1-2: the plan line's fact. A Next app with its own config that lacks Infinite's collect rewrite:
  * the installer leaves the file as it is and the rewrite is an agent job, so the plan says so up front.
  */
-export function nextConfigRewritesNeeded(scan: Pick<WizardScanResult, "root"> & { unmanagedNextConfig?: string | null }, keys: TagKeys): { path: string } | null {
+export function nextConfigRewritesNeeded(scan: Pick<WizardScanResult, "root"> & { unmanagedNextConfig?: string | null }, keys: TagKeys): { path: string; snippet: string } | null {
   if (!scan.unmanagedNextConfig || !keys.infinite.collectPath) return null
   const infinite = { path: keys.infinite.collectPath, destination: infiniteCollectDestination(INFINITE_API_ORIGIN) }
-  return ownConfigHas(scan.root, scan.unmanagedNextConfig, { infinite }) ? null : { path: scan.unmanagedNextConfig }
+  return ownConfigHas(scan.root, scan.unmanagedNextConfig, { infinite }) ? null : { path: scan.unmanagedNextConfig, snippet: buildManualNextConfigInstruction({ infinite }) }
+}
+
+/**
+ * A site that already runs its own analytics or ad pixels gets a tag that starts when they start and
+ * stops when they stop, so the site's own banner (or the lack of one) governs it the same way. A site
+ * with no pixels of its own gets a tag that starts on load. Nothing is asked either way.
+ */
+function followSitePixels(artifacts: WizardInstallArtifacts, detected: readonly DetectedProviderEvidence[], pixelFreePaths: readonly string[] = []): WizardInstallArtifacts {
+  const sitePixels = detected.some((entry) => entry.provider === "ga4" || entry.provider === "posthog" || entry.provider === "meta")
+  if (!sitePixels || !artifacts.infinite || artifacts.infinite.consentMode !== "not_required") return artifacts
+  return {
+    ...artifacts,
+    infinite: { ...artifacts.infinite, followSitePixels: true, ...(pixelFreePaths.length > 0 ? { pixelFreePaths: [...pixelFreePaths] } : {}) }
+  }
+}
+
+/**
+ * The scan facts the browser wiring reads. The commerce scan (`src/scan/`) fills them; absent = none found.
+ *   - `pixelRestrictedRoutes`: the site's own routes where it keeps its ad and analytics pixels off.
+ *   - `siteCurrency`: the currency the site prices in (ISO 4217), from its catalog or payment code.
+ */
+interface BrowserScanFacts {
+  pixelRestrictedRoutes?: readonly string[]
+  siteCurrency?: string | null
+}
+
+/**
+ * REVIEW P1-6, THE TAG'S ROUTE RULES. The tag's `excludedPaths` is an explicit owner choice only: the wizard never
+ * fills it, and in particular never from the PostHog sensitive-page list (that list turns PostHog replay and
+ * autocapture off on checkout, account, billing… pages; it hid exactly the cart and success page views Infinite
+ * exists to count). The site's own pixel-restricted routes are NOT exclusions either: Infinite is the site's
+ * first-party ledger and should see /cart and /success. They ride as `pixelFreePaths`, which matter only in follow
+ * mode: there, a full page load of such a route never starts the site's pixels, and the tag carries the decision it saw
+ * on the visitor's earlier pages in the same tab (`runtime/infinite-browser.ts`, follow mode). A visitor who refused, or
+ * who lands there first, is still not recorded. Only root-relative literal paths are kept (never "/": that would
+ * make every page pixel-free).
+ */
+export function pixelFreePathsOf(scan: BrowserScanFacts): string[] {
+  const routes = (scan.pixelRestrictedRoutes ?? []).filter((route) => route !== "/" && isRoutePathList([route]))
+  return [...new Set(routes)].sort()
+}
+
+/** The site's currency onto the helpers (the default a product event carries to Meta and GA4). */
+export function withSiteCurrency<T extends WizardInstallArtifacts>(artifacts: T, scan: BrowserScanFacts): T {
+  const currency = typeof scan.siteCurrency === "string" ? scan.siteCurrency.toUpperCase() : null
+  if (!artifacts.conversions || currency === null || !INFINITE_CURRENCY_PATTERN.test(currency)) return artifacts
+  return { ...artifacts, conversions: { ...artifacts.conversions, currency } }
+}
+
+const SITE_META_PAGEVIEW = /\bfbq\s*\(\s*(['"])track\1\s*,\s*(['"])PageView\2/
+
+/**
+ * PARITY GAP 8. The pixel infinite-tag installs sets `disablePushState`, so on a single-page app the tag's history hook
+ * sends one Meta PageView per route change (`metaPageViews`). Not when the site's own code already sends a Meta
+ * PageView anywhere (a route-change handler would double it), not for a capture-only install beside the site's own
+ * pixel, and not on a multi-page site, where every page is a full load and the bootstrap's PageView covers it.
+ */
+export function withMetaRouteChangePageViews<T extends WizardInstallArtifacts>(artifacts: T, scan: Pick<WizardScanResult, "framework" | "root" | "appRoot">): T {
+  if (!artifacts.infinite || !artifacts.meta || artifacts.meta.captureOnly === true) return artifacts
+  if (scan.framework !== "next-app-router" && scan.framework !== "next-pages-router" && scan.framework !== "vite-react") return artifacts
+  const appRootAbsolute = scan.appRoot === "." ? scan.root : join(scan.root, scan.appRoot)
+  for (const source of readAppSources(appRootAbsolute).values()) {
+    if (isManagedInfiniteFile(source)) continue
+    if (SITE_META_PAGEVIEW.test(source)) return artifacts
+  }
+  return { ...artifacts, infinite: { ...artifacts.infinite, metaPageViews: true } }
 }

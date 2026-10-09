@@ -15,16 +15,29 @@ export interface FakeGhCall {
 export interface FakeGhState {
   login?: string
   authOk?: boolean
-  repo?: { nameWithOwner?: string; isPrivate?: boolean; defaultBranch?: string | null; viewerPermission?: string; homepageUrl?: string | null }
+  repo?: { nameWithOwner?: string; isPrivate?: boolean; defaultBranch?: string | null; viewerPermission?: string; homepageUrl?: string | null; allowForking?: boolean }
+  forkRemote?: string
+  forkExists?: boolean
   draftUnsupported?: boolean
   rejectInlineThreads?: boolean
   reviewDecision?: string
   prs?: Array<Record<string, unknown>>
   threads?: Array<{ id: string; prNumber: number; isResolved: boolean; path: string | null; line: number | null; comments: Array<{ author: string; authorAssociation: string; body: string }> }>
   /** GitHub's deployment rows (`sha: "*"` answers every SHA); statuses newest first. */
-  deployments?: Array<{ id: number; sha: string; environment: string; creator: string; production_environment?: boolean; created_at?: string; statuses: Array<{ state: string; environment_url?: string | null }> }>
+  deployments?: Array<{ id: number; sha: string; environment: string; creator: string; production_environment?: boolean; created_at?: string; statuses: Array<{ state: string; description?: string; environment_url?: string | null }> }>
   rules?: Record<string, Array<{ type: string; parameters?: Record<string, unknown> }>>
-  checks?: Record<string, Array<{ name: string; bucket: string; state: string }>>
+  checks?: Record<string, Array<{ name: string; bucket: string; state: string; description?: string; link?: string }>>
+  baseChecks?: Array<{ name: string; conclusion: string; details_url?: string }>
+  workflows?: Record<string, { path: string; source: string }>
+  checkSuites?: Array<{ id: number; status: string; conclusion?: string | null; app?: { slug: string } }>
+  workflowRuns?: Array<{ id: number; status: string; conclusion?: string | null; path: string; event?: string }>
+  headWorkflowFiles?: Record<string, string>
+  unreadableCheckActivity?: boolean
+  unreadableChecks?: boolean
+  headCheckRuns?: Array<{ id: number; name: string; status: string; conclusion: string | null; head_sha?: string; details_url?: string }>
+  commitStatuses?: Record<string, Array<{ context: string; state: string; description?: string; target_url?: string }>>
+  baseStatuses?: Array<{ context: string; state: string; description?: string; target_url?: string }>
+  failedLogs?: Record<string, string>
   calls?: FakeGhCall[]
   nextPrNumber?: number
 }

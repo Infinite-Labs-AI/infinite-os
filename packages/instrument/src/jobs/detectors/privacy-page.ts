@@ -4,6 +4,7 @@
 // text verbatim into this one file.
 import type { TestTool } from "../../wizard/contracts/test-engine.js"
 import type { RepoSnapshot } from "../repo-files.js"
+import { maskCommentsAndStrings } from "../../frameworks/shared.js"
 import { isNonProductPath, routePathOf, sortFindings, type Finding } from "./shared.js"
 
 export interface PrivacyPageFinding extends Finding {
@@ -23,7 +24,19 @@ export const PRIVACY_TOOL_NAMES: Record<TestTool, RegExp> = {
   ga4: /google analytics|\bga4\b|googletagmanager/i,
   posthog: /posthog/i,
   meta: /\bmeta pixel\b|facebook pixel|\bmeta platforms\b|\bmeta conversions api\b|facebook conversions api/i,
-  infinite: /\binfinite (?:analytics|tag)\b|\binfinite-tag\b|\binfinite\.(?:fast|inc)\b/i
+  infinite: /\binfinite (?:analytics|tag)\b|\binfinite-tag\b|\binfinite\.(?:fast|inc)\b|\binfinite\s*\(ultima inc\.\)\s+to measure visits\b/i
+}
+
+/** Text a visitor could read; comments, code strings, JSX expressions and tag attributes prove no disclosure. */
+export function privacyVisibleText(file: string, source: string): string {
+  const withoutHtmlComments = source.replace(/<!--[\s\S]*?-->/g, " ")
+  if (/\.mdx?$/i.test(file)) {
+    return withoutHtmlComments.replace(/^```[\s\S]*?^```/gm, " ").replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim()
+  }
+  const code = maskCommentsAndStrings(withoutHtmlComments, false).replace(/<(script|style)\b[^>]*>[\s\S]*?<\/\1>/gi, " ")
+  const segments = [...code.matchAll(/>([^<>]*)</g)].map((match) => match[1] ?? "")
+  const withoutExpressions = segments.join(" ").replace(/\{[^{}]*\}/g, " ")
+  return withoutExpressions.replace(/\s+/g, " ").trim()
 }
 
 /** Pure: privacy pages (routed pages, HTML and Markdown), first line of each. */
@@ -36,7 +49,8 @@ export function detectPrivacyPages(snapshot: RepoSnapshot): PrivacyPageFinding[]
     const isMarkdownOrHtml = /\.(?:mdx?|html?)$/i.test(path)
     if (route === null && !isMarkdownOrHtml) continue
     const names = {} as Record<TestTool, boolean>
-    for (const tool of Object.keys(PRIVACY_TOOL_NAMES) as TestTool[]) names[tool] = PRIVACY_TOOL_NAMES[tool].test(text)
+    const visible = privacyVisibleText(path, text)
+    for (const tool of Object.keys(PRIVACY_TOOL_NAMES) as TestTool[]) names[tool] = PRIVACY_TOOL_NAMES[tool].test(visible)
     findings.push({ file: path, line: 1, detail: "privacy page", route, names })
   }
   return sortFindings(findings)

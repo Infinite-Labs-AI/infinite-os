@@ -18,10 +18,20 @@ import { EVENT_LIMITS } from "./contracts/events.js"
 import type { StoreStepRow, WizardStoreSnapshot } from "./contracts/state.js"
 import { WIZARD_STEP_IDS, WIZARD_STEP_META, type StepOutcomeKind, type WizardStepId } from "./contracts/steps.js"
 
-export type SubTone = "ok" | "warn" | "info" | "pending"
+export type SubTone = "ok" | "warn" | "info" | "pending" | "result"
 
 /** Narration lines kept in the snapshot (the TUI shows the last few). */
 export const STORE_NARRATION_KEPT = 8
+
+const settledJobState = (state: NonNullable<WizardStoreSnapshot["jobs"]>[number]["state"]): boolean =>
+  state === "done_in_code" || state === "waiting_deploy" || state === "waiting_real_event" || state === "proven" || state === "not_needed" || state === "left_for_you" || state === "failed" || state === "blocked"
+
+export function jobDisplayState(state: string, by: "agent_claim" | "wizard" = "wizard"): NonNullable<WizardStoreSnapshot["jobs"]>[number]["state"] {
+  if (state === "pending") return "waiting"
+  if (state === "claimed") return by === "wizard" ? "could_not_check" : "agent_claim"
+  if (state === "done_in_code" || state === "waiting_deploy" || state === "waiting_real_event" || state === "proven" || state === "not_needed" || state === "left_for_you" || state === "failed" || state === "blocked") return state
+  return "waiting"
+}
 
 export class StoreAskConflictError extends Error {
   constructor(pendingKind: AskKind, requestedKind: AskKind) {
@@ -76,6 +86,8 @@ export class WizardStore {
       currentStep: null,
       learn: null,
       narration: [],
+      jobs: [],
+      jobsSettledHighWater: 0,
       pendingAsk: null,
       outro: null,
       exit: null
@@ -115,10 +127,11 @@ export class WizardStore {
   stepStart(step: WizardStepId): void {
     this.commit({
       currentStep: step,
+      ...(step === "jobs" ? { jobs: [], jobsSettledHighWater: 0 } : {}),
       // An agent's last line belongs to the step it was said in: a new step starts with none (terminal QA #19).
       narration: [],
       learn: WIZARD_STEP_META[step].learn,
-      steps: this.mapStep(step, (row) => ({ ...row, state: "running", status: null, code: null }))
+      steps: this.mapStep(step, (row) => ({ ...row, state: "running", status: null, code: null, startedAt: this.now().toISOString() }))
     })
   }
 
@@ -143,9 +156,22 @@ export class WizardStore {
         ...row,
         state: outcome,
         code,
-        status: row.status ?? reason
+        status: reason ?? row.status
       }))
     })
+  }
+
+  jobSeeded(item: { id: string; title: string; state: string; note?: string }): void {
+    const jobs = this.snapshot.jobs ?? []
+    if (jobs.some((row) => row.id === item.id)) return
+    const next = [...jobs, { id: item.id, title: item.title, state: jobDisplayState(item.state), ...(item.note ? { note: item.note } : {}) }]
+    this.commit({ jobs: next, jobsSettledHighWater: Math.max(this.snapshot.jobsSettledHighWater ?? 0, next.filter((row) => settledJobState(row.state)).length) })
+  }
+
+  jobDisplay(itemId: string, state: NonNullable<WizardStoreSnapshot["jobs"]>[number]["state"], note?: string): void {
+    const jobs = (this.snapshot.jobs ?? []).map((row) => row.id === itemId ? { ...row, state, note } : row)
+    const settled = jobs.filter((row) => settledJobState(row.state)).length
+    this.commit({ jobs, jobsSettledHighWater: Math.max(this.snapshot.jobsSettledHighWater ?? 0, settled) })
   }
 
   // ---- narration ----

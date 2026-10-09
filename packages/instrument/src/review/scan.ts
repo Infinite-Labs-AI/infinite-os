@@ -4,18 +4,14 @@
 //
 // - Literal values: the repo's `.env*` values (≥ 8 chars; read by the wizard only), the bridge token, the MCP
 //   token, and any `Authorization` value seen.
-// - Shapes: Stripe, GitHub, Slack, AWS, Google API keys, PEM blocks, JWTs (the desktop bearer is one), PostHog
+// - Shapes: Stripe, GitHub, Slack, AWS, Google API keys, private PEM blocks, JWTs (the desktop bearer is one), PostHog
 //   personal keys, Meta access tokens.
 // - Paths: `.growth-os` and `Application Support/Infinite`.
-// - PII: emails (except noreply / example.*) everywhere; phone-like digit runs ONLY in text posted to GitHub or
-//   shown from agents. In commits, the Meta pixel id (a 15–16 digit literal in managed code, R2-09) and any
-//   value already at HEAD are never a hit.
+// - Emails (except noreply / example.*) are redacted; phone-like numbers are ordinary data.
 //
 // A post or agent text is REDACTED (`[redacted: <kind>]`); a commit hit is REPORTED (the step blocks the job).
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs"
 import { join } from "node:path"
-
-import { maskIdentifier } from "../checks/result.js"
 
 export type ScanKind =
   | "bridge_token"
@@ -23,6 +19,11 @@ export type ScanKind =
   | "env_value"
   | "authorization"
   | "stripe_key"
+  | "supabase_key"
+  | "anthropic_key"
+  | "openai_key"
+  | "generic_secret"
+  | "url_password"
   | "github_token"
   | "slack_token"
   | "aws_key"
@@ -33,7 +34,11 @@ export type ScanKind =
   | "meta_token"
   | "private_path"
   | "email"
-  | "phone"
+  | "sendgrid_key"
+  | "npm_token"
+  | "vercel_token"
+  | "resend_key"
+  | "webhook_url"
 
 export interface ScanHit {
   kind: ScanKind
@@ -51,61 +56,92 @@ export interface ScannerOptions {
   literals: readonly ScanLiteral[]
   /**
    * The public ids the run knows (the connections' and the ids read from the site's own code: Meta pixel ids, GA4
-   * ids, …), in full: never a phone or an env-value hit, and neither is their masked form.
+   * ids, …), in full: never a generic named-value or env-value hit.
    */
   allowedIds: readonly string[]
 }
 
 const SHAPES: ReadonlyArray<{ kind: ScanKind; pattern: RegExp; postOnly?: true }> = [
-  { kind: "private_key", pattern: /-----BEGIN [A-Z0-9 ]*-----[\s\S]*?(?:-----END [A-Z0-9 ]*-----|$)/g },
-  { kind: "stripe_key", pattern: /\b(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{8,}/g },
+  { kind: "private_key", pattern: /-----BEGIN ((?:[A-Z0-9]+ )*PRIVATE KEY)-----[\s\S]*?(?:-----END \1-----|$)/g },
+  // A remaining PRIVATE KEY footer identifies a body even if its BEGIN line was cut.
+  { kind: "private_key", pattern: /(?:[A-Za-z0-9+/=]{16,}\r?\n)+-----END (?:[A-Z0-9]+ )*PRIVATE KEY-----/g },
+  { kind: "private_key", pattern: /\bMII[A-Za-z0-9+/]{40,}={0,2}(?:\r?\n[A-Za-z0-9+/]{32,}={0,2})*/g },
+  { kind: "stripe_key", pattern: /\b(?:(?:sk|rk)_(?:live|test)_|whsec_)[A-Za-z0-9]{8,}/g },
+  { kind: "supabase_key", pattern: /\b(?:sb_secret_|sbp_)[A-Za-z0-9_-]{8,}/g },
+  { kind: "anthropic_key", pattern: /\bsk-ant-(?:api\d+|oat\d+)-[A-Za-z0-9_-]{8,}/g },
+  { kind: "openai_key", pattern: /\bsk-(?:(?:proj|svcacct|admin)-[A-Za-z0-9_-]{8,}|[A-Za-z0-9]{32,})/g },
   { kind: "github_token", pattern: /\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{20,}|\bgithub_pat_[A-Za-z0-9_]{20,}/g },
   { kind: "slack_token", pattern: /\bxox[abpsr]-[A-Za-z0-9-]{10,}/g },
-  { kind: "aws_key", pattern: /\bAKIA[0-9A-Z]{16}\b/g },
+  { kind: "sendgrid_key", pattern: /\bSG\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}/g },
+  { kind: "npm_token", pattern: /\bnpm_[A-Za-z0-9]{16,}/g },
+  { kind: "vercel_token", pattern: /\bvcp_[A-Za-z0-9_-]{16,}/g },
+  // Resend's create-key response documents an 8-character id and a 24-character secret.
+  // https://resend.com/docs/api-reference/api-keys/create-api-key
+  { kind: "resend_key", pattern: /\bre_[A-Za-z0-9]{8}_[A-Za-z0-9]{24}\b/g },
+  { kind: "webhook_url", pattern: /https:\/\/hooks\.slack\.com\/services\/[^\s/"'`<>]+\/[^\s/"'`<>]+\/[^\s"'`<>]+/g },
+  { kind: "webhook_url", pattern: /https:\/\/(?:(?:canary|ptb)\.)?discord(?:app)?\.com\/api\/webhooks\/\d+\/[^\s"'`<>]+/g },
+  { kind: "aws_key", pattern: /\b(?:AKIA|ASIA)[0-9A-Z]{16}\b/g },
   { kind: "google_api_key", pattern: /\bAIza[0-9A-Za-z_-]{35}/g },
   { kind: "jwt", pattern: /\beyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}/g },
   { kind: "posthog_personal_key", pattern: /\bphx_[A-Za-z0-9]{20,}/g },
   { kind: "meta_token", pattern: /\bEAA[A-Za-z0-9]{20,}/g },
-  // An `Authorization` value seen in text (logs, a quoted request). Post-only: in code, `Authorization:` is
-  // followed by an expression (`process.env.X`, a template), never by the secret itself.
+  { kind: "authorization", pattern: /\bBearer\s+(?!authentication\b)[A-Za-z0-9._~+\/-]{8,}={0,2}/g },
   { kind: "authorization", pattern: /\bAuthorization\b\s*["']?\s*[:=]\s*["']?(?:Bearer\s+|Basic\s+|token\s+)?[^\s"'`,;]{6,}/gi, postOnly: true },
   { kind: "private_path", pattern: /[^\s"'`()<>]*\.growth-os[^\s"'`()<>]*/g },
   { kind: "private_path", pattern: /(?:[~/][^\s"'`()<>]*)?Application Support\/Infinite[^\s"'`()<>]*/g }
 ]
 
+/** Assignment syntax only; secret names are whole underscore/camelCase words. */
+const ASSIGNMENT = /\b([A-Za-z0-9_-]+)(["']?\s*[:=]\s*)(?:(["'`])([^"'`\r\n]*)(?:\3|(?=\r?\n|$))|([^\s"'`<>,;()[\]{}]+))/g
+const SECRET_WORD = /^(?:secret|token|password|passwd|apikey|privatekey|auth)$/
+const NON_SECRET_QUALIFIER = /^(?:name|path|url|provider|expiry|ttl|algorithm|header|type)$/
+const SECRET_KEY_WORD = /^(?:api|session|encryption|signing|master|private)$/
+const PUBLIC_NAME = /^(?:NEXT_PUBLIC_|VITE_|PUBLIC_)/
+const SOURCE_EXPRESSION_VALUE = /^[A-Za-z_$][\w$]*(?:\??\.[A-Za-z_$][\w$]*)*$/
+const PLACEHOLDER = /^(?:changeme|x{4,}|your_api_key_here|<[^>]*>|\$\{[^}]*\})$/i
+const NUMBER_OR_BOOLEAN = /^(?:[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?|true|false)$/i
+const PUBLIC_PEM = /-----BEGIN ((?:[A-Z0-9]+ )*(?:PUBLIC KEY|CERTIFICATE))-----[\s\S]*?-----END \1-----/g
+// Standard URLs keep the authority boundary; the DB schemes also accept an unescaped slash in a password.
+const URL_PASSWORD = /([A-Za-z][A-Za-z0-9+.-]*:\/\/[^\s/:@"'`<>]*:)([^\s/@"'`<>]+)(?=@)/g
+const DB_URL_PASSWORD = /((?:postgres(?:ql)?|mysql|mongodb(?:\+srv)?|redis|rediss):\/\/[^\s/:@"'`<>]*:)([^\s@"'`<>]+)(?=@)/gi
 const EMAIL = /[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}/g
-const UUID = /\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b/g
-const ISO_DATE_TIME = /\b\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?)?\b/g
-/** A digit run (optionally with + and phone separators) — post mode. */
-const PHONE_LIKE = /(?<![A-Za-z0-9_])\+?\(?\d[\d\s().-]{5,}\d(?![A-Za-z0-9_])/g
-/** Formatted phones only — commit mode (bare digit runs in code are ids, sizes and timestamps). */
-const PHONE_FORMATTED = /(?<![A-Za-z0-9_])\+\d{1,3}[\s.-]?\(?\d{2,4}\)?[\s.-]?\d{3,4}[\s.-]?\d{3,4}\b|\(\d{3}\)\s?\d{3}-\d{4}\b|\b\d{3}-\d{3}-\d{4}\b/g
 
-function isExemptEmail(address: string): boolean {
+interface Span { start: number; end: number }
+interface SecretSpan extends Span { kind: ScanKind }
+interface Assignment extends Span { name: string; value: string; sourceExpression: boolean }
+function assignments(text: string): Assignment[] {
+  return [...text.matchAll(ASSIGNMENT)].map(match => {
+    const value = match[4] ?? match[5]!
+    const valueAt = match[1]!.length + match[2]!.length + (match[3] ? 1 : 0)
+    const start = match.index + valueAt
+    const end = start + value.length
+    const prefix = text.slice(0, match.index)
+    const declaration = match[2]!.includes("=") && /\b(?:const|let|var)\s+$/.test(prefix)
+    const objectProperty = match[2]!.includes(":") && /(?:[=(]|\breturn)\s*\{[^{}]*$/.test(prefix) && /^\s*(?:\([^()]*\))?\s*(?:,[^{}]*)?\}/.test(text.slice(end))
+    const sourceExpression = !match[3] && SOURCE_EXPRESSION_VALUE.test(value) && (declaration || objectProperty)
+    return { name: match[1]!, value, sourceExpression, start, end }
+  })
+}
+function isSecretName(name: string): boolean {
+  if (/^x-api-key$/i.test(name)) return true
+  const words = name.replace(/([A-Z])([A-Z][a-z])/g, "$1_$2").replace(/([a-z0-9])([A-Z])/g, "$1_$2").toLowerCase().split("_")
+  const secretAt = words.findIndex((word, index) => SECRET_WORD.test(word) || (SECRET_KEY_WORD.test(word) && words[index + 1] === "key"))
+  return secretAt >= 0 && !words.slice(secretAt + 1).some(word => NON_SECRET_QUALIFIER.test(word))
+}
+function isPublicKey(value: string): boolean {
+  return /^(?:phc_|sb_publishable_|pk_(?:live|test)_)[A-Za-z0-9_-]+$/.test(value)
+}
+function isExemptEmail(address: string, text: string, at: number): boolean {
   const lower = address.toLowerCase()
+  if (lower.startsWith("git@") && text[at + address.length] === ":") return true
+  if (/@\d+x\.(?:png|jpe?g|gif|webp|avif|svg)$/.test(lower)) return true
   const domain = lower.slice(lower.indexOf("@") + 1)
   return lower.includes("noreply") || lower.includes("no-reply") || /^example\./.test(domain) || /\.example$/.test(domain) || domain === "example"
 }
 
-function spans(text: string, pattern: RegExp): Array<[number, number]> {
-  return [...text.matchAll(new RegExp(pattern.source, pattern.flags))].map((match) => [match.index!, match.index! + match[0].length])
-}
-
-function inside(spansList: ReadonlyArray<[number, number]>, start: number, end: number): boolean {
-  return spansList.some(([from, to]) => start >= from && end <= to)
-}
-
-function digitsOf(text: string): string {
-  return text.replace(/\D/g, "")
-}
-
 export interface Scanner {
-  /** Post / agent text: every hit replaced by `[redacted: <kind>]`. */
   redact(text: string): { text: string; hits: ScanHit[] }
-  /**
-   * Commit content: the hits in ADDED lines (nothing is rewritten). `presentAtHead(file, value)` says whether
-   * an email or phone was already in that file at HEAD (then it is not this run's doing).
-   */
+  /** Scan adjacent ADDED lines only; existing email/env values can be exempted by the caller. */
   findInCommit(
     files: ReadonlyArray<{ path: string; added: ReadonlyArray<{ line: number; text: string }> }>,
     presentAtHead: (file: string, value: string) => boolean
@@ -113,81 +149,74 @@ export interface Scanner {
 }
 
 export function createScanner(options: ScannerOptions): Scanner {
-  const allowed = new Set(options.allowedIds.filter((id) => id.length > 0))
-  const allowedDigits = new Set(options.allowedIds.map(digitsOf).filter((digits) => digits.length >= 7))
-  // R4-9 (live run 4): reports show a public id MASKED (`777700...2222`), and that shape — digits around dots — reads as
-  // a written phone number; the PR comment printed "Meta [redacted: phone]". Only the masked form of an id the run
-  // itself knows (a connection id or an id read from the site's own code) is exempt: exact text, nothing near it.
-  const allowedMasked = new Set(options.allowedIds.filter((id) => digitsOf(id).length >= 7).map(maskIdentifier))
-  const literals = options.literals
-    .filter((literal) => literal.value.length >= 8 && !allowed.has(literal.value))
-    .sort((a, b) => b.value.length - a.value.length)
+  const allowed = new Set(options.allowedIds.filter(Boolean))
+  const literals = options.literals.filter(literal => literal.value.length >= 8 && !allowed.has(literal.value))
 
-  function redactSecrets(text: string, hits: ScanHit[], mode: "post" | "commit", literalExempt?: (literal: ScanLiteral) => boolean): string {
-    let out = text
+  function scan(text: string, mode: "post" | "commit", presentAtHead: (value: string) => boolean): SecretSpan[] {
+    const named = assignments(text)
+    const publicSpans = named.filter(entry => PUBLIC_NAME.test(entry.name))
+    const publicPem = [...text.matchAll(PUBLIC_PEM)].map(match => ({ start: match.index, end: match.index + match[0].length }))
+    const matches: SecretSpan[] = []
+    const add = (start: number, end: number, kind: ScanKind) => {
+      if (publicSpans.some(span => start >= span.start && end <= span.end)) return
+      matches.push({ start, end, kind })
+    }
     for (const literal of literals) {
-      if (out.includes(literal.value)) {
-        if (literalExempt?.(literal)) continue
-        hits.push({ kind: literal.kind })
-        out = out.split(literal.value).join(`[redacted: ${literal.kind}]`)
-      }
+      if (literal.kind === "env_value" && presentAtHead(literal.value)) continue
+      for (let at = text.indexOf(literal.value); at >= 0; at = text.indexOf(literal.value, at + literal.value.length)) add(at, at + literal.value.length, literal.kind)
     }
     for (const shape of SHAPES) {
       if (shape.postOnly && mode === "commit") continue
-      out = out.replace(new RegExp(shape.pattern.source, shape.pattern.flags), () => {
-        hits.push({ kind: shape.kind })
-        return `[redacted: ${shape.kind}]`
-      })
+      for (const match of text.matchAll(shape.pattern)) {
+        if (shape.kind === "private_key" && publicPem.some(span => match.index >= span.start && match.index + match[0].length <= span.end)) continue
+        add(match.index, match.index + match[0].length, shape.kind)
+      }
     }
-    return out
+    for (const pattern of [URL_PASSWORD, DB_URL_PASSWORD]) {
+      for (const match of text.matchAll(pattern)) add(match.index + match[1]!.length, match.index + match[0].length, "url_password")
+    }
+    for (const entry of named) {
+      if (!isSecretName(entry.name) || entry.value.length < 8 || /\s/.test(entry.value) || PLACEHOLDER.test(entry.value) || NUMBER_OR_BOOLEAN.test(entry.value) || allowed.has(entry.value) || isPublicKey(entry.value)) continue
+      // URL credentials have their own password-only rule above. Preserve source expressions only
+      // with explicit declarations/object delimiters; a standalone env/YAML value may contain dots.
+      if (/^[A-Za-z][A-Za-z0-9+.-]*:\/\//.test(entry.value)) continue
+      if (entry.sourceExpression) continue
+      add(entry.start, entry.end, "generic_secret")
+    }
+    for (const match of text.matchAll(EMAIL)) {
+      if (!isExemptEmail(match[0], text, match.index) && !presentAtHead(match[0])) add(match.index, match.index + match[0].length, "email")
+    }
+    // Every match uses the original offsets: escaping/truncation cannot hide a key or alter its location.
+    // Overlapping explicit shapes are one redaction covering their union, never a partially exposed value.
+    const merged: SecretSpan[] = []
+    for (const match of matches.sort((a, b) => a.start - b.start || b.end - a.end)) {
+      const previous = merged.at(-1)
+      if (previous && match.start < previous.end) previous.end = Math.max(previous.end, match.end)
+      else merged.push({ ...match })
+    }
+    return merged
   }
-
-  function redactPii(text: string, hits: ScanHit[]): string {
-    let out = text.replace(new RegExp(EMAIL.source, "g"), (match) => {
-      if (isExemptEmail(match)) return match
-      hits.push({ kind: "email" })
-      return "[redacted: email]"
-    })
-    const protectedSpans = [...spans(out, UUID), ...spans(out, ISO_DATE_TIME)]
-    out = out.replace(new RegExp(PHONE_LIKE.source, "g"), (match, offset: number) => {
-      const digits = digitsOf(match)
-      if (digits.length < 7 || digits.length > 16) return match
-      if (inside(protectedSpans, offset, offset + match.length)) return match
-      if (allowedDigits.has(digits) || allowed.has(match.trim()) || allowedMasked.has(match.trim())) return match
-      // A plain run of 15-16 digits with no separators or `+` is an id shape (a Meta pixel or ad id), not a
-      // written phone number.
-      if (digits.length >= 15 && /^\d+$/.test(match)) return match
-      // A numeric range (`lines 1200-1310`): two runs of the same length, ascending.
-      const range = /^(\d{1,8})\s*[-–]\s*(\d{1,8})$/.exec(match.trim())
-      if (range && range[1]!.length === range[2]!.length && Number(range[1]) < Number(range[2])) return match
-      hits.push({ kind: "phone" })
-      return "[redacted: phone]"
-    })
-    return out
-  }
-
   return {
     redact(text) {
-      const hits: ScanHit[] = []
-      const withoutSecrets = redactSecrets(text, hits, "post")
-      return { text: redactPii(withoutSecrets, hits), hits }
+      const matches = scan(text, "post", () => false)
+      let redacted = text
+      for (const match of [...matches].reverse()) redacted = `${redacted.slice(0, match.start)}[redacted: ${match.kind}]${redacted.slice(match.end)}`
+      return { text: redacted, hits: matches.map(({ kind }) => ({ kind })) }
     },
     findInCommit(files, presentAtHead) {
       const hits: ScanHit[] = []
       for (const file of files) {
-        for (const added of file.added) {
-          const local: ScanHit[] = []
-          // A `.env` value already in this file at HEAD is not this run's doing (the repo already publishes it).
-          redactSecrets(added.text, local, "commit", (literal) => literal.kind === "env_value" && presentAtHead(file.path, literal.value))
-          for (const match of added.text.matchAll(new RegExp(EMAIL.source, "g"))) {
-            if (!isExemptEmail(match[0]) && !presentAtHead(file.path, match[0])) local.push({ kind: "email" })
+        const blocks: Array<Array<{ line: number; text: string }>> = []
+        for (const line of file.added) {
+          const previous = blocks.at(-1)
+          if (previous && previous.at(-1)!.line + 1 === line.line) previous.push(line)
+          else blocks.push([line])
+        }
+        for (const block of blocks) {
+          const text = block.map(line => line.text).join("\n")
+          for (const match of scan(text, "commit", value => presentAtHead(file.path, value))) {
+            hits.push({ kind: match.kind, file: file.path, line: block[0]!.line + text.slice(0, match.start).split("\n").length - 1 })
           }
-          for (const match of added.text.matchAll(new RegExp(PHONE_FORMATTED.source, "g"))) {
-            const digits = digitsOf(match[0])
-            if (allowedDigits.has(digits) || presentAtHead(file.path, match[0])) continue
-            local.push({ kind: "phone" })
-          }
-          for (const hit of local) hits.push({ ...hit, file: file.path, line: added.line })
         }
       }
       return hits
@@ -214,8 +243,7 @@ function isPlainPublicUrl(value: string): boolean {
   if (!/^https?:\/\//i.test(value)) return false
   try {
     const url = new URL(value)
-    // Origin only: a path can carry a secret (a Slack or Discord webhook URL).
-    return url.username === "" && url.password === "" && url.search === "" && url.hash === "" && url.pathname === "/" && !/^https?:\/\/[^/]+\/./i.test(value)
+    return url.username === "" && url.password === "" && url.search === "" && url.hash === ""
   } catch {
     return false
   }
@@ -229,8 +257,8 @@ function isPlainPublicUrl(value: string): boolean {
  * - committed templates (`.env.example`, `.env.sample`, `.env.template`, …);
  * - values under a browser-public prefix (`NEXT_PUBLIC_*`, `VITE_*`, `PUBLIC_*`, …);
  * - plain http(s) URLs with no credentials, query or fragment.
- * Secret SHAPES (Stripe, GitHub, JWT, …) are still caught wherever they appear. Public connection ids are passed
- * as allowed ids.
+ * Secret shapes (Stripe, GitHub, JWT, …) are still caught outside explicitly public assignments.
+ * Public connection ids are passed as allowed ids.
  */
 export function collectEnvLiterals(dirs: readonly string[]): ScanLiteral[] {
   const out: ScanLiteral[] = []

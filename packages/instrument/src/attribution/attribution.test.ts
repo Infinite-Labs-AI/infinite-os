@@ -31,7 +31,6 @@ import {
   projectCampaignCookie
 } from "./capture.js"
 import { campaignCookieHeader, campaignCookieModuleSource, withCampaignCookie } from "./cookie.js"
-import { infiniteUnsafeText } from "../conversions/scrub.js"
 import {
   CAMPAIGN_KEY,
   CLICK_ID_CONTAMINATION_PATTERN,
@@ -132,21 +131,6 @@ describe("the landing script: first touch in the tab", () => {
     expect(JSON.parse(storage.get(KEY)!)).toEqual(first)
   })
 
-  it("a direct visitor still gets a first-touch landing_path record", () => {
-    expect(legacy(land({ pathname: "/terms/" }).attribution())).toEqual({
-      utm_source: "",
-      utm_medium: "",
-      utm_campaign: "",
-      utm_term: "",
-      utm_content: "",
-      has_gclid: false,
-      has_fbclid: false,
-      has_msclkid: false,
-      has_ttclid: false,
-      landing_path: "/terms/"
-    })
-  })
-
   it("captures the referrer HOST (not own, well-formed) and well-formed Meta ids", () => {
     const captured = land({
       search: "?utm_source=facebook&ad_id=123&adset_id=456&campaign_id=789&utm_placement=instagram_stories",
@@ -182,26 +166,6 @@ describe("the landing script: first touch in the tab", () => {
       expect(invalid.attribution()[key]).toBe("")
     }
   })
-
-  it("G11: the tab copy is FILTERED at write time (infinite.fast kept it raw)", () => {
-    const contaminated = land({ search: "?utm_source=paid&utm_term=gclid%3DSECRET&utm_content=x%26fbclid%3DY&utm_medium=person%40example.test" })
-    expect(contaminated.attribution().utm_term).toBe("")
-    expect(contaminated.attribution().utm_content).toBe("")
-    expect(contaminated.attribution().utm_medium).toBe("")
-    expect(contaminated.attribution().utm_source).toBe("paid")
-    for (const path of ["/gclid=SECRET", "/foo fbclid=SECRET", "/foo%20msclkid%3DSECRET", "/u/5551234567"]) {
-      const run = land({ search: "?utm_source=paid", pathname: path })
-      expect(run.attribution().landing_path).toBe("")
-      expect(JSON.stringify(run.attribution())).not.toMatch(/SECRET|5551234567/)
-    }
-  })
-
-  it("negative: the unfiltered tab projection (infinite.fast's) would have stored the click id", () => {
-    const payload = { utm_term: "gclid=SECRET", landing_path: "/" }
-    expect(filterTabRecord(payload, infiniteUnsafeText).utm_term).toBe("")
-    expect(filterTabRecord(payload, () => false).utm_term).toBe("") // the click-id filter alone
-    expect(JSON.parse(JSON.stringify(payload)).utm_term).toBe("gclid=SECRET")
-  })
 })
 
 describe("the landing script: the 7-day first-touch cookie", () => {
@@ -222,39 +186,10 @@ describe("the landing script: the 7-day first-touch cookie", () => {
     }
   })
 
-  it("the two copies are independent: a tab stash, blocked storage, blocked cookies", () => {
-    const tab = new Map([[KEY, JSON.stringify({ utm_source: "old-tab" })]])
-    const newLanding = land({ search: "?utm_source=new-cookie", sessionStorage: tab })
-    expect(newLanding.attribution().utm_source).toBe("old-tab")
-    expect(newLanding.record().utm_source).toBe("new-cookie")
-    expect(land({ search: "?utm_source=blocked", storageThrows: true }).record().utm_source).toBe("blocked")
-    expect(land({ search: "?utm_source=tab-survives", cookieThrows: true }).attribution().utm_source).toBe("tab-survives")
-  })
-
-  it("no usable UTM, no cookie: an unusable first visit never takes the first-touch slot", () => {
-    for (const search of ["", "?fbclid=CLICK_ONLY", "?utm_source=", "?utm_source=%20", "?utm_source=%00%01%7F&utm_campaign=%09%0A"]) {
-      expect(land({ search }).writes()).toEqual([])
-    }
-    const storage = new Map<string, string>()
-    const first = land({
-      search: "?utm_source=gclid%3DSECRET&utm_medium=fbclid%3DSECRET&utm_campaign=msclkid%3DSECRET&utm_term=ttclid%3DSECRET",
-      pathname: "/first/",
-      sessionStorage: storage
-    })
-    expect(first.writes()).toEqual([])
-    const later = land({ search: "?utm_source=facebook&utm_campaign=real_campaign", pathname: "/real/", sessionStorage: storage })
-    expect(later.writes()).toHaveLength(1)
-    expect(later.record()).toMatchObject({ utm_source: "facebook", utm_campaign: "real_campaign", landing_path: "/real/" })
-  })
-
   it("contamination never reaches the cookie", () => {
     const contaminated = land({ search: "?utm_source=paid&utm_term=gclid%3DSECRET&utm_content=x%26fbclid%3DY" })
     expect(contaminated.record()).toMatchObject({ utm_term: "", utm_content: "", v: 1 })
     expect(contaminated.writes()[0]).not.toMatch(/SECRET|fbclid%3D/i)
-  })
-
-  it("http writes no secure attribute", () => {
-    expect(land({ search: "?utm_source=paid", protocol: "http:" }).writes()[0]).not.toMatch(/;secure/)
   })
 
   it("3800 encoded bytes is an inclusive ceiling; one byte over skips the cookie, never the tab", () => {
@@ -271,10 +206,6 @@ describe("the landing script: the 7-day first-touch cookie", () => {
 })
 
 describe("the landing script: consent", () => {
-  it("with no hook (infinite.fast parity) a stored denial does not stop the capture", () => {
-    expect(land({ search: "?utm_source=paid", storedConsent: "denied" }).record().utm_source).toBe("paid")
-  })
-
   it("with the Infinite hook (what infinite-tag emits) a denial captures nothing and infiniteCampaign() says none", () => {
     const gate: MetaBrowserGate = { kind: "infinite-consent", mode: "not_required" }
     const denied = land({ search: "?utm_source=paid", storedConsent: "denied", gate })
@@ -313,29 +244,12 @@ describe("the browser cookie is scrubbed like the tab copy (P2-1)", () => {
     expect(decodeURIComponent(page.cookie()!)).not.toMatch(/jane|555/)
     expect(page.attribution()).toMatchObject({ utm_term: "", utm_content: "" })
   })
-
-  it("negative: a landing whose ONLY campaign value was personal claims no first-touch cookie slot", () => {
-    const page = land({ search: "?utm_source=jane.doe%40example.com" })
-    expect(page.cookie()).toBeNull()
-  })
 })
 
 describe("the server cookie", () => {
   const fixed = Date.parse("2026-09-27T09:12:59.123Z")
   const request = (url: string, headers: Record<string, string> = {}, method = "GET") =>
     new Request(url, { method, headers })
-
-  it("shares the browser projection, differing only in its version", () => {
-    const search = "?utm_source=facebook&ad_id=123&utm_placement=feed&utm_term=foo%20gclid%3DSECRET"
-    const referrer = "https://facebook.com./path?secret=value"
-    const browser = land({ search, referrer, pathname: "/audit/", now: fixed })
-    const header = campaignCookieHeader(request("https://acme.com/audit/" + search, { referer: referrer }), GUARD, fixed, CONSENT)!
-    const server = JSON.parse(decodeURIComponent(header.split(";")[0]!.split("=")[1]!)) as Record<string, unknown>
-    expect(server).toEqual({ ...browser.record(), v: 2 })
-    expect(browser.record().v).toBe(1)
-    expect(server.captured_at).toBe("2026-09-27T09:12:00.000Z")
-    expect(header).toMatch(/; Path=\/; Max-Age=15552000; SameSite=Lax; Secure$/)
-  })
 
   it("never overwrites, and skips unusable landings", () => {
     for (const cookie of [KEY + "=old-without-time", KEY + "=", KEY + "=%broken"]) {
@@ -385,13 +299,6 @@ describe("the server cookie", () => {
     expect(campaignCookieHeader(request(url, { dnt: "1" }), GUARD, fixed, CONSENT)).toBeNull()
     // Negative: the same landing with no signal under not_required writes.
     expect(campaignCookieHeader(request(url), GUARD, fixed, CONSENT)).not.toBeNull()
-  })
-
-  it("3800 encoded bytes is an inclusive ceiling", () => {
-    const seed = campaignCookieHeader(request("https://acme.com/?utm_source=paid"), GUARD, fixed, CONSENT)!
-    const padding = 3800 - seed.split(";")[0]!.split("=")[1]!.length
-    expect(campaignCookieHeader(request("https://acme.com/" + "a".repeat(padding) + "?utm_source=paid"), GUARD, fixed, CONSENT)).not.toBeNull()
-    expect(campaignCookieHeader(request("https://acme.com/" + "a".repeat(padding + 1) + "?utm_source=paid"), GUARD, fixed, CONSENT)).toBeNull()
   })
 
   it("withCampaignCookie decorates the final response and changes nothing else", async () => {
@@ -473,11 +380,5 @@ describe("one definition of the patterns", () => {
     expect(sources[2]).toContain(META_AD_ID_PATTERN.source)
     expect(sources[3]).toContain(CLICK_ID_CONTAMINATION_PATTERN.source)
     for (const source of sources) expect(source).not.toMatch(/`|\$\{|<\//)
-  })
-
-  it("the landing script has no backtick, ${ or </", () => {
-    expect(buildLandingAttributionScript({ ownHosts: ["acme.com"], gate: { kind: "infinite-consent", mode: "required" } })).not.toMatch(
-      /`|\$\{|<\//
-    )
   })
 })

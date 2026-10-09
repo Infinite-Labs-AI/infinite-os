@@ -99,12 +99,8 @@ function notesFor(ctx: WizardContext, report: Pick<ReportV2, "rows">, facts: Ver
   )
   if (hasSmallShare) notes.push(SAMPLE_FLOOR_NOTE)
   if (state.proof) notes.push(...visitDisclosure(state.proof))
-  // §3x.3 A review finding on Infinite's own code reaches Infinite through this report (never the customer's agent).
-  for (const finding of facts.openFindings) {
-    if (!finding.label) continue
-    const where = `${finding.path ?? "general"}${finding.line ? `:${finding.line}` : ""}`
-    notes.push(`Review finding on ${finding.label}: ${finding.item ?? "review"} ${where} (${finding.severity})`.slice(0, 300))
-  }
+  // §3x.3 A review finding on Infinite's own code reaches Infinite through this report's "For Infinite" notes (the
+  // report builds them from the same open findings), never through the customer's agent.
   // B22: the model and effort the agents ran with (a fallback to the user's default model is said plainly).
   const models = state.agent?.models
   if (state.agent?.worker && models?.worker) {
@@ -191,7 +187,7 @@ async function runDone(ctx: WizardContext, deps: WizardDeps): Promise<StepOutcom
   // §3z.8 (A14): the compact JSON report is at most 56,000 bytes; the tag checks before posting.
   const compactBytes = Buffer.byteLength(JSON.stringify(payload), "utf8")
   if (compactBytes > BRIDGE_BOUNDS.reportMaxBytes) {
-    await writeReportFiles(ctx, deps, payload, deps.report.renderMarkdown(report))
+    await writeReportFiles(ctx, deps, payload, deps.report.renderMarkdown(report, verdictFacts.ownerBoundary, verdictFacts.jobs, verdictFacts.excludedLines, { ownerSteps: verdictFacts.ownerSteps ?? null, findings: verdictFacts.openFindings }))
     return {
       kind: "failed",
       code: "INF_WIZ_PROOF_INCOMPLETE",
@@ -223,7 +219,7 @@ async function runDone(ctx: WizardContext, deps: WizardDeps): Promise<StepOutcom
   }
 
   // 4. The files, then the PR comment (last: a failure there loses nothing).
-  const markdown = deps.report.renderMarkdown(report)
+  const markdown = deps.report.renderMarkdown(report, verdictFacts.ownerBoundary, verdictFacts.jobs, verdictFacts.excludedLines, { ownerSteps: verdictFacts.ownerSteps ?? null, findings: verdictFacts.openFindings })
   await writeReportFiles(ctx, deps, payload, markdown)
   ctx.emit.emit("step.sub", { step: "done", text: "✓ Report sent", tone: "ok" })
 
@@ -235,7 +231,7 @@ async function runDone(ctx: WizardContext, deps: WizardDeps): Promise<StepOutcom
       // R4-9 / LF4-P3-5: the ids the run read from the site's own code are public too (an unconnected Meta pixel's id).
       const scanner = buildScanner(ctx, deps, [...new Set([...facts.connectionIds, ...(await runPublicIds(ctx, deps))])])
       const safeReport = safeText(scanner, markdown)
-      let safeChecklist = safeText(scanner, buildChecklist(ctx.state.get().jobs))
+      let safeChecklist = safeText(scanner, buildChecklist(ctx.state.get().jobs, scanner, markdown))
       const repoFacts = await deps.host.repoFacts()
       if (!("isPrivate" in repoFacts) || !repoFacts.isPrivate) {
         const git = ctx.state.get().git
@@ -249,7 +245,7 @@ async function runDone(ctx: WizardContext, deps: WizardDeps): Promise<StepOutcom
       if (editor) {
         let spliced = false
         edited = await editor.updateOwnComment(prNumber, PR_MARKERS.final(runId), (body) => {
-          const next = withFinalReport(body, safeReport, safeChecklist)
+          const next = withFinalReport(body, safeReport, safeChecklist, verdictFacts.ownerBoundary)
           spliced = next !== null
           return next ?? body
         })

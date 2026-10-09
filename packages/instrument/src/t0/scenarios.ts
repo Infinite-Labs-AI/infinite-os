@@ -481,6 +481,7 @@ function planConsentMatrix(scenario: T0Scenario, artifacts: WorkspaceInstallArti
 
 function planFbcCapture(scenario: T0Scenario, artifacts: WorkspaceInstallArtifacts, runId: string | null): PlannedScenario {
   const productionHost = productionHostParam(scenario.params, "fbc_capture")
+  const captureMode = scenario.params.captureConsentMode ?? artifacts.meta?.consentMode ?? artifacts.infinite?.consentMode
   const source = pageSource(scenario.params, artifacts)
   const firstClick = marker(runId, "_FIRST")
   const secondClick = marker(runId, "_SECOND")
@@ -488,6 +489,8 @@ function planFbcCapture(scenario: T0Scenario, artifacts: WorkspaceInstallArtifac
     {
       id: "fbc:two-landings",
       actions: [
+        // Prove our gated writer under an explicit sandbox grant; no site consent state is edited.
+        ...(["required", "not_required"].includes(String(captureMode)) ? [{ kind: "set_storage", label: "recorded grant fixture", area: "local", key: "infinite_analytics_consent", value: "granted" } as T0Action] : []),
         load("landing-1", `https://${productionHost}/?fbclid=${firstClick}`, source),
         load("landing-2", `https://${productionHost}/pricing?fbclid=${secondClick}`, source),
         load("page-3", `https://${productionHost}/about`, source)
@@ -508,7 +511,7 @@ function planFbcCapture(scenario: T0Scenario, artifacts: WorkspaceInstallArtifac
       if (values.length !== 1) return [result(scenario, ctx, "problem", "two_fbc_cookies", `${values.length} _fbc cookies are visible after two landings; Meta reads the first, so an older click shadows the newer one`)]
       if (!/^fb\.\d\.\d{13}\./.test(values[0]!) || !values[0]!.endsWith(`.${secondClick}`))
         return [result(scenario, ctx, "problem", "fbc_not_last_click", "the stored _fbc does not hold the newest click in Meta's fb.<index>.<ms>.<fbclid> format")]
-      return [result(scenario, ctx, "pass", null, "one _fbc cookie, holding the last click, survives the next page")]
+      return [result(scenario, ctx, "pass", null, `${["required", "not_required"].includes(String(captureMode)) ? "works when consent is granted: " : ""}one _fbc cookie, holding the last click, survives the next page${captureMode === "required" ? "; the site's banner connection was not tested" : ""}`)]
     }
   }
 }

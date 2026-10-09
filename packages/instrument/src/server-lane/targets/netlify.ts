@@ -30,11 +30,10 @@ import {
   edgeLaneCoreSource,
   managedGeneratedFile,
   nonDocumentPrefixes,
-  outcomeHelperSource,
-  outcomeHelperTarget,
   type ServerLaneTargetDefinition,
   type TargetBuildInput
 } from "./shared.js"
+import { outcomeHelperOptionsFor, outcomeHelperSource } from "./outcome-helper.js"
 
 export const NETLIFY_EDGE_FUNCTION_NAME = "infinite-server-lane"
 export const NETLIFY_EDGE_FUNCTION_PATH = `netlify/edge-functions/${NETLIFY_EDGE_FUNCTION_NAME}.ts`
@@ -106,19 +105,23 @@ export function netlifyEdgeFunctionSource(input: TargetBuildInput): string {
     String.raw`${edgeLaneCoreSource({ ...input, exported: false })}
 
 /** The Netlify Edge Function context: https://docs.netlify.com/build/edge-functions/api/ */
+function infiniteIgnoreTaskFailure(task: Promise<unknown>): void {
+  void task.catch(() => undefined)
+}
+
 interface InfiniteNetlifyContext {
   /** "A string containing the client IP address." */
   ip?: string
-  waitUntil?: (promise: Promise<unknown>) => void
+  waitUntil?: typeof infiniteIgnoreTaskFailure
 }
 
 /** Netlify.env.get(name) is the documented reader; Deno.env is the fallback for local netlify dev. */
 function infiniteNetlifyEnv(name: string): string {
   const scope = globalThis as {
-    Netlify?: { env?: { get(name: string): string | undefined } }
-    Deno?: { env?: { get(name: string): string | undefined } }
+    Netlify?: { env?: { get?: Map<string, string>["get"] } }
+    Deno?: { env?: { get?: Map<string, string>["get"] } }
   }
-  return scope.Netlify?.env?.get(name) ?? scope.Deno?.env?.get(name) ?? ""
+  return scope.Netlify?.env?.get?.(name) ?? scope.Deno?.env?.get?.(name) ?? ""
 }
 
 export default async (request: Request, context: InfiniteNetlifyContext): Promise<void> => {
@@ -131,6 +134,7 @@ export default async (request: Request, context: InfiniteNetlifyContext): Promis
         clientIp: context.ip
       })
       if (typeof context.waitUntil === "function") context.waitUntil(task)
+      else infiniteIgnoreTaskFailure(task)
     }
   } catch {
     // The lane never affects the response.
@@ -150,11 +154,11 @@ export const netlifyTarget: ServerLaneTargetDefinition = {
   label: "Netlify Edge Function",
   installPackages: [],
   files: (appRootAbsolute) => [
-    { path: outcomeHelperTarget(appRootAbsolute).path, role: "module" },
+    { path: outcomeHelperOptionsFor(appRootAbsolute).path, role: "module" },
     { path: NETLIFY_EDGE_FUNCTION_PATH, role: "entry" }
   ],
   build: (input, appRootAbsolute) => {
-    const outcome = outcomeHelperTarget(appRootAbsolute)
+    const outcome = outcomeHelperOptionsFor(appRootAbsolute)
     return {
       [outcome.path]: outcomeHelperSource(input, outcome),
       [NETLIFY_EDGE_FUNCTION_PATH]: netlifyEdgeFunctionSource(input)

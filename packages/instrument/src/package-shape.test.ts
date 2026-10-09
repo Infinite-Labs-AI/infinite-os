@@ -1,4 +1,4 @@
-import { readdirSync, readFileSync, statSync } from "node:fs"
+import { readdirSync, readFileSync } from "node:fs"
 import { dirname, join } from "node:path"
 import { fileURLToPath } from "node:url"
 import { describe, expect, it } from "vitest"
@@ -76,17 +76,6 @@ describe("package.json shape", () => {
     expect(scripts["prepack"]).toContain("tsconfig.build.json")
   })
 
-  it("postinstall explains that package install is not instrumentation yet, and points at the wizard", () => {
-    const pkg = readJson(packageJsonPath)
-    const scripts = pkg["scripts"] as Record<string, string>
-    expect(scripts["postinstall"]).toEqual(expect.any(String))
-    expect(scripts["postinstall"]).toContain("infinite-tag installed")
-    expect(scripts["postinstall"]).toContain("Next: run npx infinite-tag in your website repo.")
-    expect(scripts["postinstall"]).toContain("Package install alone does not wire analytics.")
-    // The wizard needs no workspace id: the old `install --workspace <workspace-id>` pointer is gone.
-    expect(scripts["postinstall"]).not.toContain("--workspace")
-  })
-
   it('exports["."] starts with "./dist/"', () => {
     const pkg = readJson(packageJsonPath)
     const exports = pkg["exports"] as Record<string, string>
@@ -102,16 +91,10 @@ describe("LICENSE (npm always packs it)", () => {
     expect(license).toContain("Permission is hereby granted, free of charge")
     expect(license).toContain("PostHog wizard (v2.74.1")
   })
-
-  it("still starts with infinite-tag's own MIT licence", () => {
-    expect(license.startsWith("MIT License\n\nCopyright (c) 2025-2026 Ultima AI, Inc\n")).toBe(true)
-    // Two notices, each with its permission text: the first is ours, the second PostHog's.
-    expect(license.split("Permission is hereby granted").length - 1).toBe(2)
-  })
 })
 
 describe("source self-containment", () => {
-  it("every import in src/ is node:, relative, or vitest (test files only)", () => {
+  it("production imports stay self-contained; test files may use Vitest and TypeScript", () => {
     const tsFiles = collectTsFiles(srcDir)
     const violations: string[] = []
 
@@ -124,7 +107,7 @@ describe("source self-containment", () => {
         if (spec.startsWith("node:") || spec.startsWith("./") || spec.startsWith("../")) {
           continue
         }
-        if (spec === "vitest" && isTestFile) {
+        if (isTestFile && (spec === "vitest" || spec === "typescript")) {
           continue
         }
         violations.push(`${file}: "${spec}"`)

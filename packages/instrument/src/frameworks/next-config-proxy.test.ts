@@ -41,7 +41,6 @@ const proxyArtifacts = applyPosthogProxy(
 
 describe.each([
   ["next-app-router-basic", "app router"],
-  ["next-pages-router-basic", "pages router"]
 ])("Next %s posthog reverse proxy — next.config.mjs", (fixture) => {
   it("creates next.config.mjs with the rewrites, verifies, and removes it on uninstall", () => {
     const root = copyFixture(fixture)

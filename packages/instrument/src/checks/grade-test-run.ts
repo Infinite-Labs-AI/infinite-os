@@ -19,7 +19,9 @@
 //   5. more than one `page_view` / `$pageview` per load per id → problem `duplicate_page_view`;
 //   6. no beacon at all from the tool:
 //      - held by consent → undetermined `held_by_consent` (consent_mode = required and the seed had no
-//        effect, or a third-party CMP was detected). NEVER a problem: no agent job is ever seeded against
+//        effect, or a third-party CMP was detected, or the site keeps its trackers behind its own banner
+//        (`siteConsentGate`) and NOTHING on the visit sent: the test window never accepts a banner, so a
+//        whole-visit silence is the visitor who did not accept). NEVER a problem: no agent job is ever seeded against
 //        consent wiring, and Infinite never touches a banner. The test-only seed releases Infinite AND a
 //        MANAGED Meta pixel (both read the seeded key), so for those a seeded silence is not consent;
 //      - the caller did not say the site's consent mode → undetermined `test_error` (never guessed);
@@ -60,6 +62,12 @@ export interface GradeContext {
   metaPixelOwnership: "managed" | "adopted" | null
   /** §3x.3 (F6): the load ran a client-side navigation. */
   spaNavigation?: boolean
+  /**
+   * The site keeps its trackers off until a visitor accepts its own cookie banner: the tag follows the site's own
+   * pixels, or the scan found a consent tool or banner. A visit on which NOTHING sent (not one of the site's own
+   * tools, not Infinite) is then a visitor who did not accept, and every silent tool reads `held_by_consent`.
+   */
+  siteConsentGate?: boolean
   runId?: string | null
   now?: () => Date
 }
@@ -252,6 +260,8 @@ function gradeTool(tool: TestTool, result: TestResult, expect: TestExpect, mode:
     const cmp = ctx.cmpDetected ?? env.cmpDetected
     if (consentRequired || cmp !== null)
       return { state: "undetermined", code: "held_by_consent", detail: consentRequired ? "consent is required and the test-only grant had no effect" : `a consent tool (${cmp}) holds it` }
+    if (ctx.siteConsentGate === true && visitSentNothing(result))
+      return { state: "undetermined", code: "held_by_consent", detail: HELD_BY_BANNER }
     if (ctx.consentMode === null)
       return { state: "undetermined", code: "test_error", detail: "the site's consent mode is not known, so silence cannot be told from consent" }
     const envSourced = ctx.envSourcedIds.find((entry) => entry.tool === tool)
@@ -268,6 +278,14 @@ function gradeTool(tool: TestTool, result: TestResult, expect: TestExpect, mode:
   return mode === "real_visit"
     ? { state: "pass", code: null, detail: `${tool} delivering (seen leaving)` }
     : { state: "pass", code: null, detail: `${tool} fires once with the connected id` }
+}
+
+/** The words a visit the site's own banner kept silent gets, wherever it is shown. */
+export const HELD_BY_BANNER = "your cookie banner keeps every tool off until a visitor accepts; real visitors who accept are measured from their own visits"
+
+/** Not one beacon from any tool on the whole visit (the site's own GA4, PostHog, Meta pixel, and Infinite). */
+function visitSentNothing(result: TestResult): boolean {
+  return result.ga4.events.length === 0 && result.posthog.events.length === 0 && result.infinite.events.length === 0 && result.meta.tr.length === 0
 }
 
 function toResult(checkId: string, verdict: Verdict, tier: CheckTier, ctx: GradeContext, evidence?: Evidence[]): CheckResult {
@@ -446,11 +464,15 @@ export function gradeTestRunChecks(result: TestResult, tools: Record<TestTool, C
 
   if (mode === "real_visit") {
     const ga4Ok = result.ga4.events.some((event) => typeof event.status === "number" && event.status >= 200 && event.status < 300)
-    if (blockedBy(tools.ga4.state)) add("ga4_seen_leaving", "undetermined", "not_exercised", "GA4 could not be graded")
-    else add("ga4_seen_leaving", ga4Ok ? "pass" : "problem", ga4Ok ? null : "not_seen_leaving", ga4Ok ? "GA4 seen leaving with a 2xx" : "no GA4 beacon left with a 2xx")
+    // A tool the site's own banner held is not measured, with the banner named (never "could not be graded").
+    const held = (tool: TestTool) => code(tool) === "held_by_consent"
+    if (held("ga4")) add("ga4_seen_leaving", "undetermined", "held_by_consent", HELD_BY_BANNER)
+    else if (blockedBy(tools.ga4.state)) add("ga4_seen_leaving", "undetermined", "not_exercised", "GA4 could not be graded")
+    else add("ga4_seen_leaving", ga4Ok ? "pass" : "problem", ga4Ok ? null : "not_seen_leaving", ga4Ok ? "GA4 seen leaving with a 2xx" : "no GA4 request left the page and was accepted")
     const metaOk = result.meta.tr.some((tr) => typeof tr.status === "number" && tr.status >= 200 && tr.status < 300)
-    if (blockedBy(tools.meta.state)) add("meta_seen_leaving", "undetermined", "not_exercised", "the Meta pixel could not be graded")
-    else add("meta_seen_leaving", metaOk ? "pass" : "problem", metaOk ? null : "not_seen_leaving", metaOk ? "sent, domain allowed" : "no Meta /tr left with a 2xx")
+    if (held("meta")) add("meta_seen_leaving", "undetermined", "held_by_consent", HELD_BY_BANNER)
+    else if (blockedBy(tools.meta.state)) add("meta_seen_leaving", "undetermined", "not_exercised", "the Meta pixel could not be graded")
+    else add("meta_seen_leaving", metaOk ? "pass" : "problem", metaOk ? null : "not_seen_leaving", metaOk ? "sent, domain allowed" : "no Meta request left the page and was accepted")
   }
   return out
 }

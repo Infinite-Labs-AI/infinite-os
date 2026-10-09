@@ -30,6 +30,9 @@ export async function rebuildFromPrMarker(state: WizardRunState, host: GitHostAd
   const open = found.filter((entry) => entry.pr.state === "OPEN" && entry.base !== null).sort((a, b) => b.pr.number - a.pr.number)[0]
   if (!open || open.base === null) return null
   state.runId = open.runId
+  // A PR marker restores identity, not the missing local record of commits this run created.
+  delete state.wizardCommits
+  delete state.commitHistory
   state.pr = {
     host: "github",
     number: open.pr.number,
@@ -43,5 +46,12 @@ export async function rebuildFromPrMarker(state: WizardRunState, host: GitHostAd
   }
   // `baseSha: ""` = not known yet; `before` re-derives it once the branch is checked out.
   state.git = { base: open.base, baseSource: "default_branch", branch: open.branch, baseSha: "", headSha: null }
+  if (open.headOwner) {
+    const facts = await host.repoFacts().catch(() => null)
+    const name = facts && !('unsupported' in facts) ? facts.nameWithOwner?.split('/')[1] : null
+    if (name && /^[A-Za-z0-9_.-]+$/.test(name) && /^[A-Za-z0-9-]{1,39}$/.test(open.headOwner)) {
+      state.pushTarget = { kind: "fork", headOwner: open.headOwner, remoteUrl: `https://github.com/${open.headOwner}/${name}.git` }
+    }
+  }
   return { runId: open.runId, prNumber: open.pr.number, branch: open.branch }
 }

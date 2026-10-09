@@ -25,16 +25,16 @@ import {
   type ServerLaneTargetDefinition,
   type TargetBuildInput
 } from "./shared.js"
+import { outcomeHelperOptionsFor, outcomeHelperSource } from "./outcome-helper.js"
 
 export const NODE_MODULE_PATH = "lib/infinite-server-lane.js"
+/** The outcome helper, plain ESM JavaScript beside the lane module (both run under node directly). */
 export const NODE_OUTCOME_PATH = "lib/infinite-outcome.js"
 export const NODE_MIDDLEWARE_EXPORT = "infiniteServerLane"
 
 // Generated import lines live in constants so the package self-containment scanner
 // (package-shape.test.ts) never mistakes them for this package's own imports.
 const NODE_CRYPTO_IMPORT = 'import { createHmac, randomUUID } from "node:crypto"'
-const NODE_LANE_IMPORT =
-  'import { infiniteVisitKey, reportInfiniteServerEvent } from "./infinite-server-lane.js"'
 const NODE_MOUNT_IMPORT = `import { ${NODE_MIDDLEWARE_EXPORT} } from "./lib/infinite-server-lane.js"`
 
 function jsStringArray(values: string[]): string {
@@ -157,52 +157,6 @@ export async function sendInfiniteServerEvent(event) {
   }
 }
 
-const INFINITE_NO_REPORT = { accepted: false, duplicate: false, metaEventId: null, metaEventName: null }
-
-/**
- * Sign and POST one event and resolve Infinite's 202 answer: { accepted, duplicate, metaEventId,
- * metaEventName }. All-false / all-null on any failure; never throws. Infinite replies before it calls
- * Meta, so this never waits on Meta.
- */
-export async function reportInfiniteServerEvent(event) {
-  const secret = infiniteSecret()
-  const sourceKey = infiniteSourceKey()
-  if (!secret || !sourceKey) return INFINITE_NO_REPORT
-  try {
-    const body = JSON.stringify({
-      eventId: event.eventId ?? randomUUID(),
-      eventName: event.eventName,
-      occurredAt: event.occurredAt ?? new Date().toISOString(),
-      ...(event.accountKey ? { accountKey: event.accountKey } : {}),
-      properties: event.properties ?? {},
-      // Signed with everything else, so a match block cannot be injected by a third party.
-      ...(event.adMatch ? { adMatch: event.adMatch } : {})
-    })
-    const response = await fetch(INFINITE_SERVER_EVENTS_URL, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        ${JSON.stringify(SERVER_LANE_SOURCE_KEY_HEADER)}: sourceKey,
-        ${JSON.stringify(SERVER_LANE_SIGNATURE_HEADER)}: infiniteHmacHex(secret, body)
-      },
-      body,
-      signal: AbortSignal.timeout(INFINITE_DELIVERY_TIMEOUT_MS)
-    })
-    if (!response.ok) return INFINITE_NO_REPORT
-    const value = await response.json()
-    if (!value || typeof value !== "object") return INFINITE_NO_REPORT
-    const accepted = value.accepted === true
-    const duplicate = value.duplicate === true
-    const mirror = accepted && !duplicate
-    const metaEventName = mirror && typeof value.metaEventName === "string" && value.metaEventName ? value.metaEventName : null
-    const metaEventId =
-      metaEventName && typeof value.metaEventId === "string" && value.metaEventId ? value.metaEventId : null
-    return { accepted, duplicate, metaEventId, metaEventName: metaEventId ? metaEventName : null }
-  } catch {
-    return INFINITE_NO_REPORT
-  }
-}
-
 /**
  * The Express-style middleware. Mount it once, before your routes and static handler:
  *   app.set("trust proxy", true)   // so req.ip / req.hostname reflect the real client
@@ -253,200 +207,6 @@ export function ${NODE_MIDDLEWARE_EXPORT}() {
   )
 }
 
-/** lib/infinite-outcome.js — the same postInfiniteOutcome API as the edge helper, on the Node module. */
-export function nodeOutcomeHelperSource(): string {
-  return managedGeneratedFile(
-    [
-      "// Infinite server lane — report an outcome the moment it becomes REAL (row committed,",
-      "// payment captured, file served). Never from a click: a click is intent, not an outcome.",
-      "//",
-      '//   import { postInfiniteOutcome } from "./lib/infinite-outcome.js"',
-      "//",
-      "// visitKeyInputs accepts a Node request (req — .headers is a plain object, read correctly),",
-      "// a WHATWG Request, OR an explicit { clientIp, userAgent }:",
-      '//   await postInfiniteOutcome({ type: "purchase", path: "/checkout", accountKey: order.id, visitKeyInputs: req })',
-      "//",
-      "// Where the browser waits on your response, reportInfiniteOutcome (a STABLE eventId is required)",
-      "// returns { accepted, duplicate, metaEventId, metaEventName }; hand metaEventId to the page's",
-      "// infiniteMetaMirror.",
-      "//",
-      "// In a WEBHOOK the request is the PROVIDER'S, not the buyer's — compute the key at checkout",
-      "// with infiniteVisitKey({ clientIp, userAgent }) from ./infinite-server-lane.js, carry it (e.g.",
-      "// Stripe metadata), and pass it as properties: { visitKey } so this skips its own derivation."
-    ],
-    String.raw`import { createHash } from "node:crypto"
-${NODE_LANE_IMPORT}
-
-/**
- * One header value from EITHER a plain object (req.headers on Node/Express) OR a WHATWG Headers
- * (.get). A plain object is the common case on a Node server, so read it correctly rather than
- * dropping the visit key.
- */
-function infiniteHeaderValue(headers, name) {
-  if (headers && typeof headers.get === "function") {
-    return headers.get(name) ?? ""
-  }
-  const bag = headers ?? {}
-  let value = bag[name]
-  if (value === undefined) {
-    const lower = name.toLowerCase()
-    for (const key of Object.keys(bag)) {
-      if (key.toLowerCase() === lower) {
-        value = bag[key]
-        break
-      }
-    }
-  }
-  if (Array.isArray(value)) return value[0] ?? ""
-  return typeof value === "string" ? value : ""
-}
-
-function infiniteClientIpFrom(headers) {
-  const forwarded = infiniteHeaderValue(headers, "x-forwarded-for").split(",")[0].trim()
-  if (forwarded) return forwarded
-  return infiniteHeaderValue(headers, "cf-connecting-ip").trim() || infiniteHeaderValue(headers, "x-real-ip").trim() || ""
-}
-
-/** Normalise a request (Node req with a plain-object .headers, or WHATWG) or the explicit shape. */
-function infiniteVisitKeyInputsOf(input) {
-  if (!input) return null
-  if ("headers" in input && input.headers) {
-    const headers = input.headers
-    return { clientIp: infiniteClientIpFrom(headers), userAgent: infiniteHeaderValue(headers, "user-agent") }
-  }
-  return input
-}
-
-/**
- * Sign and POST one outcome. Resolves true when Infinite acknowledged it; never throws, so a failed
- * report can never fail the checkout, sign-up, or download it describes.
- *
- * type          the exact outcome name from Infinite → Conversions ("sign_up", "purchase", …)
- * path          the page path it belongs to (pathname only — no query string)
- * eventId       stable per outcome (order id, signup id) so retries dedupe
- * accountKey    opaque account or order id; Infinite hashes it at rest
- * visitKeyInputs a Node/WHATWG request OR { clientIp, userAgent }, for same-lane attribution
- * adMatch       adMatchFromRequest(buyerRequest, { em }) — what lets Infinite send the Meta server event
- */
-const INFINITE_CAMPAIGN_PROVENANCE = ["tab", "cookie", "none"]
-const INFINITE_BROWSER_CONTEXT = ["facebook_app", "instagram_app", "other_in_app", "browser", "unknown"]
-
-/** Infinite accepts at most this many properties on one event (more and the whole event is refused). */
-const INFINITE_MAX_PROPERTIES = 16
-
-function infiniteSendOutcome({ type, path, eventId, accountKey, occurredAt, properties, visitKeyInputs, campaign, adMatch }) {
-  // One clock for the whole call: the event time and the visit-key bucket must agree.
-  const nowMs = occurredAt ? occurredAt.getTime() : Date.now()
-  const merged = { ...(properties ?? {}) }
-  if (path) merged.path = path
-  const visitInputs = infiniteVisitKeyInputsOf(visitKeyInputs)
-  if (visitInputs && merged.visitKey === undefined) {
-    const visitKey = infiniteVisitKey({ clientIp: visitInputs.clientIp, userAgent: visitInputs.userAgent, nowMs })
-    if (visitKey) merged.visitKey = visitKey
-  }
-  // The campaign context rides along only while the event stays within the 16-property limit.
-  if (campaign && INFINITE_CAMPAIGN_PROVENANCE.includes(String(campaign.campaignProvenance)) && Object.keys(merged).length < INFINITE_MAX_PROPERTIES) {
-    merged.campaign_provenance = String(campaign.campaignProvenance)
-  }
-  if (campaign && INFINITE_BROWSER_CONTEXT.includes(String(campaign.browserContext)) && Object.keys(merged).length < INFINITE_MAX_PROPERTIES) {
-    merged.browser_context = String(campaign.browserContext)
-  }
-  return reportInfiniteServerEvent({
-    eventId,
-    eventName: type,
-    occurredAt: new Date(nowMs).toISOString(),
-    accountKey,
-    properties: merged,
-    ...(adMatch ? { adMatch } : {})
-  })
-}
-
-const INFINITE_FB_COOKIE = /^fb\.[0-9]{1,2}\.[0-9]{1,20}\.[A-Za-z0-9_%.-]{1,512}$/
-
-/** EVERY value the Cookie header carries for this name, in the order the browser listed them. */
-function infiniteCookieValues(header, name) {
-  const values = []
-  if (!header) return values
-  for (const part of header.split(";")) {
-    const index = part.indexOf("=")
-    if (index === -1) continue
-    if (part.slice(0, index).trim() !== name) continue
-    values.push(part.slice(index + 1).trim())
-  }
-  return values
-}
-
-/** The NEWEST ad click among every _fbc the browser sent (two can coexist: host-only and domain). */
-function infiniteNewestFbc(header) {
-  let newest = ""
-  for (const value of infiniteCookieValues(header, "_fbc")) {
-    if (!INFINITE_FB_COOKIE.test(value)) continue
-    if (!newest || Number(value.split(".")[2]) > Number(newest.split(".")[2])) newest = value
-  }
-  return newest || undefined
-}
-
-/** _fbp is a browser id, not a click: the first-listed value, kept only when it has Meta's shape. */
-function infiniteFbp(header) {
-  const first = infiniteCookieValues(header, "_fbp")[0]
-  return first && INFINITE_FB_COOKIE.test(first) ? first : undefined
-}
-
-/**
- * Build an adMatch block from the BUYER'S OWN request (a Node req with a plain-object .headers, or a
- * WHATWG Request) — the same block the edge helper builds. In a webhook the request is the PROVIDER'S:
- * build it at checkout, store it with the order, and pass it from the webhook. You supply em /
- * external_id yourself, already hashed (em trimmed AND lowercased; external_id trimmed only). Never a
- * phone number.
- */
-export function adMatchFromRequest(request, hashed = {}) {
-  const headers = request.headers
-  const cookie = infiniteHeaderValue(headers, "cookie")
-  const clientIp = infiniteClientIpFrom(headers)
-  const userAgent = infiniteHeaderValue(headers, "user-agent")
-  const fbc = infiniteNewestFbc(cookie)
-  const fbp = infiniteFbp(cookie)
-  return {
-    ...(hashed.em ? { em: hashed.em } : {}),
-    ...(hashed.external_id ? { external_id: hashed.external_id } : {}),
-    ...(fbc ? { fbc } : {}),
-    ...(fbp ? { fbp } : {}),
-    ...(clientIp ? { client_ip_address: clientIp } : {}),
-    ...(userAgent ? { client_user_agent: userAgent } : {})
-  }
-}
-
-// Checkout code computes the visit key from the buyer's request and carries it to the webhook.
-export { infiniteVisitKey }
-
-/** Resolves true when Infinite accepted the outcome (the 202's accepted); never throws. */
-export async function postInfiniteOutcome(input) {
-  return (await infiniteSendOutcome(input)).accepted
-}
-
-/**
- * Report one outcome and return Infinite's answer: { accepted, duplicate, metaEventId, metaEventName }.
- * eventId is REQUIRED and must be stable for this outcome; calling without one throws at once.
- */
-export function reportInfiniteOutcome(input) {
-  if (!input || typeof input.eventId !== "string" || input.eventId.trim().length === 0) {
-    throw new TypeError("reportInfiniteOutcome needs a stable eventId (an order, subscription or account id).")
-  }
-  return infiniteSendOutcome({ ...input, eventId: infiniteOutcomeWireId(input.type, input.eventId) })
-}
-
-/**
- * The wire eventId of an outcome: "<type>:<eventId>" (a sha256 of the eventId once that would pass 160
- * characters), so one stable id reused for two outcome types (sign_up and trial for one account) never
- * collides in Infinite's dedupe. The echoed metaEventId is this wire id.
- */
-function infiniteOutcomeWireId(type, eventId) {
-  const wire = String(type) + ":" + eventId
-  return wire.length <= 160 ? wire : String(type) + ":" + createHash("sha256").update(eventId, "utf8").digest("hex")
-}`
-  )
-}
-
 export const nodeTarget: ServerLaneTargetDefinition = {
   mode: "node-module",
   label: "Node module + a one-line mount you add",
@@ -455,8 +215,14 @@ export const nodeTarget: ServerLaneTargetDefinition = {
     { path: NODE_MODULE_PATH, role: "module" },
     { path: NODE_OUTCOME_PATH, role: "module" }
   ],
-  build: (input) => ({
+  build: (input, appRootAbsolute) => ({
     [NODE_MODULE_PATH]: nodeLaneModuleSource(input),
-    [NODE_OUTCOME_PATH]: nodeOutcomeHelperSource()
+    // The same outcome helper every other target ships (one API everywhere), as plain ESM JavaScript beside
+    // the lane module: a Node server runs it directly, with no TypeScript step in between.
+    [NODE_OUTCOME_PATH]: outcomeHelperSource(input, {
+      language: "js",
+      extension: "js",
+      background: outcomeHelperOptionsFor(appRootAbsolute).background
+    })
   })
 }

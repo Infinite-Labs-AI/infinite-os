@@ -1,5 +1,78 @@
 # infinite-tag
 
+Consent, cookie banners, CMP code, privacy policies and terms pages belong to the site owner.
+The wizard does not edit recognised consent units or policy page files. It tells its agents to leave
+banners and CMP code alone, but cannot verify behavior it does not recognise.
+
+Consent recognition uses simple patterns on raw source text: consent commands, Consent Mode keys,
+CMP names and loader URLs, and gated-script attributes. Comments and prose containing those patterns
+freeze their unit too; a leading comment belongs to the following top-level unit. A bare
+`t('consent')` or `register('consent')` is not a consent command;
+`'consent'` followed by `'default'`, `'update'`, `'grant'` or `'revoke'` is recognised on any callee.
+Also frozen: a top-level unit with a declared name containing `consent`, case-insensitively, and
+the whole source file when its basename contains `consent`, `cookiebanner`, `cookie-banner`,
+`cookie_banner` or `cookieconsent`. Directory names do not trigger this file rule. Declared names
+include local bindings; property keys, type references, readers and callers are not followed.
+Recognised top-level units and their leading comments are frozen byte for byte, including whitespace
+inside the unit. If source boundaries or correspondence are uncertain, the whole consent-bearing
+file is frozen. Raw matching text outside every unit, including each unit's prefix, also freezes
+the whole file.
+
+Only when it measured at least one commit and its complete recorded history passed does the wizard
+report: "This run did not edit your privacy or terms pages, or any code where it recognised a consent
+call (checked against the commits it made). Consent and privacy are yours: please review the files
+this run changed." It lists the changed files. Missing, legacy or rewritten history is explicitly
+unverified, with a reason and the available changed paths. A measured edit to a protected unit or
+page is reported as an edit found, not an unavailable check. Cancelling the existing-history question
+stops that push; it does not grant permission to continue.
+Changes to the site's own non-consent helpers can still affect when its consent code runs; the
+wizard does not model that, so the second-agent review and the owner's own review remain the check.
+The second review is another AI's opinion; a mislabelled finding is still shown to you, and the wizard does not second-guess the reviewer's severity.
+A reviewer that fails the file read-check twice contributes no findings or fixes. A complete review
+includes every required rubric row. Finding labels ignore case; `critical` and `high` mean blocker.
+An unknown label makes only that finding a blocker, with the unknown label retained.
+
+At the end of the agent jobs and each review or CI repair, only jobs whose checks ran and passed keep their edits. Every other job's own hunks are put back, and the remaining jobs are checked again on that tree. These jobs are listed once under **Not done, left for you**, with the agent's blocked note or the exact check result. They do not hold the pull request or fail the run. An open blocker from the second review holds the draft, quoting the finding: fix or dismiss it, then run again. PR checks also hold the draft while failing, cancelled, unreadable after retries, or pending beyond the waiting window (apart from blocked hosting authorization and checks already failing on the base).
+
+A task inside that boundary is left for the site owner, with its file and line. For a withheld preview
+guard, the wizard provides the snippet to copy and explains that preview and local visits keep counting.
+Privacy wording, if supplied, is copy-only report material for the owner; the wizard never inserts it
+into a page. The wizard asks nothing about how the tag runs. On a site that already runs its
+own analytics or ad pixels, Infinite's tag and the ad-click capture start when those start and stop when
+they stop, so the site's own banner governs them the same way; the tag reads their public state and never
+calls, wraps or changes them. On a site with no pixels of its own they start on page load.
+
+Policy pages are page files whose last route segment or basename matches the list below after
+splitting PascalCase, lower-casing and normalising separators. Route depth starts at the selected
+application root. Terminal `index` and `page`, framework route groups and parallel slots, any single
+dynamic directory (`[locale]`, `[lang]`, `[market]`, `[[lang]]`), and locale directories of two letters
+or `xx-YY` are ignored. Catch-all dynamic directories still count towards depth.
+
+`privacy`, `privacy-policy`, `privacypolicy`, `privacy-notice`, `privacynotice`,
+`terms`, `terms-of-use`, `terms-ofuse`, `termsof-use`, `termsofuse`, `terms-of-service`,
+`terms-ofservice`, `termsof-service`, `termsofservice`, `terms-and-conditions`, `terms-conditions`,
+`termsconditions`, `tos`, `cookie-policy`, `cookiepolicy`, `cookies-policy`, `cookiespolicy`,
+`cookie-notice`, `cookienotice`, `cookies-notice`, `cookiesnotice`, `cookies`, `legal`, `eula`,
+`disclaimer`, `impressum`, `imprint`, `datenschutz`, `datenschutzerklaerung`, `data-protection`,
+`gdpr`, `ccpa`, `dpa`, `agb`, `mentions-legales`, `politica-de-privacidad`, `refund-policy`,
+`acceptable-use`, `acceptable-use-policy`, `subprocessors`, `cookie-settings`.
+
+Listed names containing a hyphen match as the whole last segment at any depth, or as a
+`<prefix>-<name>` suffix such as `product-terms-of-use`. Names without a hyphen, including compact
+aliases such as `privacypolicy`, match only as the whole last segment at depth one or directly under
+`legal/` or `policies/`. Thus `payment-terms.html`, `chocolate-cookies.html` and `blog/gdpr.html`
+do not match. The rule covers Next pages and app routes, Remix routes, Astro, SvelteKit, Vue views,
+HTML/PHP documents and root/content Markdown or MDX. Documentation Markdown, components, libraries
+and API source routes do not count as page files. HTML/PHP pages under docs, api or test directories
+use the same name and depth rules. An unrelated earlier route word does not make a page a policy page.
+The wizard does not infer routes from source, templates or imports, so unlisted routes and policy
+text in shared components are outside this path rule.
+The policy check follows page filenames, not their imports; shared components or templates used by a policy page can still be changed.
+Before a commit, measurement reads only the paths selected for staging. For a recorded commit, it
+reads only that commit's changed files; unrelated working-tree changes and unreadable unchanged files
+do not block it. An unreadable selected or committed file is reported as unchecked for that file.
+
+
 **By [Infinite](https://infinite.fast) — the agent-first growth operator for founders.** Docs, dashboards and the server lane live at [infinite.fast](https://infinite.fast); source on [GitHub](https://github.com/Infinite-Labs-AI/infinite-os/tree/main/packages/instrument).
 
 `infinite-tag` installs browser analytics into an existing web app using public
@@ -35,11 +108,14 @@ steps and resumes where it stopped:
    what it finds ("Live site today").
 4. **Keys** — the connection ids (GA4 stream, PostHog project, Meta pixel) come from Infinite, never
    from the repo or a guess.
-5. **Plan** — one screen with every change and the four decisions only you can make (consent mode,
-   conversion names, the privacy text, the npm install). A 7-day check-in follows the deploy.
-6. **Install** — the managed tags, the approved edits, the preview guard and a build check, with a
+5. **Plan** — shows the repository changes and what stays with the owner, with one continue. Running
+   the wizard authorizes repository improvements to existing tools; there are no per-job approvals.
+   It asks only what it cannot know: the live address, consent mode and conversions. Package installs,
+   paid agent usage and changes to connected-tool settings still require an explicit yes. The plan
+   hash records what was shown and continued. A 7-day check-in follows the deploy.
+6. **Install** — the managed tags, the planned edits, the preview guard and a build check, with a
    full rollback if the build breaks.
-7. **Jobs** — the agent does the code jobs the plan approved, fenced to the files each job may touch;
+7. **Jobs** — the agent does the code jobs the plan showed, fenced to the files each job may touch;
    the wizard checks every job itself (static checks, the build, an offline browser test).
 8. **Settings** — through the app: the approved conversions, GA4 key events for conversions whose
    offline click test passed, the server-lane settings on Vercel (only when approved; production is not
@@ -50,12 +126,39 @@ steps and resumes where it stopped:
 12. **Prove** — after the deploy, it checks the live site again with this run's own test events.
 13. **Done** — the before/after report, in your terminal, the pull request and Infinite.
 
+Hosting access blocks are “preview not measured”: a hosting team member must authorise the GitHub author or redeploy. Checks already failing on the base are reported as already failing before the pull request. Neither holds readiness; new failures, cancelled checks, unreadable checks after three attempts ten seconds apart, and checks still pending at the ten-minute window do. The merge card reads checks again before inviting a merge.
+
+A check that first appears later than two minutes after the push, or only once the pull request is no longer a draft, is not seen by the wizard.
+
+On GitHub, the wizard checks push access before the code work starts. If you cannot push and the
+repository allows forks, it asks once to create your fork and opens the pull request from there.
+If forks are disabled, ask the repository owner for write access or permission to fork. A fork PR
+may have no Vercel preview; when no preview appears, the rehearsal reports those checks as not
+measured. `--yes` cannot authorize creation of a fork.
+
+Report redaction checks known credential formats and configured secret values before escaping or
+truncating text and before storing job check reasons. Its generic rule splits assignment names into
+underscore or camelCase words, case-insensitively: `secret`, `token`, `password`, `passwd`, `apikey`,
+`api_key`, `privatekey`, `private_key` and `auth` identify secret values, as do `SESSION_KEY`,
+`ENCRYPTION_KEY`, `SIGNING_KEY`, `MASTER_KEY` (with optional underscore prefixes), and `x-api-key` headers.
+A later `NAME`, `PATH`, `URL`, `PROVIDER`, `EXPIRY`, `TTL`, `ALGORITHM`, `HEADER` or `TYPE` word makes
+that name a setting. Values need at least eight characters and no whitespace; base64/base64url
+characters and dots are accepted. Placeholders (`changeme`, `<…>`, `${…}`, four or more `x` characters,
+`your_api_key_here`), numbers and booleans are preserved. Unquoted identifiers/member expressions
+are preserved in `const`/`let`/`var` declarations and explicitly delimited object
+literals. Ambiguous standalone assignments, including env/YAML values with dots or slashes, are
+treated as credential values; quoted named values are always literals.
+URL passwords are redacted for every scheme; URLs without credentials are preserved. `NEXT_PUBLIC_`,
+`VITE_` and `PUBLIC_` assignments, known public IDs and provider publishable keys are exempt from the
+generic rule. Public PEM keys and certificates are preserved. The scanner does not infer secrets
+from prose or mask phone-like numbers.
+Unnamed or unrecognised credentials may not be identified; review the changed files locally.
+
 Exit codes: `0` done · `1` failed · `2` usage or environment · `3` parked (resume with
 `npx infinite-tag --resume`) · `4` needs the Infinite app · `130` interrupted.
 
 Flags: `--json` (one NDJSON event per line, for agents and CI), `--answers <file>`, `--yes` (approves
-only the plan lines that are safe to approve for you; never consent, conversion names, the privacy
-text or a change to a tag you already had), `--resume`, `--fresh` (set an unfinished run aside and
+the plan continue; never consent, conversion names, package installs, paid usage or connected-tool settings), `--resume`, `--fresh` (set an unfinished run aside and
 start over), `--root`, `--app-root`, `--no-agent`, `--worker claude|codex`,
 `--reviewer claude|codex|brief|none`, `--consent-mode not_required|required`, `--no-prove`.
 `npx infinite-tag --version` prints the version.
@@ -63,7 +166,7 @@ start over), `--root`, `--app-root`, `--no-agent`, `--worker claude|codex`,
 **Run by an agent.** When another agent starts the wizard (`--json`, no terminal), no agent is
 spawned: the code jobs go to the agent that started it (`job.seeded` events and
 `.infinite/wizard/agent-brief.md`), and `npx infinite-tag --resume --json` fences and checks what it
-changed. Questions only you can answer (consent mode, conversion names, the privacy text, Meta server
+changed. Questions only you can answer (consent mode, conversion names, Meta server
 events, any change to an existing tag) are never answered from a file in that mode: the run parks and
 asks you to finish in your own terminal.
 
@@ -73,10 +176,9 @@ an error, so a typo never silently answers nothing.
 ```json
 {
   "v": 1,
-  "plan": { "approved": ["install_provider:ga4"], "declined": ["server_lane"], "edits": { "consent_mode": "required" } },
+  "plan": { "approved": [], "declined": ["account_settings:hosting"], "edits": { "consent_mode": "required" } },
   "consentMode": "required",
   "conversionNames": ["signup"],
-  "privacyText": true,
   "npmInstall": false,
   "asks": [{ "kind": "single", "match": "GA4", "answer": "G-XXXXXXXXXX" }]
 }
@@ -191,8 +293,8 @@ contract. Noninteractive `--yes` and `apply` runs fail on the same blocker.
 | `--posthog-ui-host <https://...>` | Optional PostHog toolbar host when proxying. |
 | `--x-pixel-id <id>` | Public X pixel ID. |
 | `--x-event-tag-id <id>` | Public X event tag ID; repeatable. |
-| `--meta-pixel-id <id>` | Public Meta pixel ID. Installs with Meta's Automatic Configuration off (`fbq('set','autoConfig','false', id)` before `init`): no button clicks or page metadata are sent to Meta by default. Also installs the `_fbc` landing capture: when a visitor arrives from a Meta ad, the ad's click id is saved in Meta's own `_fbc` cookie (last click wins) even if the pixel itself is blocked, and `window.infiniteMetaClickId()` reads it. It sends nothing. It skips a visitor who said no on the site, or whose browser sends Do Not Track / Global Privacy Control, until they grant; with `--infinite-consent-mode required` it waits for the visitor's grant. |
-| `--meta-advanced-matching <on\|off>` | **Default off.** Manual Advanced Matching — see below. On, the page defines `window.infiniteMetaAdvancedMatch({ email, externalId })` for **your** code to call once a visitor identifies themselves; it hashes those values before anything reaches Meta. It never reads your pages and never fires on its own. |
+| `--meta-pixel-id <id>` | Public Meta pixel ID. Installs with Meta's Automatic Configuration off (`fbq('set','autoConfig','false', id)` before `init`): no button clicks or page metadata are sent to Meta by default. Also installs the `_fbc` landing capture: when a visitor arrives from a Meta ad, the ad's click id is saved in Meta's own `_fbc` cookie (last click wins) even if the pixel itself is blocked, and `window.infiniteMetaClickId()` reads it. It sends nothing. It skips a visitor whose refusal was recorded through Infinite’s consent signal, or whose browser sends Do Not Track / Global Privacy Control, until they grant; with `--infinite-consent-mode required` it waits for the visitor's grant. |
+| `--meta-advanced-matching <on\|off>` | **Default off** for this command (the `npx infinite-tag` wizard turns it on when Meta is connected in Infinite). Manual Advanced Matching — see below. On, the page defines `window.infiniteMetaAdvancedMatch({ email, externalId })` for **your** code to call once a visitor identifies themselves; it hashes those values before anything reaches Meta. It never reads your pages and never fires on its own. |
 | `--artifact-file <path>` | Read the same public artifact shape from JSON. |
 | `--server-lane` | Add the lossless server lane (see below). Works alone or with the artifact flags. |
 | `--workspace <id>` | Install-manifest ownership; required for apply. |
@@ -361,7 +463,7 @@ the following signal after every grant, denial, or revocation:
 
 ```js
 window.dispatchEvent(new CustomEvent("infinite:analytics-consent-change", {
-  detail: { granted: true } // false on denial or revocation
+  detail: { granted: true } // false on denial, withdrawal or expiry
 }))
 ```
 
@@ -370,8 +472,12 @@ checks that the managed required-mode runtime contains this event bridge, then
 instructs the founder to exercise the external consent UI in a browser; static
 verification cannot prove that an app-owned UI dispatches the event.
 
-The consent signal governs Infinite collection only: a grant (re-)emits the
-current page as the initial view, a revocation stops future Infinite events. It
+The consent signal governs Infinite collection and the ad-click capture this run adds: a grant
+(re-)emits the current page as the initial view; a refusal or revocation stops future Infinite events
+and removes only the `_fbc` value and domain written by the current capture instance, if they still
+match. A replacement written by another script is preserved. After reload, this capture cannot verify
+who wrote an older `_fbc` cookie; the owner's banner remains responsible for clearing those older
+cookies. Grants require a recent user gesture; refusals and withdrawals do not. Call the signal wherever the banner state changes, including withdrawal and expiry. It
 never touches GA4 or PostHog in either mode — those providers run their own
 native consent handling.
 
@@ -447,80 +553,105 @@ where the site is **hosted** (`vercel.json` / `.vercel/project.json` / `@vercel/
 | **Netlify** | Creates `netlify/edge-functions/infinite-server-lane.ts`, declared [in-file](https://docs.netlify.com/build/edge-functions/declarations/) with `export const config` — `netlify.toml` is never edited. Assets are excluded per extension (Netlify's own `["/*.css", "/*.js"]` shape); a blanket `/*.*` would over-exclude, because URLPattern's wildcard is greedy across `/`. |
 | **Cloudflare Pages** | Creates [`functions/_middleware.ts`](https://developers.cloudflare.com/pages/functions/middleware/), reading its secret from `context.env`. A plain Worker (a `wrangler` config with a `main` entrypoint) gets the brief's Worker snippet instead — there is no file of ours to add safely. |
 | **Express / any Node server** | Creates `lib/infinite-server-lane.js`. Nothing auto-wires your server file: the brief names the exact `app.use(infiniteServerLane())` line and where it goes. |
-| No host signal | Writes the agent brief only; `server-lane --brief > INSTALL-SERVER-LANE.md` saves it anywhere. |
+| No host signal | Writes the agent brief and the outcome helper (no page-view lane); `server-lane --brief > INSTALL-SERVER-LANE.md` saves the brief anywhere. |
 
-Every target also writes **`lib/infinite-outcome`**, exporting `postInfiniteOutcome({ type, path,
-eventId, accountKey, visitKeyInputs, adMatch })` (plus `adMatchFromRequest`), so any server route — a Vercel `api/` function
-confirming a paid Stripe session, a webhook, a job — reports an outcome in three lines and carries
-the same `visitKey` as the page view that produced it. Report outcomes from where they become real
-(a committed row, a captured payment, a served file), never from a click.
+Every target (Next.js included, and the brief-only fallback) also writes the same outcome helper,
+**`lib/infinite-outcome`** (`.ts`, or `.js` / `.mjs` in a JavaScript project), so any server route
+reports a conversion with one API. It does nothing until its environment variables are set.
 
-#### `adMatch` — forwarding the conversion to Meta
+| Export | What it does |
+| --- | --- |
+| `reportInfiniteOutcome(outcome)` | Sends one outcome; resolves Infinite's HTTP status (`202`), or `null` when nothing reached Infinite (not configured yet, network error, the 2 s timeout). An outcome it refuses before sending (no `type` or `eventId`) resolves `400`. Never throws. |
+| `reportInfiniteOutcomeForMirror(outcome)` | The same send, resolving `{ status, accepted, duplicate, metaEventId, metaEventName }` for a route that hands the page Infinite's Meta id (`infiniteMetaMirror`). |
+| `reportInfiniteOutcomeInBackground(outcome)` | For routes a visitor waits on: hands the send to the site's own `waitUntil` (only when the site already depends on `@vercel/functions`) or Next's `after()`; otherwise waits at most 800 ms. Never adds a dependency. |
+| `reportStripeCheckoutStarted(session, { path })` | `begin_checkout` from a just-created Checkout Session, in the background. |
+| `reportStripeCheckoutPurchase(event, { path })` | The purchase from a VERIFIED Stripe event; resolves the status the webhook answers. |
+| `reportInfiniteLead(request, { email, trackingAllowed, ... })` | A lead or sign-up with one stable id per person, in the background. |
+| `adMatchFromRequest(req, { trackingAllowed, person? })`, `personMatch(adMatch, person)` | Meta match data: the buyer's cookies, ip and user agent plus the person's hashed details, only with `trackingAllowed`. |
+| `buyerContext(req, { trackingAllowed })`, `contextMetadata(context, cart)`, `contextFromMetadata(metadata)` | Carry the buyer's device data from the checkout request to the webhook on the Checkout Session's metadata, one field per value. |
+| `stripeCheckoutPayer(session)`, `stripeAmountToMajor(amount, currency)`, `infiniteContentIds(ids)`, `infiniteLeadId(email)`, `infinitePagePath(req, fallback)`, `infiniteConfigured()` | The pieces those use, exported for routes that need their own shape. |
 
-Only for founders who **run Meta ads and do not use PostHog**. PostHog already ships its own Meta
-destination, and two senders for one conversion is a double count.
+`path` is the page an outcome belongs to (`"/success"`). Infinite records an outcome without one,
+but Meta needs it (`event_source_url`), so every server conversion should send it. A query string or
+fragment is cut off; anything that is not a plain path is dropped. A property value Infinite would
+refuse (free text, more than 120 characters, a 17th property) drops itself instead of costing the
+whole outcome, and `content_ids` is capped to 120 characters by dropping whole ids.
 
-Add an `adMatch` block to the outcome and turn the relay on in Infinite → Site → Settings → *Send
-outcomes to Meta Conversions API*. Infinite then forwards that outcome to Meta's Conversions API as
-it is ingested and **discards the match data**: it is never stored, never written to your ledger,
-never logged. Neither half works alone — no block, nothing to forward; no toggle, nothing is sent.
+#### Sending conversions to Meta
+
+Infinite is the Meta path for server conversions, for every site, with or without PostHog. Turn the
+relay on in Infinite → Site Analytics → Settings → *Send outcomes to Meta Conversions API* (Meta
+connected in Infinite → Connections), and every outcome carrying an `adMatch` block is forwarded to
+Meta's Conversions API as it is ingested; Infinite then **discards the match data**: it is never
+stored, never written to your ledger, never logged. **If PostHog also sends events to Meta** (a Meta
+Ads destination in PostHog's data pipelines), turn that destination off for these events: its copy
+shares no event id with the pixel and carries no browser cookies, ip or user agent, and two senders
+count every conversion twice.
+
+A Stripe store, end to end (the checkout route keeps its own parameters; `contentIds` and `numItems`
+are its cart):
 
 ```ts
-import { createHash } from "node:crypto"
-import { adMatchFromRequest, infiniteVisitKey, postInfiniteOutcome } from "../lib/infinite-outcome"
+import { buyerContext, contextMetadata, reportStripeCheckoutStarted, reportStripeCheckoutPurchase } from "../lib/infinite-outcome"
 
-// 1. At CHECKOUT, from the BUYER'S browser request: their _fbc/_fbp cookies, ip and user agent,
-//    saved together (one device) with the checkout. Your later call to Infinite is server-to-server
-//    and carries none of them.
-const adMatch = adMatchFromRequest(request, {
-  em: createHash("sha256").update(email.trim().toLowerCase()).digest("hex"),
-  // Only when the buyer has an account id (a guest has none). Trimmed only: never lowercase an id.
-  ...(user?.id != null ? { external_id: createHash("sha256").update(String(user.id).trim()).digest("hex") } : {})
+// 1. CHECKOUT ROUTE. The page adds ad_match=1 only when the visitor allowed tracking.
+const context = await buyerContext(req, { trackingAllowed: req.query.ad_match === "1" })
+const session = await stripe.checkout.sessions.create({
+  ...params,
+  // The cart and the buyer's device data ride to the webhook. Never an email, a name or an address.
+  metadata: { ...params.metadata, ...contextMetadata(context, { contentIds, numItems }) }
 })
-const infinite_visit_key = await infiniteVisitKey({ clientIp: adMatch.client_ip_address, userAgent: adMatch.client_user_agent })
-const session = await stripe.checkout.sessions.create({ /* … */ metadata: { infinite_visit_key } })
-await saveCheckoutAdMatch(session.id, adMatch)   // e.g. a column on your order row
+await reportStripeCheckoutStarted(session, { path: "/cart" })   // begin_checkout → Meta InitiateCheckout
 
-// 2. In the PAYMENT WEBHOOK, once the payment is real. Report the purchase HERE and only here
-//    (not also from a checkout-status route), and never with a browser fbq('track', 'Purchase').
-await postInfiniteOutcome({
-  type: "purchase",
-  path: "/checkout",                   // Meta requires event_source_url
-  eventId: "purchase:" + session.id,   // the SAME id every time this purchase is reported: counted once
-  properties: {
-    value: session.amount_total / 100, currency: session.currency.toUpperCase(),   // required for a Purchase
-    visitKey: session.metadata.infinite_visit_key   // carried from checkout: same-lane attribution
-  },
-  adMatch: await loadCheckoutAdMatch(session.id)
-})
+// 2. PAYMENT WEBHOOK (events checkout.session.completed + checkout.session.async_payment_succeeded),
+//    after stripe.webhooks.constructEvent on the RAW body:
+return res.status(await reportStripeCheckoutPurchase(event, { path: "/success" })).json({ received: true })
 ```
 
-- **You hash; Infinite never does.** `em` is sha256 hex of the email, trimmed and lowercased.
-  `external_id` is sha256 hex of your own account id, **trimmed only — its case is kept**: the
+- **What the webhook reports.** Only a paid, live (`livemode`) session that this site's checkout
+  created (Payment Links and other integrations on the same Stripe account are skipped, and so is
+  everything before Infinite is configured), once per session id: both Stripe events for one session
+  and every retry count once. `value` is in major units (zero-decimal currencies such as JPY and KRW
+  are not divided), `currency` is uppercase, with `content_ids` and `num_items` from the checkout.
+- **No retry storm.** It answers 500 (so Stripe retries) only when the report was not delivered, or
+  Infinite answered 5xx, 401, 403 or 429. Before setup, and for every refusal a retry cannot fix, it
+  answers 200.
+- **The payer, never the recipient.** Email and name come from `session.customer_details`. The
+  address comes WHOLE from one place: the billing address (`session.customer_details.address`), or
+  the shipping address (`session.collected_information.shipping_details` /
+  `session.shipping_details`) only when billing has no city and the shipping name is the payer's own
+  (trimmed, any case). A gift shipped to someone else never lends its address or its name. For leads,
+  use the submitted email. Never store email/name/address anywhere new, never put them in Stripe
+  metadata, never log them, and never send a phone number.
+- **Your generated helper hashes; Infinite never does.** `personMatch` / `adMatchFromRequest` emit
+  sha256 hex for `em`, `external_id`, `fn`, `ln`, `ct`, `st`, `zp` and `country` using Meta's
+  normalization rules, byte for byte Infinite's own. The name splits as Infinite's sender does: the
+  first word is `fn`, every later word together is `ln`.
+- **`external_id` is one stable per-person id shared by that person's lead and purchase:**
+  `infiniteLeadId(email)` = `HMAC-SHA256(LEAD_ID_SECRET, email.trim().toLowerCase())` under a secret
+  only your site holds, then hashed once for Meta. It is **trimmed only** (its case is kept): the
   browser accessor hashes the same id the same way, and an id hashed two different ways reaches Meta
-  as two different people. A raw email never leaves your server. A value that is not a 64-character
-  hex digest is rejected with a `400` instead of being forwarded, so a mistake shows up at
-  integration time rather than as an empty match rate three months later. Never hash an
-  already-hashed value.
+  as two different people. The same id is the lead's event id (`lead:<id>`), so a re-submit counts once.
+- **Match data needs the page's signal.** The page sends `ad_match=1` (or `adMatch: true` in a JSON
+  body) only when the visitor allowed tracking; never inferred from cookies. Without it the helpers
+  return no match data at all.
 - **`fbc` / `fbp` are Meta's own cookies** on your domain
   ([fbp and fbc](https://developers.facebook.com/docs/marketing-api/conversions-api/parameters/fbp-and-fbc)).
   A visitor can set them to anything, so a malformed one is **dropped** and your outcome is still
-  recorded — a tampered cookie can never delete your purchase. The same holds for the ip and user
-  agent; only `em`/`external_id`, which your own code computes, are strict enough to reject.
+  recorded — a tampered cookie can never delete your purchase. When a browser holds two `_fbc`
+  cookies, the newest ad click is sent.
 - **`client_ip_address` / `client_user_agent` are the BUYER'S BROWSER'S.** Meta's spec calls them
   "the IP address of the browser" and "the user agent for the browser … **required** for website
-  events shared using the Conversions API". Your call to Infinite is server-to-server — its ip is
-  your host's egress address and its user agent is `node` — so `adMatchFromRequest` reads them from
-  *your* inbound request. In a webhook the incoming request is the provider's, not your buyer's:
-  that is why the example captures the block at checkout and carries it to the webhook. When a
-  browser holds two `_fbc` cookies, `adMatchFromRequest` sends the newest ad click.
-- **`eventId` is Infinite's idempotency key, not Meta's event ID.** Make it stable per outcome, and
-  use the SAME one every time the same outcome is reported (`"purchase:" + session.id` everywhere):
-  Infinite counts an `eventId` once, so a retried webhook is counted once, but two reports of one
-  purchase with two different ids count it twice. Infinite decides the `event_id` Meta receives. For
-  a conversion set to *Every event* or *Once per session* in Infinite → Conversions it is this value;
-  for *Once per account*, and for *Once per visitor (TTL)* when the outcome carries a `visitKey`,
-  Infinite derives a different id, which your pages never see.
+  events shared using the Conversions API". Your call to Infinite is server-to-server, so the helpers
+  read them from *your* inbound request; in a webhook the request is Stripe's, which is why the
+  checkout saves them on the session (one metadata field each, a value over Stripe's 500-character
+  limit left out) and the webhook reads them back.
+- **`eventId` is Infinite's idempotency key, not Meta's event ID.** Make it stable per outcome; the
+  helper sends `<type>:<eventId>` (unless it already starts with `<type>:`), so a retried webhook is
+  counted once. Infinite decides the `event_id` Meta receives. For a conversion set to *Every event* or
+  *Once per session* in Infinite → Conversions it is this value; for *Once per account*, and for *Once
+  per visitor (TTL)* when the outcome carries a `visitKey`, Infinite derives a different id, which
+  your pages never see.
 - **Purchases are server events only.** Report them from the payment webhook and do not also fire
   `fbq('track', 'Purchase')` on a thank-you page. The page never builds a Meta event ID, so a
   browser Purchase has no server event to be deduplicated against, and Meta can count the purchase
@@ -531,10 +662,15 @@ await postInfiniteOutcome({
 - **The relay declines rather than sending a broken event.** It skips — and says which, in Site
   Settings — when there is no `event_source_url` (send `path`), no `client_user_agent`, a Purchase
   with no `value` + `currency`, or an `occurredAt` older than Meta's 7-day `event_time` window. Your
-  site's domain must also be verified in Meta Events Manager, or Meta accepts the events and
-  discounts them.
+  site's domain must also be verified in Meta, or Meta accepts the events and discounts them.
 - `adMatch` rides inside the **signed** body, so nobody without your secret can inject one, and it is
   never valid on a document request.
+
+When the wizard wires server conversions it also writes `docs/infinite-server-events.md` into the
+pull request (and the same steps into its description): what the site owner does in Infinite
+(declare the conversions from *Your server*, generate the server-event secret), in their hosting
+(the environment variables, including their own `LEAD_ID_SECRET`), in Stripe (the webhook endpoint
+and its two events) and in Meta (connect it, verify the domain).
 
 If a file it would create already exists and Infinite does not manage it, that file is left alone
 and its exact content goes into the brief; an unmanaged `lib/infinite-server-lane.*` is a planning

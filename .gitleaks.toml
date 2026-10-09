@@ -20,4 +20,6 @@ paths = [
   # documented test secret ("test-secret"), shared with the receiving side. Not credentials.
   # (Unanchored so the pre-push hook's absolute-path scan matches too.)
   '''packages/instrument/contracts/server-lane-v1\.vectors\.json$''',
+  # The same recipe vectors as a TypeScript module the server-lane tests share (moved out of helpers.test.ts).
+  '''packages/instrument/test/server-lane-vectors\.ts$''',
 ]

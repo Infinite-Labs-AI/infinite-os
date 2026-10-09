@@ -28,8 +28,8 @@
       "label": "Checks passing",
       "cells": {
         "live_today": {
-          "value": "4/12",
-          "display": "4 pass · 8 problems · 2 not testable of 14",
+          "value": "4/11",
+          "display": "4 pass · 7 problems · 2 not testable of 13",
           "state": "problem",
           "provenance": {
             "source": "wizard_check",
@@ -38,8 +38,8 @@
           }
         },
         "in_pr": {
-          "value": "12/12",
-          "display": "12 pass · 0 problems · 2 not testable of 14",
+          "value": "11/11",
+          "display": "11 pass · 0 problems · 2 not testable of 13",
           "state": "pass",
           "provenance": {
             "source": "wizard_check",
@@ -48,8 +48,8 @@
           }
         },
         "proven_live": {
-          "value": "9/12",
-          "display": "9 pass · 0 problems · 3 unknown · 2 not testable of 14",
+          "value": "10/13",
+          "display": "10 pass · 0 problems · 3 unknown of 13",
           "state": "pending",
           "provenance": {
             "source": "wizard_check",
@@ -313,7 +313,7 @@
         "live_today": {
           "value": "not recorded",
           "display": "not recorded",
-          "state": "problem",
+          "state": "info",
           "provenance": {
             "source": "cloud_read",
             "at": "2026-10-02T09:09:00.000Z",
@@ -323,7 +323,7 @@
         "in_pr": {
           "value": "not_required",
           "display": "\"collect by default\" recorded",
-          "state": "pass",
+          "state": "info",
           "provenance": {
             "source": "plan_answer",
             "at": "2026-10-02T09:20:00.000Z",
@@ -333,7 +333,7 @@
         "proven_live": {
           "value": "not_required",
           "display": "collect by default",
-          "state": "pass",
+          "state": "info",
           "provenance": {
             "source": "cloud_read",
             "at": "2026-10-02T09:44:00.000Z",
@@ -723,7 +723,7 @@
         "live_today": {
           "value": "problem",
           "display": "problem",
-          "state": "problem",
+          "state": "info",
           "provenance": {
             "source": "cloud_read",
             "at": "2026-10-02T09:13:00.000Z",
@@ -733,7 +733,7 @@
         "in_pr": {
           "value": "pass",
           "display": "pass",
-          "state": "pass",
+          "state": "info",
           "provenance": {
             "source": "plan_answer",
             "at": "2026-10-02T09:30:00.000Z",
@@ -743,7 +743,7 @@
         "proven_live": {
           "value": "pass",
           "display": "pass",
-          "state": "pass",
+          "state": "info",
           "provenance": {
             "source": "cloud_read",
             "at": "2026-10-02T09:44:00.000Z",

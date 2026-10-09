@@ -1,6 +1,6 @@
 // What the user's approved plan decided, in the shape the registry and the briefs need (lane O8).
 //
-// Conversion names and the privacy paragraph are USER decisions (§3e.1 "never the agent's job", R2-14).
+// Conversion names are user decisions. Policy text is a legacy field, always null; never agent work.
 // The agent never chooses them: `applyApprovals` keeps a conversion job only for a type the user
 // approved a name for, and the brief hands the agent that name, and the approved paragraph, as DATA.
 //
@@ -39,35 +39,57 @@ export function approvedConversionNames(plan: PlanModel, approvals: PlanApproval
   return [...names].sort()
 }
 
-/** The privacy paragraph the user approved (after their edit), verbatim, or null. */
-export function approvedPrivacyText(plan: PlanModel, approvals: PlanApprovals): string | null {
-  const line = approvedLinesOfKind(plan, approvals, "privacy_text")[0]
-  if (!line) return null
-  const edit = approvals.edits[line.id]
-  const text = (edit !== undefined ? edit : (plan.decisions.privacyText ?? "")).trim()
-  return text === "" ? null : text
+/** Kept to decode old plan files; a saved approval never authorizes policy edits now. */
+export function approvedPrivacyText(_plan: PlanModel, _approvals: PlanApprovals): string | null {
+  return null
 }
 
 /**
- * The words a conversion NAME uses for each detected conversion TYPE. A name binds to a type when it is
- * the type itself or one of these (an approved `start_free_trial` binds the detected `trial` handler).
- * A name that binds to no type gets no detected job: the agent never guesses where it fires.
+ * The words a conversion NAME uses for each detected target (a conversion TYPE, or the server-reported
+ * `begin_checkout`). A name binds to a target when it is the target itself or one of these (an approved
+ * `start_free_trial` binds the detected `trial` handler). A name that binds to no target gets no detected job: the
+ * agent never guesses where it fires.
  */
-const TYPE_NAMES: Record<ConversionType, RegExp> = {
+const TYPE_NAMES: Readonly<Record<ConversionType | "begin_checkout", RegExp>> = {
   signup: /^(?:signup|sign_up|signups|register|registration|registered|create_account|account_created|app_signup)$/,
   lead: /^(?:lead|leads|contact|contact_form|contact_sales|demo_request|request_demo|enquiry|inquiry|quote_request)$/,
   booking: /^(?:booking|bookings|book|book_demo|book_call|schedule|scheduled|appointment|meeting_booked|demo_booked)$/,
   purchase: /^(?:purchase|purchases|order|order_completed|checkout_completed|paid|payment)$/,
   trial: /^(?:trial|trials|start_trial|started_trial|trial_start|trial_started|start_free_trial|free_trial)$/,
   download: /^(?:download|downloads|download_app|app_download)$/,
-  custom: /^custom$/
+  custom: /^custom$/,
+  begin_checkout: /^(?:begin_checkout|initiate_checkout|checkout_started)$/
 }
 
-/** The approved names that bind to one detected conversion type (sorted). */
+/** The approved names that bind to one detected target (sorted). */
 export function boundConversionNames(type: string, approvedNames: readonly string[]): string[] {
   const pattern = (TYPE_NAMES as Record<string, RegExp | undefined>)[type]
   if (!pattern) return []
   return approvedNames.filter((name) => pattern.test(name)).sort()
+}
+
+/**
+ * Gap 2: the conversion NAME the plan proposes for each detected target. Every proposal is a name Infinite's Meta relay
+ * maps to a Meta standard event (1bu-1 `meta-capi-relay.ts` `META_STANDARD_EVENTS`), so a server report reaches Meta
+ * as that event, never as a custom one: a trial is `start_trial` (Meta StartTrial), never `trial`; a sign-up is
+ * `sign_up` (CompleteRegistration); a booking is `schedule` (Meta Schedule). `download` has no Meta standard event.
+ * `begin_checkout` is declared in Infinite as a `custom` conversion (the `tag.conversions.v1` types stay as they are)
+ * and maps to InitiateCheckout. The browser-only steps (`view_item`, `add_to_cart`) are never conversions.
+ */
+export const PROPOSED_CONVERSION_NAME: Readonly<Record<ConversionType | "begin_checkout", string>> = {
+  signup: "sign_up",
+  lead: "lead",
+  booking: "schedule",
+  purchase: "purchase",
+  trial: "start_trial",
+  download: "download",
+  custom: "custom",
+  begin_checkout: "begin_checkout"
+}
+
+/** The name the plan proposes for a detected target (the target itself when it has no entry). */
+export function proposedConversionName(target: string): string {
+  return (PROPOSED_CONVERSION_NAME as Record<string, string | undefined>)[target] ?? target
 }
 
 /** One approved plan line the brief quotes for the items it names. */
@@ -76,13 +98,14 @@ export interface BriefPlanLine {
   kind: PlanLineKind
   text: string
   jobIds: string[]
+  sensitivePaths?: string[]
 }
 
 /** The approved plan, as the brief carries it. */
 export interface BriefPlan {
   /** Approved conversion names (after the user's edits). */
   conversionNames: string[]
-  /** The approved privacy paragraph, verbatim; null = not approved. */
+  /** Legacy persistence field; always null in current briefs. */
   privacyText: string | null
   /** Every approved line that names checklist items. */
   lines: BriefPlanLine[]
@@ -96,7 +119,7 @@ export function briefPlanFrom(plan: PlanModel, approvals: PlanApprovals): BriefP
     privacyText: approvedPrivacyText(plan, approvals),
     lines: plan.lines
       .filter((line) => approved.has(line.id) && !declined.has(line.id) && (line.jobIds?.length ?? 0) > 0)
-      .map((line) => ({ id: line.id, kind: line.kind, text: line.text, jobIds: [...(line.jobIds ?? [])] }))
+      .map((line) => ({ id: line.id, kind: line.kind, text: line.text, jobIds: [...(line.jobIds ?? [])], ...(line.sensitivePaths ? { sensitivePaths: [...line.sensitivePaths] } : {}) }))
   }
 }
 

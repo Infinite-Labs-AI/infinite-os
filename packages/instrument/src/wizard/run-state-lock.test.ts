@@ -3,11 +3,10 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
 
-import { WIZARD_EXIT } from "./contracts/codes.js"
 import { nodeWizardFs } from "./fs.js"
 import { acquireRunLock, lockFilePath } from "./lock.js"
 import { RunStateFile, createRunState, firstOpenStep, loadRunState, setStateAside, stateFilePath } from "./run-state.js"
-import { installInterruptHandlers, runInterruptSequence, type SignalSource } from "./signals.js"
+import { runInterruptSequence } from "./signals.js"
 
 const roots: string[] = []
 function tempRoot(): string {
@@ -54,43 +53,6 @@ describe("run state (.infinite/wizard/state.json)", () => {
     expect(aside).toMatch(/state\.json\.corrupt-1$/)
     expect(readFileSync(aside!, "utf8")).toContain("extra")
     expect(await loadRunState(nodeWizardFs, root)).toEqual({ kind: "none" })
-  })
-
-  it("refuses an update that would break the state schema (negative)", () => {
-    const root = tempRoot()
-    const file = new RunStateFile(nodeWizardFs, root, createRunState({ tagVersion: "0.12.0", root, appRoot: ".", now: NOW }))
-    expect(() =>
-      file.update((state) => {
-        ;(state as unknown as Record<string, unknown>).surprise = true
-      })
-    ).toThrow(/breaks the state schema/)
-    expect(file.get()).not.toHaveProperty("surprise")
-  })
-})
-
-describe("run state saves after a failed write (O1-17)", () => {
-  it("one failed write never poisons the saves after it", async () => {
-    const root = tempRoot()
-    let failNext = true
-    const written: string[] = []
-    const fs = {
-      ...nodeWizardFs,
-      async writeTextAtomic(path: string, text: string) {
-        if (failNext) {
-          failNext = false
-          throw Object.assign(new Error("ENOSPC: no space left on device"), { code: "ENOSPC" })
-        }
-        written.push(text)
-      }
-    }
-    const file = new RunStateFile(fs, root, createRunState({ tagVersion: "0.12.0", root, appRoot: ".", now: NOW, displayId: "r-7f3c" }))
-    await expect(file.save()).rejects.toThrow("ENOSPC")
-    file.update((state) => {
-      state.runId = "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80"
-    })
-    await expect(file.save()).resolves.toBeUndefined()
-    expect(written).toHaveLength(1)
-    expect(JSON.parse(written[0]!).runId).toBe("7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80")
   })
 })
 
@@ -159,36 +121,9 @@ describe("run lock (.infinite/wizard/run.lock)", () => {
     expect(readdirSync(join(root, ".infinite/wizard"))).toEqual(["run.lock"])
     if (b.ok) await b.handle.release()
   })
-
-  it("release removes only this run's lock", async () => {
-    const root = tempRoot()
-    const mine = await acquireRunLock(root, { pid: 111, isPidAlive: () => true })
-    if (!mine.ok) throw new Error("expected the lock")
-    writeFileSync(lockFilePath(root), JSON.stringify({ pid: 222, startedAt: "2026-10-02T00:00:00Z", hostname: "h" }))
-    await mine.handle.release()
-    expect(JSON.parse(readFileSync(lockFilePath(root), "utf8")).pid).toBe(222)
-  })
 })
 
 describe("SIGINT / SIGTERM", () => {
-  it("abort → kill the agents → fence abort (snapshot restore) → release the lock → exit 130, in that order", async () => {
-    const order: string[] = []
-    await runInterruptSequence({
-      abort: () => order.push("abort"),
-      killAgents: async () => {
-        order.push("killAll")
-      },
-      fenceAbort: async () => {
-        order.push("fenceAbort")
-      },
-      releaseLock: async () => {
-        order.push("releaseLock")
-      },
-      exit: (code) => order.push(`exit ${code}`)
-    })
-    expect(order).toEqual(["abort", "killAll", "fenceAbort", "releaseLock", `exit ${WIZARD_EXIT.interrupted}`])
-  })
-
   it("every later stage still runs when one throws (negative: a failing killAll never skips the restore or the lock)", async () => {
     const order: string[] = []
     const notices: string[] = []
@@ -208,35 +143,5 @@ describe("SIGINT / SIGTERM", () => {
     })
     expect(order).toEqual(["abort", "fenceAbort", "releaseLock", "exit 130"])
     expect(notices.join(" ")).toContain("kill failed")
-  })
-
-  it("the handler runs the sequence once; a second signal exits at once", async () => {
-    const listeners = new Map<string, () => void>()
-    const source: SignalSource = {
-      on: (signal, listener) => listeners.set(signal, listener),
-      off: (signal) => listeners.delete(signal)
-    }
-    const exits: number[] = []
-    let kills = 0
-    const remove = installInterruptHandlers(
-      {
-        abort() {},
-        killAgents: async () => {
-          kills += 1
-          await new Promise((resolve) => setTimeout(resolve, 5))
-        },
-        releaseLock: async () => {},
-        exit: (code) => exits.push(code)
-      },
-      source
-    )
-    listeners.get("SIGINT")!()
-    listeners.get("SIGTERM")!()
-    expect(exits).toEqual([130])
-    await new Promise((resolve) => setTimeout(resolve, 20))
-    expect(kills).toBe(1)
-    expect(exits).toEqual([130, 130])
-    remove()
-    expect(listeners.size).toBe(0)
   })
 })

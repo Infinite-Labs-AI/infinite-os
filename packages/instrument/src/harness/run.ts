@@ -494,8 +494,8 @@ export function conversionsPhase(input: ConversionsPhaseInput): ConversionsPhase
 }
 
 /** Source-only setup-correctness checks (never a receipt lane). */
-export function setupChecksPhase(appRootAbsolute: string): SetupChecksReport {
-  return runSetupChecks(appRootAbsolute)
+export function setupChecksPhase(appRootAbsolute: string, root = appRootAbsolute): SetupChecksReport {
+  return runSetupChecks(appRootAbsolute, { repoRoot: root })
 }
 
 export interface ServerLanePhaseInput {
@@ -1070,7 +1070,7 @@ const setupChecks: RunbookStep<Ctx> = {
   title: "Setup correctness",
   run(ctx) {
     if (ctx.args.brief) return { skipped: "--brief" }
-    const report = setupChecksPhase(ctx.appRootAbsolute)
+    const report = setupChecksPhase(ctx.appRootAbsolute, ctx.root)
     ctx.setupChecks = report
     ctx.report.setupChecks = report
     for (const line of setupFindingLines(report)) {

@@ -5,7 +5,8 @@
 // live updates are "a little magical, not real-time everything". Progress subs (`info`, `pending`)
 // coalesce: only the newest waiting one is shown when the window opens. Result subs (`ok`, `warn`)
 // are never dropped: they queue and release one per window, and `step.done` flushes the queue at once
-// so a step never finishes with a result still hidden. Text is capped and stripped of terminal
+// so a step never finishes with a result still hidden. Explicit decision results (`result`) bypass
+// the queue entirely: none is throttled or coalesced. Text is capped and stripped of terminal
 // control sequences before it reaches the store or stdout.
 import { sanitizeUntrusted } from "../agents/sanitize.js"
 import type { WizardEmitter } from "./contracts/deps.js"
@@ -17,7 +18,7 @@ import {
   type WizardEventType
 } from "./contracts/events.js"
 import type { WizardStepId } from "./contracts/steps.js"
-import type { SubTone, WizardStore } from "./store.js"
+import { jobDisplayState, type SubTone, type WizardStore } from "./store.js"
 
 /** A timer seam so tests drive the throttle with a fake clock. */
 export interface EmitterTimers {
@@ -125,6 +126,21 @@ export class WizardEventEmitter implements WizardEmitter {
         this.store.setExit({ exitCode: end.exitCode, prUrl: end.prUrl ?? null, reportPath: end.reportPath })
         break
       }
+      case "job.seeded": {
+        const seeded = fields as WizardEventFields["job.seeded"]
+        this.store.jobSeeded(seeded.item)
+        break
+      }
+      case "job.progress": {
+        const progress = fields as WizardEventFields["job.progress"]
+        this.store.jobDisplay(progress.itemId, progress.state)
+        break
+      }
+      case "job.state": {
+        const job = fields as WizardEventFields["job.state"]
+        this.store.jobDisplay(job.itemId, jobDisplayState(job.state, job.by), job.note ? cleanEventText(job.note, EVENT_LIMITS.subTextMaxChars) : undefined)
+        break
+      }
       default:
         break
     }
@@ -156,6 +172,11 @@ export class WizardEventEmitter implements WizardEmitter {
     if (!throttle) {
       throttle = { lastReleasedAt: null, queue: [], latestProgress: null, timer: null }
       this.subs.set(step, throttle)
+    }
+    if (tone === "result") {
+      this.flushSubs(step)
+      this.releaseSub(step, throttle, { text, tone })
+      return
     }
     const nowMs = this.now().getTime()
     const windowOpen = throttle.lastReleasedAt === null || nowMs - throttle.lastReleasedAt >= EVENT_LIMITS.subThrottleMs

@@ -5,12 +5,19 @@
 // HTML and Vite) or in the Next bootstrap, plus typed, no-op-safe wrappers exported from the managed Next
 // module. Nothing here runs on its own: every global waits for the site's code to call it.
 //
-//   infiniteTrack(name, props?, { gate? })                 ./track.ts
-//   infiniteTrackThenNavigate(event, hrefOrAnchor, name, props?)  ./navigate.ts
+//   infiniteTrack(name, props?, { gate?, destinations?, metaEventName? }) ./track.ts
+//   infiniteTrackThenNavigate(event, hrefOrAnchor, name, props?, { gate?, destinations?, metaEventName? })
+//                                                          ./navigate.ts
+//   infiniteTrackBeforeLeaving(name, props?, options?)    ./track.ts (the same sends, and the bounded wait a full page
+//                                                          load must leave after; the site's own helper returns it)
+//   infiniteLeaveAfter(start, go)                          ./navigate.ts (one navigation at a time: run the handler,
+//                                                          wait for the helper's wait, then the handler's own navigation)
+//   infiniteAdMatchAllowed()                               ./track.ts (the tag's "visitor allowed tracking" signal)
 //   infiniteIdentify(id) / infiniteReset()                 ./identify.ts
 //   infiniteMetaMirror(metaEventName, metaEventId, { wait?, identity?, budgetMs?, gate? })
 //                                                          ../providers/meta-browser/mirror.ts
 //   infiniteCampaign()                                     ../attribution/capture.ts (first-touch capture)
+//   infiniteMetaAdvancedMatch({ email, externalId })       ../providers/meta.ts, with `metaAdvancedMatching` (gap 5)
 //
 // Each is defined only if absent, so a second managed block (or an upgrade racing an old one) is inert.
 // Consent: every helper follows the Infinite hook for the site's consent mode (the runtime's own check
@@ -22,21 +29,25 @@ import { buildLandingAttributionScript } from "../attribution/capture.js"
 import type { MetaBrowserGate } from "../providers/meta-browser/consent.js"
 import { consentAllowsSource } from "../providers/meta-browser/consent.js"
 import { buildMetaMirrorScript } from "../providers/meta-browser/mirror.js"
+import { buildMetaAdvancedMatchingSnippet } from "../providers/meta.js"
 import { isHtmlInjectedFramework, type InstallInstruction, type SupportedFramework, type WorkspaceInstallArtifacts } from "../types.js"
 
 import { identifySource } from "./identify.js"
 import { trackThenNavigateSource } from "./navigate.js"
 import { UNSAFE_TEXT_SOURCE } from "./scrub.js"
-import { helperCoreSource, trackSource } from "./track.js"
+import { helperCoreSource, INFINITE_CURRENCY_PATTERN, trackBeforeLeavingSource, trackSource } from "./track.js"
 
 /** Every window global the helper script defines. */
 export const CONVERSION_HELPER_GLOBALS = [
   "infiniteTrack",
   "infiniteTrackThenNavigate",
+  "infiniteTrackBeforeLeaving",
+  "infiniteLeaveAfter",
   "infiniteIdentify",
   "infiniteReset",
   "infiniteMetaMirror",
-  "infiniteCampaign"
+  "infiniteCampaign",
+  "infiniteAdMatchAllowed"
 ] as const
 
 export interface ConversionHelpersOptions {
@@ -46,6 +57,14 @@ export interface ConversionHelpersOptions {
   ownHosts?: string[]
   /** The installed Meta pixel the mirror fires on (B16); absent → the mirror fires nothing. */
   metaPixelId?: string | null
+  /**
+   * Parity gap 5: define `window.infiniteMetaAdvancedMatch` (hashes a raw email / external id, then `fbq('init', pixel,
+   * { em, external_id })`) on this pixel, managed OR adopted, so `infiniteMetaMirror(name, id, { identity })` sends
+   * the browser leg's match data. From `artifacts.meta.advancedMatching` (ON by default when Meta is connected).
+   */
+  metaAdvancedMatching?: boolean
+  /** The site's currency (ISO 4217), the default for product events (`artifacts.conversions.currency`). */
+  currency?: string | null
 }
 
 function indent(source: string): string {
@@ -68,11 +87,16 @@ export function buildConversionHelpersScript(options: ConversionHelpersOptions =
     '  if (typeof window.infiniteTrack === "function") return;',
     indent(consentAllowsSource(conversionGate)),
     indent(UNSAFE_TEXT_SOURCE),
-    indent(helperCoreSource()),
+    indent(helperCoreSource({ currency: options.currency ?? null, metaPixelId: options.metaPixelId ?? null })),
     indent(trackSource()),
+    indent(trackBeforeLeavingSource()),
     indent(trackThenNavigateSource()),
     indent(identifySource()),
     "})();",
+    // Before the mirror, which hands `identity` to it. Only with a valid pixel; the snippet is inert if already defined.
+    ...(options.metaAdvancedMatching === true && typeof options.metaPixelId === "string" && /^[0-9]{15,16}$/.test(options.metaPixelId)
+      ? [buildMetaAdvancedMatchingSnippet(options.metaPixelId, gate)]
+      : []),
     buildMetaMirrorScript({ gate, pixelId: options.metaPixelId ?? null }),
     buildLandingAttributionScript({ ownHosts: options.ownHosts ?? [], gate })
   ].join("\n")
@@ -90,7 +114,9 @@ export function conversionHelpersOptions(artifacts: WorkspaceInstallArtifacts): 
       ])
     ],
     // The chosen pixel (the keys step's choice = the relay binding), managed or adopted (§3z.10, B16).
-    metaPixelId: artifacts.meta?.pixelId ?? null
+    metaPixelId: artifacts.meta?.pixelId ?? null,
+    metaAdvancedMatching: artifacts.meta?.advancedMatching === true,
+    currency: typeof artifacts.conversions?.currency === "string" && INFINITE_CURRENCY_PATTERN.test(artifacts.conversions.currency) ? artifacts.conversions.currency : null
   }
 }
 
@@ -113,7 +139,7 @@ export function conversionHelpersInstruction(
     path: html ? "index.html" : "lib/infinite-analytics.ts",
     action: html ? "modify" : "create",
     description: html
-      ? "Add the managed conversion helpers (infiniteTrack, infiniteTrackThenNavigate, infiniteIdentify, infiniteReset, infiniteMetaMirror, infiniteCampaign) to the managed block. Your code calls them; they never run on their own."
+      ? "Add the managed conversion helpers (infiniteTrack, infiniteTrackThenNavigate, infiniteTrackBeforeLeaving, infiniteLeaveAfter, infiniteIdentify, infiniteReset, infiniteMetaMirror, infiniteCampaign, infiniteAdMatchAllowed) to the managed block. Your code calls them; they never run on their own."
       : "Add the managed conversion helpers to the managed analytics module, with typed wrappers your code imports.",
     snippet: html ? ["<script>", script, "</script>"].join("\n") : script,
     helpers: true
@@ -133,6 +159,16 @@ export function nextHelperWrappersSource(): string {
     "  /** Your own consent check. The helper sends nothing unless it returns true. */",
     "  gate?: () => boolean",
     "}",
+    "export type InfiniteTool = \"meta\" | \"ga4\" | \"posthog\" | \"infinite\"",
+    "export interface InfiniteTrackOptions extends InfiniteGateOption {",
+    "  /**",
+    "   * The tools to send to. A list sends to exactly those (`[\"meta\"]` = Meta only, for a call site that already",
+    "   * sends GA4 and PostHog); an object turns single tools off (`{ ga4: false }`). Absent = every live tool.",
+    "   */",
+    "  destinations?: InfiniteTool[] | { ga4?: boolean; posthog?: boolean; meta?: boolean; infinite?: boolean }",
+    "  /** Optional browser-only Meta event name. Server-twin names such as Purchase and Lead are ignored here. */",
+    "  metaEventName?: string",
+    "}",
     "export interface InfiniteClickEvent {",
     "  preventDefault(): void",
     "  defaultPrevented?: boolean",
@@ -146,7 +182,7 @@ export function nextHelperWrappersSource(): string {
     "  /** The element the click landed on. */",
     "  target?: unknown",
     "}",
-    "export type InfiniteNavigationTarget = string | { href: string; getAttribute?(name: string): string | null }",
+    "export type InfiniteNavigationTarget = string | { href: string; getAttribute?: Element[\"getAttribute\"] }",
     "export interface InfiniteMetaMirrorOptions extends InfiniteGateOption {",
     '  /** "request" (default): resolve when the pixel request completed, or at the budget. */',
     '  wait?: "request" | "none"',
@@ -162,27 +198,25 @@ export function nextHelperWrappersSource(): string {
     "}",
     "",
     "type InfiniteHelperWindow = {",
-    "  infiniteTrack?: (name: string, props?: InfiniteEventProps, options?: InfiniteGateOption) => boolean",
-    "  infiniteTrackThenNavigate?: (",
-    "    event: InfiniteClickEvent | null | undefined,",
-    "    target: InfiniteNavigationTarget,",
-    "    name: string,",
-    "    props?: InfiniteEventProps",
-    "  ) => void",
-    "  infiniteIdentify?: (id: string) => boolean",
-    "  infiniteReset?: () => boolean",
-    "  infiniteMetaMirror?: (metaEventName: string, metaEventId: string | null | undefined, options?: InfiniteMetaMirrorOptions) => Promise<void>",
-    "  infiniteCampaign?: () => InfiniteCampaign",
-    "  location: { href: string; assign(url: string): void }",
-    "  open(url: string, target?: string, features?: string): unknown",
+    "  infiniteTrack?: typeof infiniteTrack",
+    "  infiniteTrackThenNavigate?: typeof infiniteTrackThenNavigate",
+    "  infiniteTrackBeforeLeaving?: typeof infiniteTrackBeforeLeaving",
+    "  infiniteLeaveAfter?: typeof infiniteLeaveAfter",
+    "  infiniteIdentify?: typeof infiniteIdentify",
+    "  infiniteReset?: typeof infiniteReset",
+    "  infiniteMetaMirror?: typeof infiniteMetaMirror",
+    "  infiniteCampaign?: typeof infiniteCampaign",
+    "  infiniteAdMatchAllowed?: typeof infiniteAdMatchAllowed",
+    "  location: Pick<Location, \"href\" | \"assign\">",
+    "  open: Window[\"open\"]",
     "}",
     "",
     "function infiniteHelpers(): InfiniteHelperWindow | null {",
     '  return typeof window === "undefined" ? null : (window as unknown as InfiniteHelperWindow)',
     "}",
     "",
-    "/** Send one named event to PostHog and GA4. Never to Meta. */",
-    "export function infiniteTrack(name: string, props?: InfiniteEventProps, options?: InfiniteGateOption): boolean {",
+    "/** Send one named browser event to the live tools, without page-built Meta event ids. */",
+    "export function infiniteTrack(name: string, props?: InfiniteEventProps, options?: InfiniteTrackOptions): boolean {",
     "  const helpers = infiniteHelpers()",
     "  if (!helpers || typeof helpers.infiniteTrack !== \"function\") return false",
     "  try {",
@@ -209,29 +243,31 @@ export function nextHelperWrappersSource(): string {
     "  if (anchorTo(event.currentTarget)) return true",
     "  if (!anchorTo(target)) return false",
     "  const clicked = event.target",
-    "  const container = target as { contains?: (node: unknown) => boolean }",
+    "  const container = target as { contains?: Element[\"contains\"] }",
     "  try {",
-    "    return !!clicked && (clicked === target || (typeof container.contains === \"function\" && container.contains(clicked) === true))",
+    "    return !!clicked && (clicked === target || (typeof container.contains === \"function\" && container.contains(clicked as Node) === true))",
     "  } catch {",
     "    return false",
     "  }",
     "}",
     "",
     "/**",
-    " * Record a click, then go there once GA4 has the hit (at most 1 s). Works on a <button> or a",
-    " * programmatic call too: when the browser would not navigate by itself, the helper does.",
+    " * Record a click, then go there once GA4 has the hit (at most 1 s) and a browser-only Meta event's request is out",
+    " * (at most 400 ms). Works on a <button> or a programmatic call too: when the browser would not navigate by itself,",
+    " * the helper does. A second click while the first is on its way does nothing.",
     " */",
     "export function infiniteTrackThenNavigate(",
     "  event: InfiniteClickEvent | null | undefined,",
     "  target: InfiniteNavigationTarget,",
     "  name: string,",
-    "  props?: InfiniteEventProps",
+    "  props?: InfiniteEventProps,",
+    "  options?: InfiniteTrackOptions",
     "): void {",
     "  const helpers = infiniteHelpers()",
     "  if (!helpers) return",
     "  if (typeof helpers.infiniteTrackThenNavigate === \"function\") {",
     "    try {",
-    "      helpers.infiniteTrackThenNavigate(event, target, name, props)",
+    "      helpers.infiniteTrackThenNavigate(event, target, name, props, options)",
     "      return",
     "    } catch {",
     "      // fall through: never strand the visitor",
@@ -255,6 +291,40 @@ export function nextHelperWrappersSource(): string {
     "  const opensElsewhere = typeof target === \"object\" && typeof target.getAttribute === \"function\" && target.getAttribute(\"target\") === \"_blank\"",
     "  if (opensElsewhere) helpers.open(destination.href, \"_blank\", \"noopener\")",
     "  else helpers.location.assign(destination.href)",
+    "}",
+    "",
+    "/**",
+    " * The same sends as infiniteTrack, and a promise that settles once they are safe from a full page load: Meta's",
+    " * request is out (at most 400 ms) and GA4's hit when GA4 runs (at most 1 s). It never rejects. Return it from your own",
+    " * event helper; a click that then does a full page load waits for it with infiniteLeaveAfter.",
+    " */",
+    "export function infiniteTrackBeforeLeaving(name: string, props?: InfiniteEventProps, options?: InfiniteTrackOptions): Promise<void> {",
+    "  const helpers = infiniteHelpers()",
+    "  if (!helpers || typeof helpers.infiniteTrackBeforeLeaving !== \"function\") return Promise.resolve()",
+    "  try {",
+    "    return Promise.resolve(helpers.infiniteTrackBeforeLeaving(name, props, options)).then(",
+    "      () => undefined,",
+    "      () => undefined",
+    "    )",
+    "  } catch {",
+    "    return Promise.resolve()",
+    "  }",
+    "}",
+    "",
+    "/**",
+    " * Wrap a click handler that then does a FULL page load: `start` does what the handler did before it left and returns",
+    " * your helper's wait; `go` is the handler's own navigation, unchanged. `go` runs once the wait settles (at most 1 s).",
+    " * A second click while the first is on its way runs neither.",
+    " */",
+    "export function infiniteLeaveAfter(start: () => Promise<void> | null | undefined | void, go: () => void): void {",
+    "  const helpers = infiniteHelpers()",
+    "  if (helpers && typeof helpers.infiniteLeaveAfter === \"function\") {",
+    "    helpers.infiniteLeaveAfter(start, go)",
+    "    return",
+    "  }",
+    "  // Not hydrated yet: nothing was sent, so nothing is waited for.",
+    "  start()",
+    "  go()",
     "}",
     "",
     "/** Join this visitor's PostHog history to your stable account id (never an email). */",
@@ -297,6 +367,21 @@ export function nextHelperWrappersSource(): string {
     "    )",
     "  } catch {",
     "    return Promise.resolve()",
+    "  }",
+    "}",
+    "",
+    "/**",
+    " * True when this visitor allowed tracking (the site's own trackers are running for them). Pass it to your own API",
+    " * route (`ad_match=1` in a form, `adMatch: true` in JSON) so your server attaches Meta match data to the outcome",
+    " * it reports. False before hydration and wherever Infinite's tag is not running.",
+    " */",
+    "export function infiniteAdMatchAllowed(): boolean {",
+    "  const helpers = infiniteHelpers()",
+    "  if (!helpers || typeof helpers.infiniteAdMatchAllowed !== \"function\") return false",
+    "  try {",
+    "    return helpers.infiniteAdMatchAllowed() === true",
+    "  } catch {",
+    "    return false",
     "  }",
     "}",
     "",

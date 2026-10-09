@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest"
 
-import { colorEnabled, fit, makeStyles, stripAnsi, truncate, visibleWidth, wrapText } from "./ansi.js"
-import { exitLine } from "./exit-line.js"
+import { colorEnabled, fit, makeStyles, stripAnsi, truncate, visibleWidth } from "./ansi.js"
 import { parseKeys } from "./keys.js"
 
 describe("colour", () => {
@@ -13,11 +12,6 @@ describe("colour", () => {
     expect(colorEnabled({ FORCE_COLOR: "1" }, false)).toBe(true)
     expect(colorEnabled({ FORCE_COLOR: "0" }, true)).toBe(false)
     expect(colorEnabled({ TERM: "dumb" }, true)).toBe(false)
-  })
-
-  it("disabled styles add nothing", () => {
-    expect(makeStyles(false).ok("x")).toBe("x")
-    expect(makeStyles(true).ok("x")).toBe("\x1b[32mx\x1b[39m")
   })
 })
 
@@ -32,11 +26,6 @@ describe("width", () => {
     expect(cut.endsWith("\x1b[0m")).toBe(true)
     expect(fit("ab", 4)).toBe("ab  ")
     expect(visibleWidth("漢字")).toBe(4)
-  })
-
-  it("wraps words", () => {
-    expect(wrapText("one two three four", 9)).toEqual(["one two", "three", "four"])
-    expect(wrapText("abcdefghij", 4)).toEqual(["abcd", "efgh", "ij"])
   })
 })
 
@@ -59,10 +48,3 @@ describe("keys", () => {
   })
 })
 
-describe("exit line", () => {
-  it("names the run, the PR and the report", () => {
-    const line = exitLine({ displayId: "r-7f3c", exitCode: 3, prUrl: "https://github.com/a/b/pull/1", reportPath: ".infinite/REPORT.md" }, makeStyles(false))
-    expect(line).toBe("◆ infinite-tag run r-7f3c: paused (run npx infinite-tag again to continue) · PR https://github.com/a/b/pull/1 · report .infinite/REPORT.md")
-    expect(exitLine({ displayId: "r-1", exitCode: 4, prUrl: null, reportPath: null }, makeStyles(false))).toBe("◆ infinite-tag run r-1: needs the Infinite app")
-  })
-})

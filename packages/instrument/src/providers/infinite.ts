@@ -90,14 +90,22 @@ export const infiniteProviderAdapter: ProviderAdapter = {
       respectDnt: true,
       consent:
         consentMode === "not_required"
-          ? { mode: "not_required" }
+          ? // Only `true` is serialized: an absent flag keeps the runtime config byte-identical.
+            { mode: "not_required", ...(infinite?.followSitePixels === true ? { followSitePixels: ["fbq", "gtag", "posthog", "dataLayer"] } : {}) }
           : { mode: "required", storageKey: "infinite_analytics_consent" },
       ...(downloadDestinationPath !== undefined ? { downloadDestinationPath } : {}),
       // Only `false` is serialized — an absent flag keeps the runtime config byte-identical to 0.6.2.
       ...(infinite?.autocapture === false ? { autocapture: false } : {}),
       // Only `true` is serialized — an absent flag keeps the runtime config byte-identical (bots
       // are never counted). Synthetic/test sandbox sources only; installer-gated to non-prod hosts.
-      ...(infinite?.allowAutomation === true ? { allowAutomation: true } : {})
+      ...(infinite?.allowAutomation === true ? { allowAutomation: true } : {}),
+      ...(infinite?.excludedPaths && infinite.excludedPaths.length > 0 ? { excludedPaths: infinite.excludedPaths } : {}),
+      // Follow mode only (review P1-6); absent otherwise, so the runtime config stays byte-identical.
+      ...(infinite?.followSitePixels === true && consentMode === "not_required" && infinite.pixelFreePaths && infinite.pixelFreePaths.length > 0
+        ? { pixelFreePaths: infinite.pixelFreePaths }
+        : {}),
+      // Parity gap 8: only `true` is serialized.
+      ...(infinite?.metaPageViews === true ? { metaPageViews: true } : {})
     }
     return {
       assumptions: [
@@ -116,7 +124,7 @@ export const infiniteProviderAdapter: ProviderAdapter = {
           : []),
         ...(infinite && context?.artifacts.conversions?.helpers === true
           ? [
-              "Conversions reach GA4 and PostHog only when your own code calls the managed helpers (infiniteTrack and friends); the Infinite runtime itself forwards nothing."
+              "Conversions reach GA4, PostHog, Infinite's browser ledger and safe browser-only Meta events when your own code calls the managed helpers (infiniteTrack and friends); server-twin Meta conversions still go server first and mirror only with Infinite's returned id."
             ]
           : [])
       ],

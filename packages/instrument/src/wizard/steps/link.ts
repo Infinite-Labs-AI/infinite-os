@@ -24,6 +24,7 @@ import { bridgeErrorOutcome, discoveryOutcome, missingCapabilities, protocolOutc
 import { linkSiteFor } from "../../bridge/repo-identity.js"
 import { hashInputs, PROCESS_NONCE, sub } from "../../bridge/step-kit.js"
 import { repoHostCandidates } from "../site-host.js"
+import { ensurePushTarget } from "../push-target.js"
 
 const META = WIZARD_STEP_META.link
 /** A new code and card at most this many times (each one can expire), all inside ONE approval window. */
@@ -185,7 +186,7 @@ async function run(ctx: WizardContext, deps: WizardDeps): Promise<StepOutcome> {
           continue
         }
         link = request.link
-        sub(ctx, "link", `✓ Remembered · workspace ${link.workspace.name}`, "ok")
+        sub(ctx, "link", `✓ Saved approval reused · linked to workspace ${link.workspace.name}`, "ok")
         break
       }
       sub(ctx, "link", "Waiting for approval in the Infinite app…", "pending")
@@ -273,6 +274,14 @@ async function run(ctx: WizardContext, deps: WizardDeps): Promise<StepOutcome> {
         }
         throw error
       }
+    }
+
+    // Link always runs on resume. A finished `before` must keep its original input hash: re-running
+    // its clean-tree precondition here would reject the install and agent edits from this same run.
+    // Resolve push access while the resumed run is linked, before its unfinished rehearsal.
+    if (resumedRunId !== null && ctx.state.get().steps.before?.outcome === "ok") {
+      const pushAccess = await ensurePushTarget(ctx, deps, (line) => sub(ctx, "link", line, "info"))
+      if (pushAccess) return pushAccess
     }
 
     return { kind: "ok", status: `Linked: ${site.repoLabel} → workspace ${link.workspace.name}` }

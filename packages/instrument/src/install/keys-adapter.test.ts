@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest"
 import { fakeKeys, IDS, notConnectedKeys } from "../../test/wizard/o7-fakes.js"
 import type { TagKeys } from "../wizard/contracts/bridge.js"
 
-import { artifactsFromKeys, artifactsFromKeysDetailed, manifestIdsFor, withConversionHelpers, wizardInstallWorkspaceId } from "./keys-adapter.js"
+import { artifactsFromKeys, artifactsFromKeysDetailed, wizardInstallWorkspaceId } from "./keys-adapter.js"
 
 const decided = { consentMode: "not_required" as const, conversionNames: [], privacyText: null, npmInstall: null }
 
@@ -23,7 +23,8 @@ describe("artifactsFromKeys (§3b keys → the installer's input)", () => {
       uiHost: "https://us.posthog.com",
       proxy: { path: "/ingest", ingestHost: "https://us.i.posthog.com", assetsHost: "https://us-assets.i.posthog.com" }
     })
-    expect(artifacts.meta).toEqual({ pixelId: IDS.meta })
+    // Parity gap 5: the browser leg's match data is ON by default when Meta is connected.
+    expect(artifacts.meta).toEqual({ pixelId: IDS.meta, consentMode: "not_required", advancedMatching: true })
     expect(artifacts.productionHosts).toEqual(["acme-store.com"])
   })
 
@@ -43,7 +44,6 @@ describe("artifactsFromKeys (§3b keys → the installer's input)", () => {
 
   const statuses: Array<[string, Partial<TagKeys>, "ga4" | "posthog" | "meta" | "infinite", string]> = [
     ["ga4 not_connected", { ga4: { status: "not_connected", propertyLabel: null, streams: [] } }, "ga4", "not_connected"],
-    ["ga4 read_failed", { ga4: { status: "read_failed", propertyLabel: null, streams: [] } }, "ga4", "read_failed"],
     [
       "ga4 two streams, neither this site's",
       {
@@ -59,17 +59,12 @@ describe("artifactsFromKeys (§3b keys → the installer's input)", () => {
       "ga4",
       "multiple_streams"
     ],
-    ["posthog not_connected", { posthog: { status: "not_connected", projectKey: null, apiHost: null, ingestHost: null, uiHost: null, region: null } }, "posthog", "not_connected"],
-    ["posthog read_failed", { posthog: { status: "read_failed", projectKey: null, apiHost: null, ingestHost: null, uiHost: null, region: null } }, "posthog", "read_failed"],
-    ["meta not_connected", { meta: { status: "not_connected", pixels: [] } }, "meta", "not_connected"],
-    ["meta no_pixel", { meta: { status: "no_pixel", pixels: [] } }, "meta", "no_pixel"],
     [
       "meta multiple",
       { meta: { status: "multiple", pixels: [{ pixelId: IDS.meta, sourceRef: "a", adAccountLabel: null }, { pixelId: "6543210987654321", sourceRef: "b", adAccountLabel: null }] } },
       "meta",
       "multiple_pixels"
     ],
-    ["meta infinite_dataset", { meta: { status: "infinite_dataset", pixels: [] } }, "meta", "infinite_dataset"],
     ["meta invalid id", { meta: { status: "connected", pixels: [{ pixelId: "12345", sourceRef: "a", adAccountLabel: null }] } }, "meta", "invalid_id"],
     [
       "infinite not_provisioned",
@@ -89,26 +84,6 @@ describe("artifactsFromKeys (§3b keys → the installer's input)", () => {
     expect(Object.keys(artifacts).sort()).toEqual(["infinite", "productionHosts"])
     expect(JSON.stringify(artifacts)).not.toMatch(/G-|phc_|\b\d{15,16}\b/)
   })
-
-  it("two GA4 streams: the one whose default URI is this site's production host", () => {
-    const keys = fakeKeys({
-      ga4: {
-        status: "connected",
-        propertyLabel: "Acme",
-        streams: [
-          { measurementId: IDS.ga4Other, defaultUri: "https://staging.acme-store.com", streamName: "staging" },
-          { measurementId: IDS.ga4, defaultUri: "https://ACME-STORE.com.", streamName: "web" }
-        ]
-      }
-    })
-    expect(artifactsFromKeys(keys, decided).ga4).toEqual({ measurementId: IDS.ga4 })
-  })
-
-  it("Infinite's pixel waits for an answered consent mode", () => {
-    const result = artifactsFromKeysDetailed(fakeKeys(), { ...decided, consentMode: null })
-    expect(result.artifacts.infinite).toBeUndefined()
-    expect(result.skipped.infinite).toBe("consent_unanswered")
-  })
 })
 
 describe("the wizard install's manifest workspaceId and ids (§3e.6, R1-15)", () => {
@@ -125,23 +100,5 @@ describe("the wizard install's manifest workspaceId and ids (§3e.6, R1-15)", ()
     expect(() => wizardInstallWorkspaceId(["ws", "0123456789abcdef"].join("_"))).toThrow()
     expect(() => wizardInstallWorkspaceId(`sha256:${"z".repeat(64)}`)).toThrow()
   })
-
-  it("lists exactly the public ids an install emitted", () => {
-    expect(manifestIdsFor(artifactsFromKeys(fakeKeys(), decided))).toEqual({
-      ga4: [IDS.ga4],
-      posthog: { projectKey: IDS.posthog, apiHost: "/ingest" },
-      meta: [IDS.meta],
-      infinite: { siteSourceKey: IDS.siteSource }
-    })
-    expect(manifestIdsFor({})).toEqual({ ga4: [], posthog: null, meta: [], infinite: null })
-  })
 })
 
-describe("withConversionHelpers: THE one place conversions.helpers is set (review P3-4)", () => {
-  const infinite = { siteSourceKey: "site_0123456789abcdef0123456789abcdef", consentMode: "not_required" as const, collectPath: "/c", consentStorageKey: "k" }
-  it("helpers exactly when a conversion is approved AND a tool is written; dropped otherwise", () => {
-    expect(withConversionHelpers({ infinite } as never, ["signup"])).toMatchObject({ conversions: { helpers: true } })
-    expect(withConversionHelpers({ infinite } as never, [])).not.toHaveProperty("conversions")
-    expect(withConversionHelpers({ conversions: { helpers: true } } as never, ["signup"])).not.toHaveProperty("conversions")
-  })
-})

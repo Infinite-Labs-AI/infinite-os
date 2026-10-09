@@ -1,6 +1,12 @@
-// The job table's static (S) checks that verify an AGENT's edit (review I1 P1-5): jobs 1, 2, 3, 8, 9, 12 and 14.
+// The job table's static (S) checks that verify an AGENT's edit (review I1 P1-5): jobs 1, 2, 3, 8, 10 and 12.
 // Before these existed a claim on those jobs could never be checked, so the item stayed `claimed` forever and
 // its unverified code still shipped in the PR.
+//
+// Only MECHANICAL rules live here (a call is there, a setting has its value, a rewrite is exact, no phone or raw
+// personal detail reaches an outcome, a purchase carries value and currency, no page-made Meta event id). Judgements of
+// meaning (is the report after the success point, is the tracking signal carried with the right polarity, is anything
+// counted twice, does a send survive the page leaving) are the review agent's questions (`review/questions.ts`): the
+// regex and AST versions got them wrong in both directions.
 //
 // Every check here reads the item's OWN files (its allowlist, repo-root relative) after the turn, never the
 // agent's claim, and gives exactly ONE result per check id (the state machine reads one result per check):
@@ -15,11 +21,7 @@ import { join, normalize, isAbsolute } from "node:path"
 import { maskCommentsAndStrings } from "../frameworks/shared.js"
 import { buildManagedRewritePairs, hasExactNextConfigRewrites, parseVercelConfig } from "../frameworks/vercel-config.js"
 import { lineNumberAt } from "../harness/scan.js"
-import { detectAuth } from "../jobs/detectors/auth.js"
 import { detectCspOwners } from "../jobs/detectors/csp-owner.js"
-import { detectConversionSuccessPaths, detectOutcomes, isServerFile } from "../jobs/detectors/outcomes.js"
-import { matchingBracket } from "../setup-checks/code-view.js"
-import { PRIVACY_TOOL_NAMES } from "../jobs/detectors/privacy-page.js"
 import { boundConversionNames } from "../jobs/plan-data.js"
 import { capturesPageviewManually, META_STANDARD_EVENTS, POSTHOG_HISTORY_DEFAULTS_FROM, posthogApiHostUnset } from "../jobs/detectors/adopted-tags.js"
 import { POSTHOG_DEFAULTS_CURRENT } from "../install/improve.js"
@@ -32,27 +34,32 @@ import type { TestExpect, TestTool } from "../wizard/contracts/test-engine.js"
 import { runCensus } from "./census.js"
 import { analyzeCsp, cspNeeds, parseCspPolicies } from "./live/csp.js"
 import { checkResult, isolated } from "./result.js"
-import { escapeRegExp } from "../text-escape.js"
+import { callsOf, literalString, splitTopLevelArgs, type Call } from "./source-calls.js"
+import { canonicalEvent, metaEventIdFindings, outcomeHas, outcomesIn, piiFindings, valueFindings, type CommerceCheckInput, type CommerceFinding, type OutcomeCall } from "./commerce-static.js"
+import type { EventInventory } from "./commerce-inventory.js"
+
+export { callsOf, topLevelProps } from "./source-calls.js"
+import { GA4_PAGE_CHANGE_SCRIPT, META_PAGE_CHANGE_SCRIPT, pastedInPlace } from "../jobs/briefs.js"
+import { readPosthogConfigs, stripSensitivePosthogAddition } from "../setup-checks/posthog-config.js"
 
 /** The check ids this module registers (the job table's S checks that had no implementation). */
 export const JOB_STATIC_CHECK_IDS = [
   "server_lane_mount_order",
   "rescan_app_found",
   "next_rewrites_exact",
-  "outcome_after_success",
-  "track_after_success",
   "outcome_declared",
-  "event_id_stable",
   "no_pii_in_outcome",
-  "identify_on_auth_success",
-  "reset_on_every_signout",
   "csp_hosts",
-  "privacy_names_installed_tools",
   "pr_checks_pass",
   // LF4 close round 2 (P1-1): each job target's own proof that its change is in the code.
   "conversion_tracked",
   "meta_mirror_wired",
-  "posthog_improve_applied"
+  "posthog_improve_applied",
+  "spa_page_view_applied",
+  "ga4_id_applied",
+  // Review r3: a purchase carries its money, and a browser Meta event carries no page-made event id (`commerce-static.ts`).
+  "outcome_value_currency",
+  "meta_event_id_from_server"
 ] as const
 export type JobStaticCheckId = (typeof JOB_STATIC_CHECK_IDS)[number]
 
@@ -64,12 +71,17 @@ export interface JobStaticRunContext {
   expect?: TestExpect
   /** The conversion names the user approved in the plan. */
   conversionNames?: readonly string[]
-  /** The approved privacy paragraph, verbatim (null = none approved). */
+  posthogSensitivePaths?: readonly string[]
+  /** Legacy input, ignored. Policy content is never checked. */
   privacyText?: string | null
-  /** The tools this run newly installs (the privacy page must name each). */
+  /** Legacy input, ignored by policy checks (which are retired). */
   newTools?: readonly TestTool[]
   /** The same-origin rewrites the run's managed install relies on (Infinite's collect path, PostHog's /ingest). */
   proxy?: ProxyInput
+  /** The scan's event × tool inventory: what the site sends each tool, and what the plan promised to add. */
+  eventInventory?: EventInventory | null
+  /** Meta gets this site's conversions (connected in Infinite, or the site runs a pixel); absent = assume it does. */
+  metaInUse?: boolean
 }
 
 export interface JobStaticDeps {
@@ -81,7 +93,7 @@ export interface JobStaticDeps {
 }
 
 interface JobInput {
-  item: Pick<ChecklistItem, "id" | "jobId" | "allow" | "trigger">
+  item: Pick<ChecklistItem, "id" | "jobId" | "allow" | "trigger" | "inventory">
   root: string
   appRoot: string
 }
@@ -128,143 +140,22 @@ function itemTarget(item: Pick<ChecklistItem, "id">): string {
   return index < 0 ? "" : item.id.slice(index + 1)
 }
 
-/** One call: where it starts, its argument text (original and masked) and its 1-based line. */
-interface Call {
-  name: string
-  index: number
-  line: number
-  args: string
-  maskedArgs: string
-  end: number
-}
-
-/** Every call of `names` that is code (not a comment or a string), with its balanced argument list. */
-export function callsOf(text: string, names: readonly string[]): Call[] {
-  const masked = maskCommentsAndStrings(text, true)
-  const commentsOnly = maskCommentsAndStrings(text, false)
-  const pattern = new RegExp(`(?<![\\w$])(?:window\\s*\\.\\s*)?(${names.map(escapeRegExp).join("|")})\\s*\\(`, "g")
-  const out: Call[] = []
-  for (const match of masked.matchAll(pattern)) {
-    const index = match.index ?? 0
-    if (commentsOnly.slice(index, index + match[0].length) !== text.slice(index, index + match[0].length)) continue
-    const open = index + match[0].length - 1
-    let depth = 0
-    let end = -1
-    for (let cursor = open; cursor < masked.length; cursor += 1) {
-      const ch = masked[cursor]
-      if (ch === "(" || ch === "{" || ch === "[") depth += 1
-      else if (ch === ")" || ch === "}" || ch === "]") {
-        depth -= 1
-        if (depth === 0) {
-          end = cursor
-          break
-        }
-      }
-    }
-    if (end < 0) continue
-    out.push({ name: match[1]!, index, line: lineNumberAt(text, index), args: text.slice(open + 1, end), maskedArgs: masked.slice(open + 1, end), end })
-  }
-  return out
-}
-
-/** The first object literal's top-level properties in an argument list: key → value text (original). */
-export function topLevelProps(call: Pick<Call, "args" | "maskedArgs">): Map<string, string> | null {
-  const start = call.maskedArgs.indexOf("{")
-  if (start < 0 || call.maskedArgs.slice(0, start).trim() !== "") return null
-  const props = new Map<string, string>()
-  let depth = 0
-  let segmentStart = start + 1
-  const flush = (end: number) => {
-    const masked = call.maskedArgs.slice(segmentStart, end)
-    const original = call.args.slice(segmentStart, end)
-    const offset = segmentStart
-    segmentStart = end + 1
-    if (masked.trim() === "") return
-    if (/^\s*\.\.\./.test(masked)) {
-      props.set(`...${props.size}`, original.trim())
-      return
-    }
-    const quoted = /^\s*(["'])([A-Za-z_$][\w$]*)\1\s*:/.exec(original)
-    const named = /^\s*([A-Za-z_$][\w$]*)\s*:/.exec(masked)
-    const key = quoted?.[2] ?? named?.[1] ?? null
-    if (key !== null) {
-      const colon = call.maskedArgs.indexOf(":", offset + (quoted ? quoted[0].length - 1 : named![0].length - 1))
-      props.set(key, call.args.slice(colon + 1, end).trim())
-      return
-    }
-    const shorthand = /^\s*([A-Za-z_$][\w$]*)\s*$/.exec(masked)
-    if (shorthand) props.set(shorthand[1]!, shorthand[1]!)
-  }
-  for (let cursor = start; cursor < call.maskedArgs.length; cursor += 1) {
-    const ch = call.maskedArgs[cursor]
-    if (ch === "(" || ch === "{" || ch === "[") depth += 1
-    else if (ch === ")" || ch === "}" || ch === "]") {
-      depth -= 1
-      if (depth === 0) {
-        flush(cursor)
-        break
-      }
-    } else if (ch === "," && depth === 1) flush(cursor)
-  }
-  return props
-}
-
-/** A plain string literal's value (`"x"`, `'x'`, or a template with no `${…}`), else null. */
-function literalString(value: string): string | null {
-  const trimmed = value.trim()
-  const match = /^(["'`])((?:\\.|(?!\1)[^\\])*)\1$/.exec(trimmed)
-  if (!match) return null
-  if (match[1] === "`" && match[2]!.includes("${")) return null
-  return match[2]!
-}
-
-/** True when `index` is inside a `catch (…) { … }` block of the masked text. */
-function insideCatch(masked: string, index: number): boolean {
-  for (const match of masked.slice(0, index).matchAll(/\bcatch\s*(?:\([^)]*\))?\s*\{/g)) {
-    let depth = 0
-    const open = (match.index ?? 0) + match[0].length - 1
-    let closed = false
-    for (let cursor = open; cursor < index; cursor += 1) {
-      if (masked[cursor] === "{") depth += 1
-      else if (masked[cursor] === "}") {
-        depth -= 1
-        if (depth === 0) {
-          closed = true
-          break
-        }
-      }
-    }
-    if (!closed) return true
-  }
-  return false
-}
-
 const files = (list: readonly string[]): string => list.slice(0, 4).join(", ") + (list.length > 4 ? ", …" : "")
 
 // ---------------------------------------------------------------------------------------------
 // The checks
 // ---------------------------------------------------------------------------------------------
 
-const OUTCOME_CALLS = ["reportInfiniteOutcome", "postInfiniteOutcome"] as const
-/** An id that changes on every call: a retry would count twice (or every outcome would dedupe into one). */
-const UNSTABLE_ID = /(?:\bDate\s*\.\s*now|\bMath\s*\.\s*random|\brandomUUID|\buuid(?:v4)?|\bv4|\bnanoid|\bcuid2?|\bperformance\s*\.\s*now|\bnew\s+Date)\s*\(/
-const PII_KEYS = /(?<![\w$])(?:email|e_mail|emailAddress|email_address|phone|phoneNumber|phone_number|ph|first_?name|last_?name|full_?name|firstName|lastName|fullName|address|street)\s*:/i
-const PII_VALUES = /\.\s*(?:email|emailAddress|email_address|phone|phoneNumber|phone_number)\b|(?<![\w$.])(?:email|phone|phoneNumber)(?![\w$])/
-const HASHED = /\b(?:createHash|sha256|sha-256|hash\w*|digest)\b/i
-
-function outcomeCalls(scope: ReadonlyMap<string, string>): Array<Call & { file: string }> {
-  return [...scope].flatMap(([file, text]) => callsOf(text, OUTCOME_CALLS).map((call) => ({ ...call, file })))
+/** Every outcome report in the job's files: the generic reporters and the Stripe / lead recipe reporters alike. */
+function outcomeCalls(scope: ReadonlyMap<string, string>): OutcomeCall[] {
+  return [...scope].flatMap(([file, text]) => outcomesIn(file, text))
 }
 
 function noOutcomeCall(checkId: JobStaticCheckId, scope: ReadonlyMap<string, string>, ctx: CheckContext): CheckResult {
-  return { ...checkResult(checkId, "problem", "S", ctx, { reason: `no reportInfiniteOutcome call in ${files([...scope.keys()]) || "the job's files"}` }), absent: true }
+  return { ...checkResult(checkId, "problem", "S", ctx, { reason: `no report to Infinite (reportInfiniteOutcome, reportStripeCheckoutPurchase, reportStripeCheckoutStarted or reportInfiniteLead) in ${files([...scope.keys()]) || "the job's files"}` }), absent: true }
 }
 
 const TRACK_CALLS = ["infiniteTrack", "infiniteTrackThenNavigate"] as const
-/** A line that is a link, a button or a click handler (the conversion's intent, never its success). */
-const CTA_LINE = /<\s*(?:a|Link|button)\b|\bonClick\s*=|(?<![.\w$])href\s*=/
-const NAVIGATION_CALL = /\b(?:router\s*\.\s*(?:push|replace)|(?:window\s*\.\s*)?location\s*\.\s*(?:assign|replace)|redirect)\s*\(|\b(?:window\s*\.\s*)?location\s*\.\s*href\s*=/
-
 /** The conversion name a track call sends: `infiniteTrack("x")`'s first argument, else any plain string argument. */
 function trackedName(call: Pick<Call, "name" | "args">): string | null {
   const parts = splitTopLevelArgs(call.args)
@@ -276,56 +167,16 @@ function trackedName(call: Pick<Call, "name" | "args">): string | null {
   return null
 }
 
-function splitTopLevelArgs(args: string): string[] {
-  const out: string[] = []
-  let depth = 0
-  let quote: string | null = null
-  let start = 0
-  for (let index = 0; index < args.length; index += 1) {
-    const ch = args[index]!
-    if (quote) {
-      if (ch === "\\") index += 1
-      else if (ch === quote) quote = null
-      continue
-    }
-    if (ch === '"' || ch === "'" || ch === "`") quote = ch
-    else if (ch === "(" || ch === "{" || ch === "[") depth += 1
-    else if (ch === ")" || ch === "}" || ch === "]") depth -= 1
-    else if (ch === "," && depth === 0) {
-      out.push(args.slice(start, index))
-      start = index + 1
-    }
-  }
-  if (args.slice(start).trim() !== "") out.push(args.slice(start))
-  return out
-}
-
-/**
- * The success branch that starts on `line`: an `if (…)`'s consequent (a `{…}` block, or one statement up to its
- * `;` / line end / `else`); for a navigation-only success point, the code from the first `await` to the end of that
- * line. Offsets into the file's text; null when the line holds neither.
- */
-function successRegion(text: string, line: number): { start: number; end: number } | null {
-  const masked = maskCommentsAndStrings(text, true)
-  const lineStart = text.split("\n").slice(0, line - 1).reduce((sum, entry) => sum + entry.length + 1, 0)
-  const lineEnd = text.indexOf("\n", lineStart) === -1 ? text.length : text.indexOf("\n", lineStart)
-  const condition = /\bif\s*\(/.exec(masked.slice(lineStart, lineEnd))
-  if (condition) {
-    const open = lineStart + condition.index + condition[0].length - 1
-    const close = matchingBracket(masked, open)
-    if (close < 0) return null
-    let cursor = close + 1
-    while (cursor < masked.length && /\s/.test(masked[cursor]!)) cursor += 1
-    if (masked[cursor] === "{") {
-      const end = matchingBracket(masked, cursor)
-      return end < 0 ? null : { start: cursor, end }
-    }
-    const rest = masked.slice(cursor)
-    const stop = rest.search(/;|\n|\belse\b/)
-    return { start: cursor, end: stop < 0 ? masked.length : cursor + stop }
-  }
-  const awaited = masked.slice(0, lineEnd).search(/\bawait\b/)
-  return awaited < 0 ? null : { start: awaited, end: lineEnd }
+/** ONE result for a commerce rule: its first problem (with how many more), else its first unknown, else a pass. */
+function commerceResult(checkId: JobStaticCheckId, ctx: CheckContext, findings: readonly CommerceFinding[], passReason: string): CheckResult {
+  const problems = findings.filter((finding) => finding.state === "problem")
+  const chosen = problems[0] ?? findings.find((finding) => finding.state === "undetermined")
+  if (!chosen) return checkResult(checkId, "pass", "S", ctx, { reason: passReason })
+  const more = problems.length > 1 ? ` (and ${problems.length - 1} more: ${problems.slice(1, 3).map((finding) => finding.message).join(" ")})` : ""
+  return checkResult(checkId, chosen.state, "S", ctx, {
+    reason: `${chosen.message}${chosen.state === "problem" ? more : ""}`,
+    ...(chosen.file ? { evidence: [{ file: chosen.file, line: chosen.line ?? 1 }] } : {})
+  })
 }
 
 export function jobStaticCheckFunctions(deps: JobStaticDeps): Record<JobStaticCheckId, CheckFn> {
@@ -334,6 +185,16 @@ export function jobStaticCheckFunctions(deps: JobStaticDeps): Record<JobStaticCh
   const context = (): JobStaticRunContext => deps.run?.() ?? {}
   const result = (checkId: JobStaticCheckId, ctx: CheckContext, state: CheckResult["state"], reason: string, file?: string, line?: number) =>
     checkResult(checkId, state, "S", ctx, { reason, ...(file ? { evidence: [{ file, line: line ?? 1 }] } : {}) })
+  /** The commerce input with each file's text before this run (none when any base read fails). */
+  const withBase = (input: JobInput, commerce: CommerceCheckInput): CommerceCheckInput => {
+    const base = new Map<string, string | null>()
+    for (const file of commerce.files.keys()) {
+      const text = (deps.readBaseFile ?? gitShowFile)(input.root, file)
+      if (text === undefined) return commerce
+      base.set(file, text)
+    }
+    return { ...commerce, base }
+  }
   /** LF4 close round 2 (P2-2): a problem that is the job's change MISSING from the code (`CheckResult.absent`). */
   const missing = (checkId: JobStaticCheckId, ctx: CheckContext, reason: string, file?: string, line?: number): CheckResult => ({
     ...result(checkId, ctx, "problem", reason, file, line),
@@ -341,6 +202,29 @@ export function jobStaticCheckFunctions(deps: JobStaticDeps): Record<JobStaticCh
   })
 
   return {
+    spa_page_view_applied: run("spa_page_view_applied", (input, ctx) => {
+      const tool = input.item.jobId === "ga4_improve" ? "ga4" : "meta"
+      const script = tool === "ga4" ? GA4_PAGE_CHANGE_SCRIPT : META_PAGE_CHANGE_SCRIPT
+      const ids = context().expect?.ga4 ?? []
+      if (tool === "ga4" && ids.length === 0) return result("spa_page_view_applied", ctx, "undetermined", "the connected GA4 measurement ids are not known")
+      for (const [file, text] of itemFiles(input)) {
+        const placements = tool === "ga4" ? ids.map(measurementId => ({ kind: "after_ga4_config" as const, measurementId })) : [{ kind: "after_meta_pageview" as const }]
+        if (placements.some(placement => pastedInPlace(text, { file, text: script, placement }))) {
+          return result("spa_page_view_applied", ctx, "pass", `the supplied ${tool === "ga4" ? "GA4" : "Meta"} page-change subscription is immediately after its initial page-view statement`, file)
+        }
+      }
+      return missing("spa_page_view_applied", ctx, "the supplied page-change subscription is not in its prescribed place")
+    }),
+    ga4_id_applied: run("ga4_id_applied", (input, ctx) => {
+      const ids = context().expect?.ga4
+      if (!ids?.length) return result("ga4_id_applied", ctx, "undetermined", "the connected GA4 measurement ids are not known")
+      const files = new Set(itemFiles(input).keys())
+      const entries = runCensus({ root: input.root, appRoot: input.appRoot }).entries.filter(entry => entry.tool === "ga4" && entry.kind !== "gtm" && entry.owner === "adopted" && files.has(entry.file))
+      if (entries.length === 0) return missing("ga4_id_applied", ctx, "no adopted GA4 config in the job's files")
+      if (entries.some(entry => entry.id === null)) return result("ga4_id_applied", ctx, "undetermined", "an adopted GA4 id is not a readable literal")
+      if (entries.some(entry => !ids.includes(entry.id!))) return missing("ga4_id_applied", ctx, "the adopted GA4 id does not match the connected measurement id")
+      return result("ga4_id_applied", ctx, "pass", "every adopted GA4 config in the job's files uses a connected measurement id")
+    }),
     // Job 1: the lane is mounted before the routes (a Node server), or wraps the exported middleware (Next).
     server_lane_mount_order: run("server_lane_mount_order", (input, ctx) => {
       const scope = itemFiles(input)
@@ -406,69 +290,6 @@ export function jobStaticCheckFunctions(deps: JobStaticDeps): Record<JobStaticCh
       return missing("next_rewrites_exact", ctx, `missing rewrite(s): ${pairs.map((pair) => `${pair.source} to ${pair.destination}`).join("; ")}`)
     }),
 
-    // Job 8: the outcome is reported AFTER the success point, never before it or from an error branch.
-    outcome_after_success: run("outcome_after_success", (input, ctx) => {
-      const scope = itemFiles(input)
-      const calls = outcomeCalls(scope)
-      if (calls.length === 0) return noOutcomeCall("outcome_after_success", scope, ctx)
-      const triggers = detectOutcomes(snapshotOf(scope, input.appRoot)).filter((finding) => finding.conversionType === itemTarget(input.item) || itemTarget(input.item) === "")
-      for (const call of calls) {
-        const masked = maskCommentsAndStrings(scope.get(call.file)!, true)
-        if (insideCatch(masked, call.index)) return result("outcome_after_success", ctx, "problem", `${call.file}:${call.line} reports the outcome from an error branch`, call.file, call.line)
-      }
-      if (triggers.length === 0) return result("outcome_after_success", ctx, "undetermined", "the success point the job was seeded from is no longer recognisable, so the order could not be checked")
-      for (const trigger of triggers) {
-        const after = calls.some((call) => call.file === trigger.file && call.line > trigger.line)
-        const elsewhere = calls.some((call) => call.file !== trigger.file)
-        if (!after && !elsewhere) {
-          return result("outcome_after_success", ctx, "problem", `${trigger.file}: the outcome is reported before the success point (line ${trigger.line}), so a failed ${trigger.detail} would still count`, trigger.file, trigger.line)
-        }
-      }
-      return result("outcome_after_success", ctx, "pass", "the outcome is reported after the success point")
-    }),
-
-    // §3x.3 (B3) Job 10, outcome conversions: `infiniteTrack(<approved name>)` (or `infiniteTrackThenNavigate(…,
-    // <approved name>)`) sits INSIDE the success branch the job was seeded from, before its navigation; never on the
-    // link or button that leads to the form (that click is intent, recorded by the runtime as such).
-    track_after_success: run("track_after_success", (input, ctx) => {
-      const target = itemTarget(input.item)
-      const approved = context().conversionNames
-      if (!approved) return result("track_after_success", ctx, "undetermined", "the approved conversion names are not known, so the call could not be compared")
-      const names = boundConversionNames(target, [...approved])
-      if (names.length === 0) return result("track_after_success", ctx, "undetermined", `no approved conversion name is bound to ${target}`)
-      const scope = itemFiles(input)
-      const calls = [...scope].flatMap(([file, text]) =>
-        callsOf(text, TRACK_CALLS)
-          .filter((call) => trackedName(call) !== null && names.includes(trackedName(call)!))
-          .map((call) => ({ ...call, file }))
-      )
-      if (calls.length === 0) return missing("track_after_success", ctx, `no infiniteTrack(${JSON.stringify(names[0])}) in ${files([...scope.keys()]) || "the job's files"}`)
-      for (const call of calls) {
-        const lineText = scope.get(call.file)!.split("\n")[call.line - 1] ?? ""
-        if (CTA_LINE.test(lineText)) {
-          return result("track_after_success", ctx, "problem", `${call.file}:${call.line} sends the ${target} from the link or button that leads to the form, not from its success`, call.file, call.line)
-        }
-      }
-      const successes = detectConversionSuccessPaths(snapshotOf(scope, input.appRoot)).filter((finding) => finding.conversionType === target)
-      if (successes.length === 0) return result("track_after_success", ctx, "undetermined", "the success point the job was seeded from is no longer recognisable, so the call's place could not be checked")
-      for (const success of successes) {
-        const text = scope.get(success.file)!
-        const region = successRegion(text, success.line)
-        if (!region) continue
-        const masked = maskCommentsAndStrings(text, true)
-        const navigation = new RegExp(NAVIGATION_CALL.source, "g")
-        navigation.lastIndex = region.start
-        const nav = navigation.exec(masked)
-        const navAt = nav && nav.index < region.end ? nav.index : null
-        const inside = calls.find(
-          (call) => call.file === success.file && call.index >= region.start && call.index < region.end && (navAt === null || call.name === "infiniteTrackThenNavigate" || call.index < navAt)
-        )
-        if (inside) return result("track_after_success", ctx, "pass", `${inside.file}:${inside.line} sends the ${target} after it succeeds`, inside.file, inside.line)
-      }
-      const first = successes[0]!
-      return result("track_after_success", ctx, "problem", `the ${target} is not sent inside its success branch (${first.file}:${first.line}), before the navigation`, first.file, first.line)
-    }),
-
     // Job 8: the outcome's `type` is one of the conversion names the user approved for this job.
     outcome_declared: run("outcome_declared", (input, ctx) => {
       const scope = itemFiles(input)
@@ -477,89 +298,53 @@ export function jobStaticCheckFunctions(deps: JobStaticDeps): Record<JobStaticCh
       const approved = context().conversionNames
       if (!approved) return result("outcome_declared", ctx, "undetermined", "the approved conversion names are not known, so the outcome name could not be compared")
       const bound = boundConversionNames(itemTarget(input.item), [...approved])
-      for (const call of calls) {
-        const type = topLevelProps(call)?.get("type")
-        if (type === undefined) return result("outcome_declared", ctx, "problem", `${call.file}:${call.line} reports an outcome with no type`, call.file, call.line)
-        const literal = literalString(type)
-        if (literal === null) return result("outcome_declared", ctx, "undetermined", `${call.file}:${call.line} computes the outcome name, so it could not be compared with the approved names`, call.file, call.line)
-        if (!bound.includes(literal)) {
-          return result("outcome_declared", ctx, "problem", `${call.file}:${call.line} reports "${literal}", which is not an approved conversion name for this job (${bound.join(", ") || "none"})`, call.file, call.line)
+      // A job's files may hold another conversion's report too (the checkout route reports begin_checkout and saves
+      // what the purchase webhook reads): only the reports of THIS job's conversion are graded, and at least one must be.
+      const own = calls.filter((outcome) => outcome.type === null || bound.includes(outcome.type) || canonicalEvent(outcome.type) === canonicalEvent(itemTarget(input.item)))
+      if (own.length === 0) {
+        const other = calls.find((outcome) => outcome.type !== null)!
+        return result("outcome_declared", ctx, "problem", `${other.file}:${other.call.line} reports "${other.type}", which is not an approved conversion name for this job (${bound.join(", ") || "none"})`, other.file, other.call.line)
+      }
+      // Another conversion's report in the same file is fine only under a name the user approved for it.
+      const stray = calls.find((outcome) => !own.includes(outcome) && outcome.type !== null && !approved.includes(outcome.type))
+      if (stray) return result("outcome_declared", ctx, "problem", `${stray.file}:${stray.call.line} reports "${stray.type}", which is not an approved conversion name`, stray.file, stray.call.line)
+      for (const outcome of own) {
+        const { file, call } = outcome
+        if (outcome.props === null) return result("outcome_declared", ctx, "undetermined", `${file}:${call.line} passes a value the wizard cannot read as an object`, file, call.line)
+        if (outcome.type === null) {
+          return outcome.props.has("type")
+            ? result("outcome_declared", ctx, "undetermined", `${file}:${call.line} computes the outcome name, so it could not be compared with the approved names`, file, call.line)
+            : result("outcome_declared", ctx, "problem", `${file}:${call.line} reports an outcome with no type`, file, call.line)
+        }
+        if (!bound.includes(outcome.type)) {
+          return result("outcome_declared", ctx, "problem", `${file}:${call.line} reports "${outcome.type}", which is not an approved conversion name for this job (${bound.join(", ") || "none"})`, file, call.line)
+        }
+        if (!outcomeHas(outcome, "path")) {
+          return result("outcome_declared", ctx, "problem", `${file}:${call.line} reports an outcome with no top-level path; Meta relay needs path for event_source_url`, file, call.line)
         }
       }
-      return result("outcome_declared", ctx, "pass", "every outcome uses an approved conversion name")
+      return result("outcome_declared", ctx, "pass", "every outcome uses an approved conversion name and carries a path")
     }),
 
-    // Job 8: every outcome carries a stable eventId (an order / row / account id), never a random or a constant.
-    event_id_stable: run("event_id_stable", (input, ctx) => {
-      const scope = itemFiles(input)
-      const calls = outcomeCalls(scope)
-      if (calls.length === 0) return noOutcomeCall("event_id_stable", scope, ctx)
-      for (const call of calls) {
-        const props = topLevelProps(call)
-        if (props === null) return result("event_id_stable", ctx, "undetermined", `${call.file}:${call.line} passes a value the wizard cannot read as an object`, call.file, call.line)
-        const id = props.get("eventId")
-        if (id === undefined) return result("event_id_stable", ctx, "problem", `${call.file}:${call.line} has no eventId, so a retry counts twice`, call.file, call.line)
-        if (UNSTABLE_ID.test(maskCommentsAndStrings(id, false))) return result("event_id_stable", ctx, "problem", `${call.file}:${call.line} builds the eventId from a random value or the time, so a retry counts twice`, call.file, call.line)
-        if (literalString(id) !== null) return result("event_id_stable", ctx, "problem", `${call.file}:${call.line} uses a constant eventId, so every outcome after the first is dropped as a duplicate`, call.file, call.line)
-      }
-      return result("event_id_stable", ctx, "pass", "every outcome carries a stable eventId")
-    }),
-
-    // Job 8: no raw email, phone or name in an outcome (an ad-match `em` only as a hash; never `ph`).
+    // Job 8: no raw email, phone, name or address reaches an outcome's request body or the Stripe metadata (match data
+    // only as digests; never a phone in any form). Review r3: what a nested call RECEIVES (`withPerson({ email })`) is
+    // not what the request carries, so only what reaches the body is read (`commerce-static.ts` `piiFindings`).
     no_pii_in_outcome: run("no_pii_in_outcome", (input, ctx) => {
       const scope = itemFiles(input)
       const calls = outcomeCalls(scope)
       if (calls.length === 0) return noOutcomeCall("no_pii_in_outcome", scope, ctx)
-      for (const call of calls) {
-        if (PII_KEYS.test(call.maskedArgs)) return result("no_pii_in_outcome", ctx, "problem", `${call.file}:${call.line} sends a personal-data field in the outcome`, call.file, call.line)
-        for (const match of call.maskedArgs.matchAll(/(?<![\w$])em\s*:/g)) {
-          const value = call.args.slice((match.index ?? 0) + match[0].length).split(/[,}\n]/)[0] ?? ""
-          if (!HASHED.test(value)) return result("no_pii_in_outcome", ctx, "problem", `${call.file}:${call.line} sends em unhashed (only a sha256 hex of the email may leave the server)`, call.file, call.line)
-        }
-        const props = topLevelProps(call)
-        for (const [key, value] of props ?? []) {
-          if (key === "adMatch") continue
-          if (PII_VALUES.test(maskCommentsAndStrings(value, true)) && !HASHED.test(value)) {
-            return result("no_pii_in_outcome", ctx, "problem", `${call.file}:${call.line} puts an email or phone in "${key}"`, call.file, call.line)
-          }
-        }
-      }
-      return result("no_pii_in_outcome", ctx, "pass", "no personal data in any outcome")
+      return commerceResult("no_pii_in_outcome", ctx, piiFindings({ files: scope }), "no personal data in any outcome or Stripe metadata")
     }),
 
-    // Job 9: an account id (never an email or a constant) is identified once the login is verified.
-    identify_on_auth_success: run("identify_on_auth_success", (input, ctx) => {
-      const scope = itemFiles(input)
-      const auth = detectAuth(snapshotOf(scope, input.appRoot))
-      const calls = [...scope].flatMap(([file, text]) => callsOf(text, ["infiniteIdentify"]).map((call) => ({ ...call, file })))
-      if (calls.length === 0) return missing("identify_on_auth_success", ctx, `no infiniteIdentify call in ${files([...scope.keys()])}`)
-      for (const call of calls) {
-        const arg = call.args.trim()
-        if (arg === "" || literalString(arg) !== null) return result("identify_on_auth_success", ctx, "problem", `${call.file}:${call.line} identifies with a constant, so every visitor becomes one person`, call.file, call.line)
-        if (/email|@/i.test(arg) && !HASHED.test(arg)) return result("identify_on_auth_success", ctx, "problem", `${call.file}:${call.line} identifies with an email; use the account id`, call.file, call.line)
-        const login = auth.login.find((finding) => finding.file === call.file)
-        if (login && call.line < login.line) return result("identify_on_auth_success", ctx, "problem", `${call.file}:${call.line} identifies before the login is verified (line ${login.line})`, call.file, call.line)
-        if (insideCatch(maskCommentsAndStrings(scope.get(call.file)!, true), call.index)) {
-          return result("identify_on_auth_success", ctx, "problem", `${call.file}:${call.line} identifies in an error branch`, call.file, call.line)
-        }
-      }
-      return result("identify_on_auth_success", ctx, "pass", "the account id is identified after a verified login")
-    }),
+    // Review r3: a purchase outcome carries its value and its currency.
+    outcome_value_currency: run("outcome_value_currency", (input, ctx) =>
+      commerceResult("outcome_value_currency", ctx, valueFindings({ files: itemFiles(input) }), "every purchase carries its value and currency")
+    ),
 
-    // Job 9: every sign-out resets the visitor (a client-side sign-out in its own file; a server-only one in a client file of the job).
-    reset_on_every_signout: run("reset_on_every_signout", (input, ctx) => {
-      const scope = itemFiles(input)
-      const auth = detectAuth(snapshotOf(scope, input.appRoot))
-      const resets = new Set([...scope].filter(([, text]) => callsOf(text, ["infiniteReset"]).length > 0).map(([file]) => file))
-      if (auth.logout.length === 0) return result("reset_on_every_signout", ctx, "pass", "no sign-out in the job's files to reset in")
-      const clientReset = [...resets].some((file) => !isServerFile(file, scope.get(file) ?? ""))
-      const missing = auth.logout.filter((finding) => {
-        if (resets.has(finding.file)) return false
-        return !(isServerFile(finding.file, scope.get(finding.file) ?? "") && clientReset)
-      })
-      if (missing.length > 0) return result("reset_on_every_signout", ctx, "problem", `no infiniteReset in the sign-out at ${files(missing.map((finding) => `${finding.file}:${finding.line}`))}`, missing[0]!.file, missing[0]!.line)
-      return result("reset_on_every_signout", ctx, "pass", "every sign-out resets the visitor")
-    }),
+    // Review r3: a browser Meta event carries only the event id the server got back, or none.
+    meta_event_id_from_server: run("meta_event_id_from_server", (input, ctx) =>
+      commerceResult("meta_event_id_from_server", ctx, metaEventIdFindings(withBase(input, { files: itemFiles(input) })), "no browser Meta event carries an event id made in the page")
+    ),
 
     // Job 12: the policy in the owner file allows exactly what the tools need, with no `*` and no new 'unsafe-inline'.
     csp_hosts: run("csp_hosts", (input, ctx) => {
@@ -589,24 +374,6 @@ export function jobStaticCheckFunctions(deps: JobStaticDeps): Record<JobStaticCh
           : result("csp_hosts", ctx, "problem", `${owner.file} adds a new 'unsafe-inline'`, owner.file, owner.line)
       }
       return result("csp_hosts", ctx, "pass", `${owner.file} allows every tool's hosts and nothing broader`, owner.file, owner.line)
-    }),
-
-    // Job 14: the privacy page names every newly installed tool, and carries the approved paragraph verbatim.
-    privacy_names_installed_tools: run("privacy_names_installed_tools", (input, ctx) => {
-      const scope = itemFiles(input)
-      const page = [...scope][0]
-      if (!page) return missing("privacy_names_installed_tools", ctx, "the privacy page is gone")
-      const [file, text] = page
-      const visible = text.replace(/<[^>]*>/g, " ").replace(/[{}"'`]/g, " ").replace(/\s+/g, " ").toLowerCase()
-      const run = context()
-      if (run.privacyText) {
-        const wanted = run.privacyText.replace(/[{}"'`]/g, " ").replace(/\s+/g, " ").trim().toLowerCase()
-        if (!visible.includes(wanted)) return missing("privacy_names_installed_tools", ctx, `${file} does not carry the approved paragraph verbatim`, file)
-      }
-      if (!run.newTools) return result("privacy_names_installed_tools", ctx, "undetermined", "the tools this run installs are not known", file)
-      const unnamed = run.newTools.filter((tool) => !PRIVACY_TOOL_NAMES[tool].test(text))
-      if (unnamed.length > 0) return result("privacy_names_installed_tools", ctx, "problem", `${file} does not name ${unnamed.join(", ")}`, file)
-      return result("privacy_names_installed_tools", ctx, "pass", `${file} names every tool this run installs`, file)
     }),
 
     // LF4 close round 2 (P1-1) Job 10, click conversions: `infiniteTrack(<approved name>)` (or
@@ -656,6 +423,15 @@ export function jobStaticCheckFunctions(deps: JobStaticDeps): Record<JobStaticCh
     posthog_improve_applied: run("posthog_improve_applied", (input, ctx) => {
       const target = itemTarget(input.item)
       const scope = itemFiles(input)
+      if (target === "sensitive_pages") {
+        const paths = context().posthogSensitivePaths
+        if (!paths?.length) return result("posthog_improve_applied", ctx, "undetermined", "the approved sensitive paths are not available")
+        const inits = readPosthogConfigs(scope).filter(read => !read.managed)
+        if (!inits.length) return missing("posthog_improve_applied", ctx, "no adopted PostHog init in the job's files")
+        if (inits.some(read => !read.readable || !read.optionsSource)) return result("posthog_improve_applied", ctx, "undetermined", "the adopted PostHog options are not a readable literal object")
+        if (inits.some(read => stripSensitivePosthogAddition(read.optionsSource!, paths) === null)) return missing("posthog_improve_applied", ctx, "the exact restrictive sensitive-page addition is not last in every adopted PostHog options object")
+        return result("posthog_improve_applied", ctx, "pass", `the approved addition turns replay and autocapture off on ${paths.join(", ")} and descendants without enabling collection elsewhere`)
+      }
       const inits = [...scope].filter(([, text]) => /\bposthog\s*\.\s*init\s*\(/.test(maskCommentsAndStrings(text, false)))
       if (inits.length === 0) return result("posthog_improve_applied", ctx, "undetermined", `no posthog.init in ${files([...scope.keys()]) || "the job's files"}, so the setting cannot be read`)
       const manualPageview = capturesPageviewManually(snapshotOf(scope, input.appRoot))

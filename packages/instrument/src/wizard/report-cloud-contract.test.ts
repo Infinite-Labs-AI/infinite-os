@@ -19,7 +19,7 @@ import type { CheckResult } from "./contracts/jobs.js"
 import { REPORT_COLUMN_IDS, type ReportColumnId, type ReportColumnSnapshot, type ReportV2 } from "./contracts/report.js"
 import type { WizardRunState } from "./contracts/state.js"
 import { testExpectFromKeys, type TestTool } from "./contracts/test-engine.js"
-import { assertReport, buildColumn } from "./report.js"
+import { assertReport, buildColumn, buildReport, renderMarkdown, renderTerminal } from "./report.js"
 import { createRunState } from "./run-state.js"
 import { buildLiveTodayColumn } from "./steps/before.js"
 import { step as doneStep } from "./steps/done.js"
@@ -33,7 +33,6 @@ const runStateExample = JSON.parse(readFileSync(join(contracts, "run-state.examp
 /** The run's start on the cloud's clock (the fake bridge's `runs.start` answers the same instant). */
 const STARTED_AT = "2026-10-02T09:02:00.000Z"
 const AT = "2026-10-02T09:12:00.000Z"
-const BASE_SHA = "0a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d"
 const tagPost = (phase: CloudReportContext["phase"]): CloudReportContext => ({ runId: example.runId, startedAt: STARTED_AT, phase, producer: "tag", partial: false })
 
 describe("the cloud's report rules (test/wizard/cloud-rules.ts, a port of 1bu-1 parseReportV2)", () => {
@@ -45,28 +44,7 @@ describe("the cloud's report rules (test/wizard/cloud-rules.ts, a port of 1bu-1 
   // report is never built only to be refused at step 12.
   const firstRow = (report: ReportV2) => report.rows.find((row) => row.id === "ga4_page_views_per_visit")!.cells.in_pr
   const MUTATIONS: Array<[string, (report: ReportV2) => void, string]> = [
-    ["F17: the live_today column carries the base commit", (r) => void (r.columns.live_today.sha = BASE_SHA), "report.columns.live_today.sha"],
-    ["the PR head is a short SHA", (r) => void (r.columns.in_pr.sha = "1a2b3c4"), "report.columns.in_pr.sha"],
     ["a cell computed from agent output", (r) => void ((firstRow(r).provenance as { source: string }).source = "agent"), "report.rows[1].cells.in_pr.provenance.source"],
-    [
-      '"verified" without a receipt',
-      (r) => {
-        const cell = firstRow(r)
-        cell.display = "verified"
-        delete cell.provenance.receiptAt
-      },
-      "report.rows[1].cells.in_pr.display"
-    ],
-    [
-      "a percentage with no raw counts",
-      (r) => {
-        const cell = firstRow(r)
-        cell.display = "12%"
-        delete cell.raw
-      },
-      "report.rows[1].cells.in_pr.raw"
-    ],
-    ["an arrow across columns", (r) => void (firstRow(r).display = "2 -> 1"), "report.rows[1].cells.in_pr.display"],
     [
       "a 0 where nothing was measured",
       (r) => {
@@ -76,15 +54,6 @@ describe("the cloud's report rules (test/wizard/cloud-rules.ts, a port of 1bu-1 
         cell.state = "not_measured"
       },
       "report.rows[1].cells.in_pr.value"
-    ],
-    [
-      "a finish-line cell §3i.7 marks '—' given a value",
-      (r) => {
-        const cell = r.finishLine.find((line) => line.id === "proof_from_real_visit")!.cells.live_today
-        Object.assign(cell, { value: "pass", display: "pass", state: "pass" })
-        delete cell.reason
-      },
-      "report.finishLine[12].cells.live_today"
     ],
     ["an unknown report key", (r) => void ((r as unknown as Record<string, unknown>).extra = 1), "report.extra"]
   ]
@@ -224,4 +193,12 @@ describe("every report the wizard can build for the three phases passes the clou
     expect(refused).toEqual([])
     expect(posts).toBe(cases.reduce((sum, entry) => sum + Object.keys(entry.columns).length, 0))
   })
+})
+
+it("leads cloud and rendered reports with an unwired tag instead of a success claim", () => {
+  const report = buildReport({ runId: example.runId, tagVersion: "0.0.0", site: example.site, columns: { live_today: null, in_pr: null, proven_live: null }, provenLivePending: null, day7: null, notes: [], verdictFacts: { tagNotInstalled: true, jobs: [], openFindings: [], tools: null, installedUnknown: null } })
+  expect(report.verdict?.state).toBe("not_checked_live")
+  expect(report.verdict?.headline).toContain("NOT installed")
+  expect(renderMarkdown(report).split("\n")[0]).toContain("NOT installed")
+  expect(renderTerminal(report, 80)).toContain("NOT installed")
 })

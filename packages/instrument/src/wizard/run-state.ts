@@ -51,6 +51,8 @@ export function createRunState(input: {
     steps: {},
     agent: null,
     git: null,
+    wizardCommits: [],
+    commitHistory: { version: 1, priorHeads: [] },
     pr: null,
     plan: null,
     jobs: [],
@@ -68,6 +70,10 @@ export function runStateProblems(value: unknown): string[] {
   if (problems.length > 0) return problems
   const state = value as WizardRunState
   if (state.schema !== WIZARD_STATE_SCHEMA) problems.push(`schema is ${JSON.stringify(state.schema)}, not ${WIZARD_STATE_SCHEMA}`)
+  for (const [name, shas] of [["wizardCommits", state.wizardCommits], ["approvedForeignCommits", state.approvedForeignCommits], ["commitHistory.priorHeads", state.commitHistory?.priorHeads]] as const) {
+    if (shas !== undefined && (!Array.isArray(shas) || shas.some(sha => typeof sha !== "string" || !/^[a-f0-9]{40}$/.test(sha)))) problems.push(`${name}: expected full commit SHAs`)
+  }
+  if (state.commitHistory && state.commitHistory.version !== 1) problems.push("commitHistory.version: unsupported history record")
   for (const [id, record] of Object.entries(state.steps)) {
     if (!(WIZARD_STEP_IDS as readonly string[]).includes(id)) problems.push(`steps.${id}: not a wizard step`)
     else if (!STEP_OUTCOMES.has(record?.outcome as string)) problems.push(`steps.${id}.outcome is not an outcome`)

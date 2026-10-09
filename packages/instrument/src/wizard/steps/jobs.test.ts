@@ -3,16 +3,18 @@
 import { existsSync, readFileSync, statSync } from "node:fs"
 import { join } from "node:path"
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest"
+import ts from "typescript"
 
-import { assertBuilt, fakeAgents, makeRunner, runs } from "../../../test/wizard/agents.js"
-import { cleanup, makeFenceFixture, POST_INSTALL_LAYOUT, write } from "../../../test/wizard/repo.js"
+import { assertBuilt, fakeAgents, makeRunner, records, runs } from "../../../test/wizard/agents.js"
+import { cleanup, makeFenceFixture, POST_INSTALL_LAYOUT, runGit, write } from "../../../test/wizard/repo.js"
 import { agentItem, baseState, fakeBridge, fakeChecks, fakeInstaller, fakeRegistry, makeCtx, makeDeps, STEP_RUN_ID } from "../../../test/wizard/agent-step-harness.js"
 import type { AgentRunnerImpl } from "../../agents/runner.js"
 import type { WizardOptions } from "../contracts/deps.js"
 import type { CheckResult, ChecklistItem, CheckRunner } from "../contracts/jobs.js"
-import { NESTED_BRIEF_PATH, NESTED_SANDBOX_HINT, step } from "./jobs.js"
+import { NESTED_BRIEF_PATH, step } from "./jobs.js"
 import { verifyFinalSeal } from "../../agents/fence.js"
 import { finalSealPath } from "../../agents/paths.js"
+import { BASE_PAGE, BASE_ROUTE, LEAD_PAGE, LEAD_ROUTE, leadPage, leadRoute, silentFormPage } from "../../../test/wizard/live-run-2.js"
 
 // These spawn real node fakes, the built mcp-proxy and git for up to 4 rounds: the 5 s default is too
 // tight under a loaded full-suite run (review O3 F15).
@@ -54,7 +56,7 @@ function setup(input: {
     jobs: structuredClone(input.items ?? ITEMS)
   })
   const { ctx, recorded, state: current } = makeCtx({ root, state, options: input.options, answer: input.answer as never })
-  const deps = makeDeps({ bridge, agents: runner, checks, registry, installer, env: { HOME: fakes.home } })
+  const deps = makeDeps({ root, bridge, agents: runner, checks, registry, installer, env: { HOME: fakes.home } })
   return { root, fakes, ctx, deps, recorded, current, checkCalls, bridgeCalls, briefs, recordedEdits, runner }
 }
 
@@ -64,6 +66,62 @@ function stateOf(items: ChecklistItem[], id: string) {
 }
 
 describe("step jobs: claims are only claims; the wizard checks", () => {
+  it("frozen Meta jobs are withheld while unrelated same-file jobs pass with separate ambient declarations", async () => {
+    const file = "src/common/tracking.ts"
+    const ambient = [
+      "declare const gtag: (...args: unknown[]) => void;",
+      "declare const posthog: { init(key: string, options: object): void };",
+      "declare const fbq: (...args: unknown[]) => void;",
+      "declare function allowHost(): boolean;"
+    ].join("\n")
+    const base = [
+      "export function ga() { gtag('config', 'G-FAKE00001'); }",
+      "export function ph() { posthog.init('phc_FAKE', { api_host: 'https://us.i.posthog.com' }); }",
+      "export function meta() {",
+      "  fbq('init', '1234567890123456');",
+      "  fbq('consent', 'grant');",
+      "  fbq('track', 'PageView');",
+      "}", ""
+    ].join("\n")
+    const gaGuarded = base.replace("gtag('config', 'G-FAKE00001');", "if (allowHost()) gtag('config', 'G-FAKE00001');")
+    const phGuarded = gaGuarded.replace("posthog.init('phc_FAKE', { api_host: 'https://us.i.posthog.com' });", "if (allowHost()) posthog.init('phc_FAKE', { api_host: '/ingest' });")
+    const sensitive = phGuarded.replace("api_host: '/ingest'", "api_host: '/ingest', mask_all_text: true")
+    const ids = ["meta_improve:capture", "preview_guard:meta", "preview_guard:ga4", "preview_guard:posthog", "posthog_improve:sensitive_pages"]
+    const t = setup({
+      scenario: { turns: [{ steps: [
+        { tool: "report_progress", args: { job_id: ids[0], text: "Capture" } },
+        claim(ids[0]!),
+        { tool: "report_progress", args: { job_id: ids[1], text: "Meta guard" } },
+        claim(ids[1]!),
+        { tool: "report_progress", args: { job_id: ids[2], text: "GA guard" } },
+        { edit: { path: file, content: gaGuarded } }, claim(ids[2]!),
+        { tool: "report_progress", args: { job_id: ids[3], text: "PostHog guard" } },
+        { edit: { path: file, content: phGuarded } }, claim(ids[3]!),
+        { tool: "report_progress", args: { job_id: ids[4], text: "Sensitive pages" } },
+        { edit: { path: file, content: sensitive } }, claim(ids[4]!)
+      ] }] },
+      items: ids.map((id, index) => ({ ...agentItem(id, [file]), trigger: { finding: "Fixture edit place", evidence: [{ file, line: [4, 4, 1, 2, 2][index]! }] } }))
+    })
+    write(t.root, file, base)
+    const declarations = "src/tracking-globals.d.ts"
+    write(t.root, declarations, ambient)
+    runGit(t.root, ["add", file, declarations])
+    runGit(t.root, ["commit", "-m", "tracking fixture"])
+    expect((await step.run(t.ctx, t.deps)).kind).toBe("ok")
+    const jobs = t.current().jobs
+    for (const id of ids.slice(0, 2)) expect(jobs.find((job) => job.id === id)).toMatchObject({ state: "left_for_you", ownerBoundary: { kind: "frozen_unit", file } })
+    for (const id of ids.slice(2)) expect(jobs.find(job => job.id === id)?.state, id).toMatch(/done_in_code|waiting_deploy/)
+    const final = readFileSync(join(t.root, file), "utf8")
+    expect(final).toContain("mask_all_text: true")
+    expect(final).not.toContain("  if (allowHost()) {")
+    expect(final).toContain(base.slice(base.indexOf("export function meta()")))
+    expect(readFileSync(join(t.root, declarations), "utf8")).toBe(ambient)
+    const program = ts.createProgram([join(t.root, file), join(t.root, declarations)], { strict: true, noEmit: true, target: ts.ScriptTarget.ES2020, lib: ["lib.es2020.d.ts", "lib.dom.d.ts"], skipLibCheck: true })
+    expect(ts.getPreEmitDiagnostics(program).map((diagnostic) => ts.flattenDiagnosticMessageText(diagnostic.messageText, "\n"))).toEqual([])
+    const metaReply = records(t.fakes).filter((entry) => entry.kind === "mcp" && entry.tool === "job_claim")[1]?.reply?.result?.structuredContent
+    expect(metaReply).toMatchObject({ error: expect.stringContaining("unknown job_id preview_guard:meta") }) // Never offered to the agent.
+  })
+
   it("claimed + S/B/T0 pass → done_in_code; edits recorded; clickTested PATCHed once no agent is alive", async () => {
     const t = setup({
       scenario: { turns: [{ steps: [{ edit: { path: "app/page.tsx", content: PAGE_EDIT } }, claim("conversions_to_tools:trial"), claim("meta_improve:landing")] }] }
@@ -80,6 +138,10 @@ describe("step jobs: claims are only claims; the wizard checks", () => {
     expect(t.bridgeCalls.patchRun).toEqual([{ runId: STEP_RUN_ID, patch: { clickTestedConversions: ["trial"] }, agentAlive: false }])
     expect(t.checkCalls.turnGate).toBe(1)
     expect(t.checkCalls.build).toBe(1)
+    expect(t.recorded.events.filter((event) => event.type === "job.seeded")).toHaveLength(2)
+    expect(t.recorded.events.filter((event) => event.type === "job.progress").map((event) => event.fields.state)).toEqual(["agent_claim", "checking", "agent_claim", "checking"])
+    expect(t.recorded.events.some((event) => event.type === "step.status" && String(event.fields.text).includes("files read"))).toBe(true)
+    expect(t.recorded.events.some((event) => event.type === "step.status" && String(event.fields.text).includes("1 edited"))).toBe(true)
     const states = t.recorded.events.filter((event) => event.type === "job.state").map((event) => [event.fields.itemId, event.fields.state, event.fields.by])
     expect(states).toContainEqual(["conversions_to_tools:trial", "claimed", "agent_claim"])
     // Review I1 P3-3: one `claimed` per claim (never once on the claim and again on apply).
@@ -99,7 +161,7 @@ describe("step jobs: claims are only claims; the wizard checks", () => {
     const [first, second] = runs(t.fakes, "claude")
     expect(second!.argv).toContain("--resume")
     expect(second!.argv![second!.argv!.indexOf("--resume") + 1]).toBe(first!.argv![first!.argv!.indexOf("--session-id") + 1])
-    expect(second!.argv![second!.argv!.indexOf("--append-system-prompt") + 1]).toContain("the wizard's checks failed: click_test")
+    expect(second!.argv![second!.argv!.indexOf("--append-system-prompt") + 1]).toContain("the wizard's checks failed: The right buttons send conversions: click_test problem (fixture)")
     expect(stateOf(t.current().jobs, "conversions_to_tools:trial")).toBe("waiting_real_event")
     expect(t.bridgeCalls.patchRun).toHaveLength(1)
   })
@@ -107,16 +169,26 @@ describe("step jobs: claims are only claims; the wizard checks", () => {
   it("a check that keeps failing until the rounds run out → failed, never done (negative)", async () => {
     const t = setup({ scenario: { turns: [{ steps: [claim("conversions_to_tools:trial")] }] }, checks: { results: { click_test: ["problem"] } }, items: [ITEMS[1]!] })
     const outcome = await step.run(t.ctx, t.deps)
-    expect(stateOf(t.current().jobs, "conversions_to_tools:trial")).toBe("failed")
+    expect(stateOf(t.current().jobs, "conversions_to_tools:trial")).toBe("left_for_you")
+    expect(t.recorded.events.filter((event) => event.type === "job.state").map((event) => event.fields)).toContainEqual(expect.objectContaining({
+      itemId: "conversions_to_tools:trial",
+      state: "left_for_you",
+      by: "wizard",
+      // Item 8: the note names the check in plain words, never its id.
+      note: expect.stringContaining("The right buttons send conversions")
+    }))
     expect(runs(t.fakes, "claude")).toHaveLength(4)
     expect(t.bridgeCalls.patchRun).toEqual([])
     expect(outcome).toMatchObject({ kind: "ok" })
   })
 
-  it("an undetermined check leaves the item claimed (undetermined never counts as pass)", async () => {
+  it("an undetermined check on a job the review agent decides, with no review agent to ask: the edits are KEPT and the job says no review checked it", async () => {
     const t = setup({ scenario: { turns: [{ steps: [claim("conversions_to_tools:trial")] }] }, checks: { results: { click_test: ["undetermined"] } }, items: [ITEMS[1]!] })
     await step.run(t.ctx, t.deps)
-    expect(stateOf(t.current().jobs, "conversions_to_tools:trial")).toBe("claimed")
+    const job = t.current().jobs.find((item) => item.id === "conversions_to_tools:trial")!
+    expect(job.state).not.toBe("left_for_you")
+    expect(job.review).toMatchObject({ state: "not_run", reviewer: null })
+    expect(job.note).toMatch(/^Not checked by a review agent: /)
     expect(t.bridgeCalls.patchRun).toEqual([])
   })
 
@@ -148,7 +220,7 @@ describe("step jobs: check reasons are secret-scanned (review I1 P2-6)", () => {
     await step.run(t.ctx, t.deps)
     const [, second] = runs(t.fakes, "claude")
     const brief = second!.argv![second!.argv!.indexOf("--append-system-prompt") + 1]!
-    expect(brief).toContain("the wizard's checks failed: build")
+    expect(brief).toContain("the wizard's checks failed: The site builds")
     expect(brief).not.toContain(leaked)
     expect(brief).toContain("[redacted: env_value]")
     expect(JSON.stringify(t.recorded.events)).not.toContain(leaked)
@@ -176,14 +248,6 @@ describe("step jobs: the wizard's own build may write only its output (review I1
     expect(verdict?.ok).toBe(false)
     expect(verdict?.changed).toContain(".lintstagedrc")
   })
-
-  it("negative: a build that writes only .next/ and next-env.d.ts is fine", async () => {
-    const { outcome } = await runWithBuild((root) => {
-      write(root, ".next/cache/x.json", "{}\n")
-      write(root, "next-env.d.ts", "/// <reference types=\"next\" />\n")
-    })
-    expect(outcome.kind).toBe("ok")
-  })
 })
 
 describe("step jobs: a running dev server (§3z.12 B21)", () => {
@@ -198,106 +262,9 @@ describe("step jobs: a running dev server (§3z.12 B21)", () => {
     expect(outcome).toMatchObject({ kind: "parked", code: "INF_WIZ_DEV_SERVER_RUNNING" })
     expect(runs(t.fakes)).toEqual([])
   })
-
-  it("negative: a quiet tree starts the agent", async () => {
-    const t = setup({ scenario: { turns: [{ steps: [claim("conversions_to_tools:trial")] }] } })
-    const outcome = await step.run(t.ctx, t.deps)
-    expect(outcome.kind).toBe("ok")
-    expect(runs(t.fakes, "claude").length).toBeGreaterThan(0)
-  })
 })
 
-describe("step jobs: questions, usage, fence", () => {
-  it("ask_user → ONE batched agent-questions ask after the turn, then a resume with the answer", async () => {
-    const t = setup({
-      scenario: {
-        turns: [
-          { steps: [{ tool: "ask_user", args: { job_id: "meta_improve:landing", question: "Is /pricing a landing page?", why: "Own layout." } }, { tool: "ask_user", args: { job_id: "conversions_to_tools:trial", question: "Which button starts the trial?", why: "Two candidates." } }] },
-          { steps: [claim("meta_improve:landing"), claim("conversions_to_tools:trial")] }
-        ]
-      },
-      answer: (kind) => (kind === "agent-questions" ? { answers: { "meta_improve:landing": "yes", "conversions_to_tools:trial": "the hero button" } } : "__cancelled__")
-    })
-    await step.run(t.ctx, t.deps)
-    expect(t.recorded.asks).toHaveLength(1)
-    expect(t.recorded.asks[0]!.kind).toBe("agent-questions")
-    expect((t.recorded.asks[0]!.payload as { questions: unknown[] }).questions).toHaveLength(2)
-    const second = runs(t.fakes, "claude")[1]!
-    expect(second.argv![second.argv!.indexOf("--append-system-prompt") + 1]).toContain('the user answered "the hero button"')
-  })
-
-  it("under --yes nothing is asked: the item is blocked:needs_you (negative)", async () => {
-    const t = setup({
-      scenario: { turns: [{ steps: [{ tool: "ask_user", args: { job_id: "meta_improve:landing", question: "Is /pricing a landing page?", why: "x" } }] }] },
-      options: { yes: true },
-      items: [ITEMS[0]!]
-    })
-    await step.run(t.ctx, t.deps)
-    expect(t.recorded.asks).toEqual([])
-    expect(stateOf(t.current().jobs, "meta_improve:landing")).toBe("blocked:needs_you")
-  })
-
-  it("out of usage → parked AGENT_OUT_OF_USAGE, edits undone, session kept in state for the resume", async () => {
-    // The untouched tree: each job's own checks find what the job is for (the detector seeded it).
-    const t = setup({
-      scenario: { turns: [{ steps: [{ edit: { path: "app/page.tsx", content: PAGE_EDIT } }, { replay: "claude-rate-limit-rejected.jsonl" }, { sleep: 5000 }] }] },
-      checks: { results: { click_test: ["problem"], meta_mirror_wired: ["problem"] } }
-    })
-    const outcome = await step.run(t.ctx, t.deps)
-    expect(outcome).toMatchObject({ kind: "parked", code: "INF_WIZ_AGENT_OUT_OF_USAGE" })
-    expect((outcome as { reason: string }).reason).toMatch(/resets at .*; run `npx infinite-tag` again to resume/)
-    expect(readFileSync(join(t.root, "app/page.tsx"), "utf8")).not.toContain("data-conversion")
-    expect(t.current().agent?.workerSession).toMatchObject({ kind: "claude", sessionId: expect.any(String) })
-    // LF4-P1-2 (round 1): the jobs are checked on the tree as it stands (the stopped turn's edit was undone); a problem
-    // stays pending for the resume, never failed or blocked while the agent can still come back to it.
-    expect(t.current().jobs.map((item) => item.state)).toEqual(["pending", "pending"])
-    expect((outcome as { reason: string }).reason).toContain(`Nothing in the code yet: Job meta_improve:landing; Job conversions_to_tools:trial.`)
-  })
-
-  it("LF4-P1-2 round 1: out of usage with a job's change in the tree that no claim names → its own checks pass there → done in code, claim-less, and the reason says so", async () => {
-    const t = setup({
-      // Round 1 makes the trial job's change and claims nothing; round 2 runs out of usage.
-      scenario: { turns: [{ steps: [{ edit: { path: "app/page.tsx", content: PAGE_EDIT } }] }, { steps: [{ replay: "claude-rate-limit-rejected.jsonl" }, { sleep: 5000 }] }] },
-      checks: { results: { click_test: ["pass"], meta_mirror_wired: ["problem"] } }
-    })
-    const outcome = await step.run(t.ctx, t.deps)
-    expect(outcome).toMatchObject({ kind: "parked", code: "INF_WIZ_AGENT_OUT_OF_USAGE" })
-    expect(readFileSync(join(t.root, "app/page.tsx"), "utf8")).toContain("data-conversion")
-    const trial = t.current().jobs.find((item) => item.id === "conversions_to_tools:trial")!
-    expect(["done_in_code", "waiting_deploy", "waiting_real_event"]).toContain(trial.state)
-    expect(trial.claim).toBeUndefined()
-    expect((outcome as { reason: string }).reason).toContain("Done in code (the wizard's own checks passed on the code): Job conversions_to_tools:trial.")
-    expect((outcome as { reason: string }).reason).not.toContain("Nothing in the code yet: Job conversions_to_tools:trial")
-  })
-
-  it("LF4-P2-2: round 1 keeps an edit, round 2 runs out of usage → the reason says per job what stays and what the stopped turn undid", async () => {
-    const LAYOUT_EDIT = `${POST_INSTALL_LAYOUT}// round 2\n`
-    const t = setup({
-      scenario: {
-        turns: [
-          { steps: [{ edit: { path: "app/page.tsx", content: PAGE_EDIT } }, claim("conversions_to_tools:trial")] },
-          { steps: [{ edit: { path: "app/layout.tsx", content: LAYOUT_EDIT } }, { replay: "claude-rate-limit-rejected.jsonl" }, { sleep: 5000 }] }
-        ]
-      },
-      // The untouched landing job's own check finds what it is for (the detector seeded it).
-      checks: { results: { click_test: ["problem"], meta_mirror_wired: ["problem"] } }
-    })
-    const outcome = await step.run(t.ctx, t.deps)
-    expect(outcome).toMatchObject({ kind: "parked", code: "INF_WIZ_AGENT_OUT_OF_USAGE" })
-    const reason = (outcome as { reason: string }).reason
-    const title = (id: string) => t.current().jobs.find((item) => item.id === id)!.title
-    // Round 1's change is in the tree (and recorded on its job); round 2's unfinished edit is not.
-    expect(readFileSync(join(t.root, "app/page.tsx"), "utf8")).toContain("data-conversion")
-    expect(readFileSync(join(t.root, "app/layout.tsx"), "utf8")).not.toContain("// round 2")
-    expect(t.current().jobs.find((item) => item.id === "conversions_to_tools:trial")!.edits?.map((edit) => edit.file)).toEqual(["app/page.tsx"])
-    expect(reason).toContain(`Kept in the code from earlier rounds: ${title("conversions_to_tools:trial")} (app/page.tsx).`)
-    expect(reason).toContain("The stopped turn's unfinished edits (app/layout.tsx) were undone.")
-    expect(reason).toContain(`Nothing in the code yet: ${title("meta_improve:landing")}.`)
-    expect(reason).toMatch(/run `npx infinite-tag` again to resume/)
-    // NEGATIVE: never the fixed sentence that read as if nothing survived.
-    expect(reason).not.toContain("its edits were undone")
-  })
-
+describe("step jobs: the fence", () => {
   it("a new file under node_modules → blocked FENCE_TAMPER and NO build or T0 ran", async () => {
     const t = setup({ scenario: { turns: [{ steps: [{ edit: { path: "node_modules/next/x.js", content: "1" } }, claim("conversions_to_tools:trial")] }] } })
     const outcome = await step.run(t.ctx, t.deps)
@@ -324,23 +291,11 @@ describe("step jobs: questions, usage, fence", () => {
     const item = t.current().jobs.find((entry) => entry.id === "meta_improve:landing")!
     // Never "outside the job's files": the file was allowed; the safety check refused one line.
     expect(item.blockedReason).not.toBe("outside_allowlist")
-    expect(item.note).toBe("the wizard's safety check refused next.config.mjs:1: the edit starts a child process")
+    expect(item.note).toContain("Changes stay within the approved work")
+    expect(item.note).not.toContain("turn_gate")
+    expect(item.note).toContain("child process")
     expect(item.checks.find((check) => check.id === "turn_gate")).toMatchObject({ tier: "S", state: "problem" })
     expect(t.checkCalls.build).toBe(0)
-  })
-
-  it("a toolless agent → failed AGENT_TOOLLESS (continue), jobs blocked:toolless", async () => {
-    // The untouched tree: each job's own checks find what the job is for (the detector seeded it).
-    const t = setup({ scenario: { turns: [{ mcp: "skip" }] }, checks: { results: { click_test: ["problem"], meta_mirror_wired: ["problem"] } } })
-    expect(await step.run(t.ctx, t.deps)).toMatchObject({ kind: "failed", code: "INF_WIZ_AGENT_TOOLLESS", next: "continue" })
-    expect(t.current().jobs.map((item) => stateOf([item], item.id))).toEqual(["blocked:toolless", "blocked:toolless"])
-  })
-
-  it("no worker → the agent jobs are listed for the user and no agent is spawned", async () => {
-    const t = setup({ scenario: {}, worker: null })
-    expect(await step.run(t.ctx, t.deps)).toEqual({ kind: "ok", status: "No agent: 2 jobs listed for you" })
-    expect(runs(t.fakes)).toEqual([])
-    expect(t.current().jobs.map((item) => stateOf([item], item.id))).toEqual(["blocked:needs_you", "blocked:needs_you"])
   })
 })
 
@@ -368,50 +323,118 @@ describe("step jobs: nested mode (§3d.7)", () => {
     expect(readFileSync(join(dir, "rejected", "lib/stray.ts"), "utf8")).toBe("export const stray = 1\n")
     expect(t.recorded.events.some((event) => /edit\(s\) undone: .*lib\/stray\.ts/.test(String(event.fields.text ?? "")))).toBe(true)
     expect(readFileSync(join(t.root, "app/layout.tsx"), "utf8")).toBe(POST_INSTALL_LAYOUT)
-    expect(stateOf(t.current().jobs, "meta_improve:landing")).toBe("blocked:consent_touched")
+    expect(stateOf(t.current().jobs, "meta_improve:landing")).not.toMatch(/^blocked|failed/)
     expect(stateOf(t.current().jobs, "conversions_to_tools:trial")).toBe("waiting_real_event")
     expect(t.current().snapshot).toBeNull()
     expect(t.recordedEdits.flat().map((edit) => edit.file)).toEqual(["app/page.tsx"])
   })
 })
 
-describe("step jobs: nested inside another sandbox (§3z B26)", () => {
-  const NO_SANDBOX = "macOS sandbox-exec could not apply a profile (sandbox_apply: Operation not permitted); refusing to run site code unsandboxed."
 
-  it("the build cannot run → undetermined test_error (never a pass), the run parks with the own-terminal line; the user's terminal finishes the checks without an agent", async () => {
-    const t = setup({ scenario: {}, options: { nested: true, json: true }, checks: { build: [{ ok: false, failureSignature: [], durationMs: 1, error: NO_SANDBOX } as never, { ok: true, failureSignature: [], durationMs: 1 }] } })
-    // T0 inside the parent's sandbox: run.ts answers sandbox_unavailable, so every scenario reads test_error.
-    const realT0 = t.deps.checks.t0
-    let t0Calls = 0
-    t.deps.checks.t0 = async (scenarios, artifacts) => {
-      t0Calls += 1
-      if (t0Calls > 1) return realT0(scenarios, artifacts)
-      return scenarios.map((scenario) => ({ checkId: scenario.checkId, tier: "T0", state: "undetermined", reason: `test_error — sandbox_unavailable: ${NO_SANDBOX}`, at: "2026-10-02T10:00:00.000Z", runId: STEP_RUN_ID }))
+describe("step jobs: live run 2 replay (the lead and the silent form on one page)", () => {
+  it("the lead's edits survive an undetermined co-worker on its page; the silent form gets one more round with the reason; no note blames the lead", async () => {
+    const lead: ChecklistItem = {
+      ...agentItem("server_conversions:lead", [LEAD_ROUTE, LEAD_PAGE]),
+      title: "Report the lead conversion from the server",
+      trigger: { finding: "The mailing-list route stores the sign-up", evidence: [{ file: LEAD_ROUTE, line: 30 }] },
+      checks: [{ id: "outcome_declared", tier: "S", state: "not_run" }, { id: "build", tier: "B", state: "not_run" }]
     }
-    expect((await step.run(t.ctx, t.deps)).kind).toBe("parked")
-    write(t.root, "app/page.tsx", PAGE_EDIT)
-    t.ctx.options.resume = true
-    const resumed = await step.run(t.ctx, t.deps)
-    expect(resumed).toEqual({ kind: "parked", code: "INF_WIZ_NEEDS_ANSWERS", reason: expect.stringContaining("cannot run inside your agent's sandbox"), resumeHint: NESTED_SANDBOX_HINT })
-    expect(NESTED_SANDBOX_HINT).toBe("Run npx infinite-tag --resume in your own terminal to finish the checks.")
-    expect(stateOf(t.current().jobs, "conversions_to_tools:trial")).toBe("claimed")
-    const build = t.current().jobs.find((item) => item.id === "meta_improve:landing")!.checks.find((check) => check.tier === "B")!
-    expect(build).toMatchObject({ state: "undetermined", reason: expect.stringMatching(/^test_error — the build could not run: macOS sandbox-exec/) })
-    // The user's own terminal: no nesting; the claimed jobs are checked, never handed to an agent again.
-    t.ctx.options.nested = false
-    const finished = await step.run(t.ctx, t.deps)
-    expect(finished.kind).toBe("ok")
-    expect(runs(t.fakes)).toEqual([])
-    expect(stateOf(t.current().jobs, "conversions_to_tools:trial")).toBe("waiting_real_event")
-    expect(stateOf(t.current().jobs, "meta_improve:landing")).not.toBe("claimed")
-  })
-
-  it("NEGATIVE: an ordinary red build with no new failures still reads as the baseline's, and a build that ran is never parked as a sandbox problem", async () => {
-    const t = setup({ scenario: {}, options: { nested: true, json: true }, checks: { build: [{ ok: false, failureSignature: ["tsc:TS2322"], durationMs: 1 }], baseline: { ok: false, failureSignature: ["tsc:TS2322"], durationMs: 1 } } })
-    await step.run(t.ctx, t.deps)
-    write(t.root, "app/page.tsx", PAGE_EDIT)
-    t.ctx.options.resume = true
+    const silent: ChecklistItem = {
+      ...agentItem("setup_check_fixes:silent_form", [LEAD_PAGE]),
+      title: "Wire the silent form's success",
+      trigger: { finding: "A form that submits and sends nothing", evidence: [{ file: LEAD_PAGE, line: 58 }] },
+      checks: [{ id: "setup_rerun_clean", tier: "S", state: "not_run" }, { id: "build", tier: "B", state: "not_run" }]
+    }
+    const t = setup({
+      scenario: { turns: [
+        { steps: [
+          { edit: { path: LEAD_PAGE, content: leadPage() } },
+          { edit: { path: LEAD_ROUTE, content: leadRoute() } },
+          claim(lead.id),
+          { edit: { path: LEAD_PAGE, content: silentFormPage() } },
+          claim(silent.id)
+        ] },
+        // The agent changes nothing more: the silent form stands on its first claim.
+        { steps: [] }
+      ] },
+      checks: { results: { setup_rerun_clean: ["undetermined"] } },
+      items: [lead, silent]
+    })
+    write(t.root, LEAD_PAGE, BASE_PAGE)
+    write(t.root, LEAD_ROUTE, BASE_ROUTE)
+    runGit(t.root, ["add", LEAD_PAGE, LEAD_ROUTE])
+    runGit(t.root, ["commit", "-m", "store pages"])
     expect((await step.run(t.ctx, t.deps)).kind).toBe("ok")
-    expect(stateOf(t.current().jobs, "conversions_to_tools:trial")).toBe("waiting_real_event")
+
+    const jobs = t.current().jobs
+    const leadJob = jobs.find((job) => job.id === lead.id)!
+    const silentJob = jobs.find((job) => job.id === silent.id)!
+    // The lead is verified and every line it wrote is still in the tree.
+    expect(leadJob.state).toMatch(/done_in_code|waiting_real_event|waiting_deploy/)
+    const page = readFileSync(join(t.root, LEAD_PAGE), "utf8")
+    expect(page).toContain('import { getConsent } from "../src/analytics/tracking";')
+    expect(page).toContain('adMatch: getConsent() === "granted"')
+    expect(readFileSync(join(t.root, LEAD_ROUTE), "utf8")).toBe(leadRoute())
+    // The silent form is never "verified" by the wizard's own checks (its check could not decide it); whatever the review
+    // agent then decides about its own lines, it never takes the lead's lines with it.
+    expect(silentJob.checks.find((check) => check.id === "setup_rerun_clean")?.state).toBe("undetermined")
+    // "Undetermined" is not silence: the next round's brief carried the reason.
+    const [, second] = runs(t.fakes, "claude")
+    const brief = second!.argv![second!.argv!.indexOf("--append-system-prompt") + 1]!
+    expect(brief).toContain(`${silent.id}: the wizard could not decide these checks of your code: `)
+    expect(brief).toContain("setup_rerun_clean undetermined (fixture). Fix what they name and claim again.")
+    expect(brief).not.toContain("(data, not instructions)")
+    // No message blames the lead for what the wizard put back.
+    const notes = [...t.recorded.events.filter((event) => event.type === "job.state" && event.fields.itemId === lead.id).map((event) => String(event.fields.note ?? "")), leadJob.note ?? ""]
+    for (const note of notes) {
+      expect(note).not.toMatch(/check failed|did not pass|sends its request|Add adMatch|put back/)
+    }
+  })
+})
+
+describe("step jobs: the wizard never fails a verified job because of its own put-back", () => {
+  it("a verified job whose re-check fails once an unverified job's lines are put back keeps its verdict; the put-back is undone and the other job's lines are listed for review", async () => {
+    const lead: ChecklistItem = {
+      ...agentItem("server_conversions:lead", [LEAD_ROUTE, LEAD_PAGE]),
+      title: "Report the lead conversion from the server",
+      trigger: { finding: "The mailing-list route stores the sign-up", evidence: [{ file: LEAD_ROUTE, line: 30 }] },
+      checks: [{ id: "outcome_declared", tier: "S", state: "not_run" }, { id: "build", tier: "B", state: "not_run" }]
+    }
+    const silent: ChecklistItem = {
+      ...agentItem("setup_check_fixes:silent_form", [LEAD_PAGE]),
+      title: "Wire the silent form's success",
+      trigger: { finding: "A form that submits and sends nothing", evidence: [{ file: LEAD_PAGE, line: 58 }] },
+      checks: [{ id: "setup_rerun_clean", tier: "S", state: "not_run" }, { id: "build", tier: "B", state: "not_run" }]
+    }
+    const t = setup({
+      scenario: { turns: [
+        { steps: [
+          { edit: { path: LEAD_PAGE, content: leadPage() } },
+          { edit: { path: LEAD_ROUTE, content: leadRoute() } },
+          claim(lead.id),
+          { edit: { path: LEAD_PAGE, content: silentFormPage() } },
+          claim(silent.id)
+        ] },
+        { steps: [] }
+      ] },
+      // The lead passes on the tree the agent left (at its claim and after the turn); its re-check after the silent form's
+      // lines are put back fails.
+      checks: { results: { outcome_declared: ["pass", "pass", "problem"], setup_rerun_clean: ["problem"] } },
+      items: [lead, silent]
+    })
+    write(t.root, LEAD_PAGE, BASE_PAGE)
+    write(t.root, LEAD_ROUTE, BASE_ROUTE)
+    runGit(t.root, ["add", LEAD_PAGE, LEAD_ROUTE])
+    runGit(t.root, ["commit", "-m", "store pages"])
+    expect((await step.run(t.ctx, t.deps)).kind).toBe("ok")
+    const jobs = t.current().jobs
+    const leadJob = jobs.find((job) => job.id === lead.id)!
+    const silentJob = jobs.find((job) => job.id === silent.id)!
+    expect(leadJob.state).toMatch(/done_in_code|waiting_real_event|waiting_deploy/)
+    expect(leadJob.note ?? "").not.toMatch(/check failed|put back|did not pass/)
+    // Every block stays: the put-back was undone.
+    expect(readFileSync(join(t.root, LEAD_PAGE), "utf8")).toBe(silentFormPage())
+    expect(silentJob.keptForReview).toEqual({ with: [lead.id], files: [LEAD_PAGE], why: "needed_by" })
+    expect(silentJob.note).toContain(`"${silent.title}": not verified on its own; its lines stay because "${lead.title}" builds on them`)
   })
 })

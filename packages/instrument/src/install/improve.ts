@@ -16,17 +16,19 @@
 //
 // A REDUCTION (one init, one config per id, removing a hand-written gtag) is never an improve line:
 // it is only `remove_duplicate` → job 6 (R2-10).
+import { sensitivePosthogOptions } from "./posthog-sensitive.js"
 import { existsSync, readFileSync } from "node:fs"
 import { join } from "node:path"
 
 import { resolveVercelJsonContents, VERCEL_CONFIG_FILE } from "../frameworks/vercel-config.js"
 import { writeFileAtomic } from "../frameworks/shared.js"
+import { ownerWiringRequirement, policyWiringRequirement } from "../frameworks/owner-boundary.js"
 import { readPosthogOption } from "../inspect.js"
 import { buildMetaClickIdCaptureScript, META_CLICK_ID_ACCESSOR } from "../providers/meta-browser/click-id.js"
 import { escapeForTemplateLiteral } from "../text-escape.js"
 import { checkMetaAutoConfigOptOut, type MetaAutoConfigVerdict } from "../providers/meta-browser/autoconfig.js"
 import type { DetectedProviderEvidence } from "../harness/inspect.js"
-import type { ImproveLine, ImproveLineKind, PosthogProxySpec, ProviderId } from "../types.js"
+import type { ImproveLine, ImproveLineKind, PosthogProxySpec, ProviderId, ManualRequirement } from "../types.js"
 import { DEFAULT_POSTHOG_PROXY_PATH } from "../workspace-artifacts.js"
 import type { TagKeys } from "../wizard/contracts/bridge.js"
 
@@ -48,6 +50,7 @@ export const CAPTURE_JSX_MARKER = "{/* infinite-tag:improve capture_beside_adopt
 // ---------------------------------------------------------------------------------------------
 
 export interface AdoptedPosthogFact {
+  source?: string
   file: string
   line: number
   key: string | null
@@ -93,6 +96,12 @@ export interface AdoptedMetaFact {
   initStandalone: boolean
   guarded: boolean
   autoConfig: MetaAutoConfigVerdict | null
+  /**
+   * Review P2: a pixel whose id is NOT a literal (`fbq('init', process.env.NEXT_PUBLIC_META_PIXEL_ID)`, or a variable):
+   * the call's receiver (`fbq`, `window.fbq`, `trackingWindow.fbq`), its id expression verbatim, and whether
+   * `disablePushState` is already set in the file. Null when the init is a literal, absent, or not exactly one.
+   */
+  expressionInit?: { receiver: string; idExpression: string; offset: number; pushStateOff: boolean } | null
 }
 
 export interface AdoptedFacts {
@@ -215,6 +224,18 @@ export function isStandaloneStatementAt(contents: string, at: number): boolean {
   return true
 }
 
+/** The single `<receiver>fbq('init', <expression>)` whose id is NOT a string literal, or null (absent, literal, or several). */
+export function expressionInitOf(contents: string): { receiver: string; idExpression: string; offset: number; pushStateOff: boolean } | null {
+  const pattern = /((?:[A-Za-z_$][\w$]*\.)*fbq)\s*\(\s*(["'])init\2\s*,\s*([^,()'"`\s][^,()]*?)\s*[,)]/g
+  const matches = [...contents.matchAll(pattern)]
+  if (matches.length !== 1) return null
+  const match = matches[0]!
+  const idExpression = match[3]!.trim()
+  // A number literal is still a literal id (the literal path reads it); only a name or a member expression is here.
+  if (!/^[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*$/.test(idExpression)) return null
+  return { receiver: match[1]!, idExpression, offset: match.index!, pushStateOff: /\bdisablePushState\s*=\s*(?:true|!0)\b/.test(contents) }
+}
+
 /** The offset of the single literal `fbq('init', '<pixelId>')`, or null (absent or more than one). */
 function literalInitOffset(contents: string, pixelId: string): number | null {
   const pattern = new RegExp(String.raw`fbq\s*\(\s*["']init["']\s*,\s*["']${pixelId}["']`, "g")
@@ -232,6 +253,7 @@ export function detectAdoptedFacts(appRootAbsolute: string, detected: readonly D
     const guarded = guardedBefore(contents, offset)
     if (entry.provider === "posthog") {
       facts.posthog.push({
+        source: contents,
         file: entry.file,
         line: entry.line,
         key: entry.key ?? null,
@@ -248,7 +270,8 @@ export function detectAdoptedFacts(appRootAbsolute: string, detected: readonly D
       const html = /\.html?$/.test(entry.file)
       const element = /\.[cm]?[jt]sx$/.test(entry.file) ? nextScriptPixelElement(contents) : null
       const tag = html ? pixelScriptTag(contents) : element
-      const initAt = pixelId ? literalInitOffset(contents, pixelId) : null
+      const expressionInit = pixelId ? null : expressionInitOf(contents)
+      const initAt = pixelId ? literalInitOffset(contents, pixelId) : expressionInit ? expressionInit.offset : null
       facts.meta.push({
         file: entry.file,
         line: entry.line,
@@ -259,7 +282,8 @@ export function detectAdoptedFacts(appRootAbsolute: string, detected: readonly D
         executable: tag !== null && isExecutableScriptTag(tag.tag),
         initStandalone: initAt !== null && isStandaloneStatementAt(contents, initAt),
         guarded,
-        autoConfig: pixelId ? checkMetaAutoConfigOptOut(contents, pixelId, "adopted") : null
+        autoConfig: pixelId ? checkMetaAutoConfigOptOut(contents, pixelId, "adopted") : null,
+        expressionInit
       })
     }
   }
@@ -365,7 +389,7 @@ export function improveLinesFor(facts: AdoptedFacts, ctx: ImproveLinesContext): 
         evidence
       })
     }
-    if (ctx.sensitivePaths.length > 0) {
+    if (sensitivePosthogOptions(posthog.source, ctx.sensitivePaths) !== null) {
       lines.push({
         id: lineId("sensitive_pages", "posthog", "replay_autocapture"),
         kind: "sensitive_pages",
@@ -421,7 +445,19 @@ export function improveLinesFor(facts: AdoptedFacts, ctx: ImproveLinesContext): 
         kind: "autoconfig_off_adopted",
         provider: "meta",
         target: "autoconfig",
-        text: `Meta: turn off automatic events on your existing pixel ${meta.pixelId} (one line before its init). They send button clicks and page data you did not choose.`,
+        text: `Meta: turn off automatic events and Meta's automatic route-change PageViews on your existing pixel ${meta.pixelId} (one line before its init). They send button clicks, duplicate SPA PageViews and page data you did not choose.`,
+        owner: meta.initStandalone ? "code" : "agent",
+        evidence
+      })
+    } else if (!meta.pixelId && meta.expressionInit && !meta.expressionInit.pushStateOff) {
+      // Review P2: the reference store reads its pixel id from an env var, so the literal-only rule above never fired
+      // and Meta's own history PageViews stayed on (double PageViews, and a PageView leaking onto pixel-free routes).
+      lines.push({
+        id: lineId("autoconfig_off_adopted", "meta", "autoconfig"),
+        kind: "autoconfig_off_adopted",
+        provider: "meta",
+        target: "autoconfig",
+        text: `Meta: turn off automatic events and Meta's automatic route-change PageViews on your existing pixel (its id comes from ${meta.expressionInit.idExpression}), with two lines before its init.`,
         owner: meta.initStandalone ? "code" : "agent",
         evidence
       })
@@ -454,7 +490,7 @@ export interface ImproveEditInput {
 
 export type ImproveEditResult =
   | { ok: true; record: EditRecord | null }
-  | { ok: false; reason: string }
+  | { ok: false; reason: string; ownerRequirement?: ManualRequirement }
 
 const repoRelative = (appRoot: string, file: string): string => (appRoot === "." ? file : `${appRoot}/${file}`)
 
@@ -476,8 +512,10 @@ function proxySpecFor(keys: TagKeys, adoptedApiHost: string | null): PosthogProx
   }
 }
 
-function writeWithRecord(input: ImproveEditInput, file: string, before: string | null, after: string): ImproveEditResult {
+function writeWithRecord(input: ImproveEditInput, file: string, before: string | null, after: string, snippet: string): ImproveEditResult {
   if (before === after) return { ok: true, record: null }
+  const ownerRequirement = ownerWiringRequirement(file, before, after, snippet, input.appRoot)
+  if (ownerRequirement) return { ok: false, reason: ownerRequirement.reason, ownerRequirement }
   writeFileAtomic(join(input.root, file), after)
   return {
     ok: true,
@@ -508,13 +546,15 @@ function applyNextCapture(input: ImproveEditInput, appRootAbsolute: string, evid
   const open = `<${element.name} id="infinite-meta-click-id"${strategy ? ` strategy="${strategy}"` : ""}>`
   const block = `${CAPTURE_JSX_MARKER}\n${indent}${open}\n${indent}  {\`${capture}\`}\n${indent}</${element.name}>\n${indent}`
   const after = before.slice(0, element.start) + block + before.slice(element.start)
-  return writeWithRecord(input, file, before, after)
+  return writeWithRecord(input, file, before, after, block)
 }
 
 /** Applies ONE approved code-owned improve line. Anything else is refused with the reason. */
 export function applyImproveEdit(input: ImproveEditInput): ImproveEditResult {
   const { line } = input
   if (line.owner !== "code") return { ok: false, reason: `${line.id} is an agent job, not a code edit` }
+  const policy = line.evidence ? policyWiringRequirement(repoRelative(input.appRoot, line.evidence.file), "", input.appRoot) : null
+  if (policy) return { ok: false, reason: policy.reason, ownerRequirement: policy }
   const appRootAbsolute = input.appRoot === "." ? input.root : join(input.root, input.appRoot)
 
   if (line.kind === "improve_additive" && line.provider === "posthog" && line.target === "proxy") {
@@ -534,7 +574,7 @@ export function applyImproveEdit(input: ImproveEditInput): ImproveEditResult {
     } catch (error) {
       return { ok: false, reason: error instanceof Error ? error.message : String(error) }
     }
-    return writeWithRecord(input, file, before, after)
+    return writeWithRecord(input, file, before, after, after)
   }
 
   if (line.kind === "capture_beside_adopted_pixel" && line.provider === "meta" && line.evidence && /\.[cm]?[jt]sx$/.test(line.evidence.file)) {
@@ -559,7 +599,7 @@ export function applyImproveEdit(input: ImproveEditInput): ImproveEditResult {
     const capture = buildMetaClickIdCaptureScript({ gate: { kind: "infinite-consent", mode: input.consentMode } })
     const block = `${CAPTURE_BLOCK_MARKER}\n${indent}<script>\n${capture}\n${indent}</script>\n${indent}`
     const after = before.slice(0, scriptStart) + block + before.slice(scriptStart)
-    return writeWithRecord(input, file, before, after)
+    return writeWithRecord(input, file, before, after, block)
   }
 
   if (line.kind === "autoconfig_off_adopted" && line.provider === "meta") {
@@ -568,7 +608,21 @@ export function applyImproveEdit(input: ImproveEditInput): ImproveEditResult {
     const before = readAppFile(appRootAbsolute, line.evidence.file)
     if (before === null) return { ok: false, reason: `${file} is unreadable` }
     const pixel = /fbq\s*\(\s*["']init["']\s*,\s*["'](\d{15,16})["']/.exec(before)
-    if (!pixel) return { ok: false, reason: `no literal fbq('init', '<id>') in ${file}` }
+    if (!pixel) {
+      const init = expressionInitOf(before)
+      if (!init) return { ok: false, reason: `no literal fbq('init', '<id>') and no single fbq('init', <expression>) in ${file}` }
+      if (init.pushStateOff) return { ok: true, record: null }
+      if (!isStandaloneStatementAt(before, init.offset)) {
+        return { ok: false, reason: `the fbq('init') in ${file} runs under a condition; a line before it would not, so the opt-out is an agent job` }
+      }
+      const lineStart = before.lastIndexOf("\n", init.offset - 1) + 1
+      const indent = /^[ \t]*/.exec(before.slice(lineStart, init.offset))?.[0] ?? ""
+      const statements = expressionOptOutLines(init.receiver, init.idExpression, /\.[cm]?tsx?$/i.test(file))
+      const ownLine = before.slice(lineStart, init.offset).trim() === ""
+      const insertion = ownLine ? `${statements.join(`\n${indent}`)}\n${indent}` : `${statements.join(" ")} `
+      const after = before.slice(0, init.offset) + insertion + before.slice(init.offset)
+      return writeWithRecord(input, file, before, after, insertion.trim())
+    }
     const pixelId = pixel[1]!
     const inits = before.match(new RegExp(String.raw`fbq\s*\(\s*["']init["']\s*,\s*["']${pixelId}["']`, "g")) ?? []
     if (inits.length !== 1) return { ok: false, reason: `${file} initialises pixel ${pixelId} ${inits.length} times; the opt-out is left to job 6` }
@@ -582,12 +636,25 @@ export function applyImproveEdit(input: ImproveEditInput): ImproveEditResult {
     const lineStart = before.lastIndexOf("\n", at - 1) + 1
     const indent = /^[ \t]*/.exec(before.slice(lineStart, at))?.[0] ?? ""
     const prefix = before.slice(lineStart, at).trim() === "" ? "" : "\n" + indent
-    const insertion = `fbq('set', 'autoConfig', false, '${pixelId}');${prefix === "" ? `\n${indent}` : " "}`
+    const statements = [`fbq('set', 'autoConfig', false, '${pixelId}');`, "fbq.disablePushState = true;"]
+    const insertion = prefix === "" ? `${statements.join(`\n${indent}`)}\n${indent}` : `${statements.join(" ")} `
     const after = before.slice(0, at) + insertion + before.slice(at)
-    return writeWithRecord(input, file, before, after)
+    return writeWithRecord(input, file, before, after, insertion.trim())
   }
 
   return { ok: false, reason: `${line.id} has no code edit` }
+}
+
+/**
+ * The two statements that go right before an existing `<receiver>('init', <expression>)`: Meta's automatic events off for
+ * the same id, and Meta's own history PageViews off. In TypeScript the flag is set through `Object.assign`, which
+ * compiles whatever type the site gave its pixel function (a plain assignment fails on a type without the property).
+ */
+export function expressionOptOutLines(receiver: string, idExpression: string, typeScript: boolean): string[] {
+  return [
+    `${receiver}('set', 'autoConfig', false, ${idExpression});`,
+    typeScript ? `Object.assign(${receiver}, { disablePushState: true });` : `${receiver}.disablePushState = true;`
+  ]
 }
 
 /** D17 on a MANAGED PostHog: the managed init turns replay + autocapture off on these paths (O5's bytes). */

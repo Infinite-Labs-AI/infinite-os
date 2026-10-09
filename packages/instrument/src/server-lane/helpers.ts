@@ -150,18 +150,19 @@ export interface DocumentRequestEventInput {
 /**
  * The OPTIONAL ad-match block on an OUTCOME (never on a document request).
  *
- * WHY IT EXISTS: a founder who runs Meta ads and has no PostHog otherwise has no server-side
- * conversion path — Meta's optimiser never learns about a purchase their server confirmed, because
- * a browser pixel cannot see a server-side truth. When the founder turns the relay on in Infinite,
- * an outcome carrying this block is forwarded to Meta's Conversions API at ingest and the block is
- * then DISCARDED: it is never stored, never written to the ledger, never logged. A PostHog customer
- * needs none of it — PostHog ships its own Meta destination, and two senders for one conversion is
- * a double count.
+ * WHY IT EXISTS: Infinite is the Meta path for server conversions, for every site: a browser pixel
+ * cannot see a purchase the server confirmed, so without it Meta's optimiser never learns about it.
+ * When the founder turns the relay on in Infinite, an outcome carrying this block is forwarded to
+ * Meta's Conversions API at ingest and the block is then DISCARDED: it is never stored, never written
+ * to the ledger, never logged. A site that also runs PostHog turns PostHog's own Meta destination off
+ * for these events: that copy shares no event id with the pixel and carries no browser cookies, ip or
+ * user agent, and two senders for one conversion is a double count.
  *
- * YOUR SERVER HASHES; INFINITE NEVER DOES. `em` and `external_id` are sha256 hex you compute
- * (`hashInfiniteEmail` below is exactly that recipe), so a raw email never leaves your process. A
- * value that is not a 64-character hex digest is REJECTED at ingest with a 400 — deliberately, so
- * an integration mistake surfaces now rather than as a mysteriously empty match rate later.
+ * YOUR SERVER HASHES; INFINITE NEVER DOES. `em`, `external_id`, name and address fields are sha256
+ * hex you compute (`hashInfiniteEmail` below is exactly the email recipe), so raw email, name and
+ * address never leave your process. Phone is never accepted. A value that is not a 64-character hex
+ * digest is REJECTED at ingest with a 400 — deliberately, so an integration mistake surfaces now
+ * rather than as a mysteriously empty match rate later.
  *
  * `fbc` and `fbp` are Meta's OWN first-party cookies on your domain, readable by your server:
  * https://developers.facebook.com/docs/marketing-api/conversions-api/parameters/fbp-and-fbc
@@ -171,8 +172,8 @@ export interface DocumentRequestEventInput {
  * required for website events shared using the Conversions API". The call you make to Infinite is
  * SERVER-TO-SERVER, so Infinite's view of it is your Vercel/Node egress ip and a `node` user agent —
  * useless to Meta, and actively harmful (it scores an impossible ip/UA pair against your event). So
- * copy them off YOUR OWN inbound browser request and put them in the block. `adMatchFromRequest`
- * does exactly that. Without `client_user_agent` the relay declines to send the event at all.
+ * copy them off YOUR OWN inbound browser request and put them in the block. The generated helper's
+ * `adMatchFromRequest` / `buyerContext` do exactly that. Without `client_user_agent` the relay declines to send the event at all.
  *
  * WHOSE MISTAKE COSTS WHAT. `em`/`external_id` are your own computation, so a malformed one is a
  * 400 you should hear about. Everything else here is copied from a VISITOR-controlled request — a
@@ -182,8 +183,20 @@ export interface DocumentRequestEventInput {
  * The block rides INSIDE the signed body, so nobody without your secret can inject one.
  */
 export interface InfiniteAdMatch {
-  /** sha256 hex of the lowercased, trimmed email. Use `hashInfiniteEmail`. */
+  /** sha256 hex of the Meta-normalized email. Use the generated helper's `hashEmailForMeta`. */
   em?: string
+  /** sha256 hex of the Meta-normalized first name. Never send the raw name. */
+  fn?: string
+  /** sha256 hex of the Meta-normalized last name. Never send the raw name. */
+  ln?: string
+  /** sha256 hex of the Meta-normalized city. Never send the raw address. */
+  ct?: string
+  /** sha256 hex of the Meta-normalized state/region. Never send the raw address. */
+  st?: string
+  /** sha256 hex of the Meta-normalized postal/ZIP code. Never send the raw address. */
+  zp?: string
+  /** sha256 hex of the Meta-normalized country. Never send the raw address. */
+  country?: string
   /** Meta's `_fbc` cookie, verbatim. */
   fbc?: string
   /** Meta's `_fbp` cookie, verbatim. */
@@ -203,6 +216,12 @@ export interface InfiniteAdMatch {
 /** The only keys an adMatch block may carry — anything else is rejected as a malformed envelope. */
 export const AD_MATCH_KEYS = [
   "em",
+  "fn",
+  "ln",
+  "ct",
+  "st",
+  "zp",
+  "country",
   "fbc",
   "fbp",
   "external_id",

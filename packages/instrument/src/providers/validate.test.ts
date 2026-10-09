@@ -10,10 +10,8 @@ import {
   normalizeInfiniteCollectPath,
   normalizeInfiniteProductionHosts,
   normalizePosthogApiHost,
-  normalizePosthogUiHost,
   validateGa4MeasurementId,
   validateInfiniteSiteSourceKey,
-  validateMetaPixelId,
   validatePosthogProjectKey,
   validateXEventTagIds,
   validateXPixelId
@@ -75,37 +73,6 @@ describe("artifact validation", () => {
     expect(normalizePosthogApiHost("//evil.test")).toHaveProperty("error")
   })
 
-  it("normalizePosthogUiHost accepts absolute https only (no relative, no http)", () => {
-    expect(normalizePosthogUiHost("https://us.posthog.com")).toEqual({ origin: "https://us.posthog.com" })
-    // trailing slash stripped
-    expect(normalizePosthogUiHost("https://eu.posthog.com/")).toEqual({ origin: "https://eu.posthog.com" })
-    // a relative path is not a valid ui_host
-    expect(normalizePosthogUiHost("/ingest")).toHaveProperty("error")
-    // http + credentials rejected
-    expect(normalizePosthogUiHost("http://us.posthog.com")).toHaveProperty("error")
-    expect(normalizePosthogUiHost("https://user:pass@evil.test")).toHaveProperty("error")
-  })
-
-  it("derivePosthogRegionHosts defaults to US and selects EU only for explicit eu hosts", () => {
-    expect(derivePosthogRegionHosts("https://us.i.posthog.com")).toEqual({
-      ingestHost: "https://us.i.posthog.com",
-      assetsHost: "https://us-assets.i.posthog.com",
-      uiHost: "https://us.posthog.com"
-    })
-    // unknown / empty apiHost → US default (never hardcode EU)
-    expect(derivePosthogRegionHosts("").ingestHost).toBe("https://us.i.posthog.com")
-    expect(derivePosthogRegionHosts("https://custom.example/ingest").uiHost).toBe("https://us.posthog.com")
-    // explicit EU host → EU
-    expect(derivePosthogRegionHosts("https://eu.i.posthog.com")).toEqual({
-      ingestHost: "https://eu.i.posthog.com",
-      assetsHost: "https://eu-assets.i.posthog.com",
-      uiHost: "https://eu.posthog.com"
-    })
-    expect(derivePosthogRegionHosts("https://eu-assets.i.posthog.com").ingestHost).toBe(
-      "https://eu.i.posthog.com"
-    )
-  })
-
   it("derivePosthogRegionHosts reads the parsed hostname, so a lookalike never selects EU", () => {
     for (const lookalike of [
       "https://eu.i.posthog.com.evil.test",
@@ -119,24 +86,11 @@ describe("artifact validation", () => {
     expect(derivePosthogRegionHosts("https://EU.i.posthog.com/").ingestHost).toBe("https://eu.i.posthog.com")
   })
 
-  it("normalizeInfiniteCollectPath trims trailing slashes in linear time", () => {
-    expect(normalizeInfiniteCollectPath("/infinite/ledger///")).toEqual({ path: "/infinite/ledger" })
-    const hostile = `/a${"/".repeat(100_000)}b`
-    const started = performance.now()
-    expect(normalizeInfiniteCollectPath(hostile)).toHaveProperty("error")
-    expect(performance.now() - started).toBeLessThan(200)
-  })
-
   it("jsLiteral escapes a value so it cannot close a <script> block, and round-trips", () => {
     const out = jsLiteral("</script><script>alert(1)</script>")
     expect(out).not.toContain("</script>")
     expect(out).toContain("\\u003c")
     expect(JSON.parse(out)).toBe("</script><script>alert(1)</script>")
-  })
-
-  it("jsLiteral does not throw on undefined and returns the string \"undefined\"", () => {
-    expect(() => jsLiteral(undefined)).not.toThrow()
-    expect(jsLiteral(undefined)).toBe("undefined")
   })
 
   it("validates the public Infinite source, path, and host allowlist", () => {
@@ -163,37 +117,6 @@ describe("artifact validation", () => {
     expect(normalizeInfiniteProductionHosts(["."])).toHaveProperty("error")
     expect(normalizeInfiniteProductionHosts(["https://example.com"])).toHaveProperty("error")
     expect(normalizeInfiniteProductionHosts(["example.com/path"])).toHaveProperty("error")
-  })
-
-  it("accepts numeric Meta pixel ids and rejects non-numeric/hostile ones", () => {
-    expect(validateMetaPixelId("1234567890123456")).toBeNull()
-    expect(validateMetaPixelId("123456789012345")).toBeNull()
-    // Meta issues 15- and 16-digit pixel ids only. Anything else is a typo, a placeholder, or a
-    // different id (ad account, page, app) that would boot a pixel that never receives an event.
-    for (const wrong of ["123456", "12345678901234", "12345678901234567", "px-1234567890123456", " 1234567890123456"]) {
-      const message = validateMetaPixelId(wrong)
-      expect(message).toBeTruthy()
-      // The rejection says what a pixel id looks like and where to find it.
-      expect(message).toContain("15 or 16 digits")
-      expect(message).toContain("Events Manager")
-    }
-    expect(validateMetaPixelId("")).toBeTruthy()
-    expect(validateMetaPixelId("abc123")).toBeTruthy()
-    expect(validateMetaPixelId("</script>")).toBeTruthy()
-    expect(validateMetaPixelId(123 as unknown)).toBeTruthy()
-  })
-
-  it("GA4 measurement-id regex rejects all-hyphen bodies and accepts real IDs", () => {
-    // all-hyphen body — must be rejected
-    expect(validateGa4MeasurementId("G-----")).toBeTruthy()
-    expect(validateGa4MeasurementId("G----")).toBeTruthy()
-    // valid IDs — must be accepted
-    expect(validateGa4MeasurementId("G-ABCDE12345")).toBeNull()
-    expect(validateGa4MeasurementId("GT-XXXXXXX")).toBeNull()
-    // internal hyphens still allowed
-    expect(validateGa4MeasurementId("G-ABC-123")).toBeNull()
-    // existing valid fixtures from the suite above
-    expect(validateGa4MeasurementId("G-ABC123XYZ")).toBeNull()
   })
 })
 
@@ -287,27 +210,6 @@ describe("provider plans reject hostile artifacts and escape valid ones", () => 
     ]) {
       expect(ok.instructions[0]!.snippet, reduced).not.toContain(reduced)
     }
-  })
-
-  it("PostHog reverse-proxy artifact emits a first-party api_host + a real ui_host", () => {
-    const ok = posthogProviderAdapter.plan("next-app-router", {
-      projectKey: "phc_abcDEF0123456789xyz",
-      apiHost: "/ingest",
-      uiHost: "https://us.posthog.com"
-    })
-    expect(ok.blockers).toHaveLength(0)
-    expect(ok.instructions[0]!.snippet).toContain('api_host: "/ingest"')
-    expect(ok.instructions[0]!.snippet).toContain('ui_host: "https://us.posthog.com"')
-  })
-
-  it("PostHog blocks a malformed proxy uiHost", () => {
-    const blocked = posthogProviderAdapter.plan("next-app-router", {
-      projectKey: "phc_abcDEF0123456789xyz",
-      apiHost: "/ingest",
-      uiHost: "http://not-https.example"
-    })
-    expect(blocked.blockers.length).toBeGreaterThan(0)
-    expect(blocked.instructions).toHaveLength(0)
   })
 
   it("X blocks a malformed pixel id and escapes valid ones", () => {

@@ -15,6 +15,8 @@ import { reverseServerLane } from "./server-lane/install.js"
 import { reverseEditRecord } from "./install/edits.js"
 import { writeFileAtomic } from "./frameworks/shared.js"
 import type { InstallManifest, UninstallResult } from "./types.js"
+import { GENERATED_API_RECORD } from "./jobs/generated-api.js"
+import { isPolicyPath } from "./jobs/owner-boundary.js"
 
 export interface UninstallInstallationOptions {
   root: string
@@ -58,7 +60,7 @@ function reverseHarness(root: string, dryRun: boolean): { removedFiles: string[]
 export interface ReverseEditsResult {
   /** Files restored (or, for an edit that created the file, removed), newest record first. */
   reversed: string[]
-  /** Files left as they are because they changed since the edit ("changed since; left as is"). */
+  /** Policy files and files changed since the edit, both left exactly as they are. */
   leftAsIs: string[]
   /** One founder-facing line per file left as is. */
   warnings: string[]
@@ -69,9 +71,10 @@ export interface ReverseEditsResult {
  * they come off before it. Each record is reversed only while its file still hashes to the record's
  * `afterHash`, by applying its exact `textEdits` in reverse (agent edits carry them too), and only when
  * the result hashes to `beforeHash`; otherwise the file is left exactly as it is, with a warning.
+ * Policy pages are always left to the owner, including edits in legacy receipts.
  * A dry run only reports what it would do.
  */
-export function reverseRecordedEdits(root: string, manifest: Pick<InstallManifest, "edits">, dryRun: boolean): ReverseEditsResult {
+export function reverseRecordedEdits(root: string, manifest: Pick<InstallManifest, "edits"> & Partial<Pick<InstallManifest, "appRoot">>, dryRun: boolean): ReverseEditsResult {
   const reversed: string[] = []
   const leftAsIs: string[] = []
   const warnings: string[] = []
@@ -82,8 +85,16 @@ export function reverseRecordedEdits(root: string, manifest: Pick<InstallManifes
     const absolutePath = join(root, file)
     return existsSync(absolutePath) ? readFileSync(absolutePath, "utf8") : null
   }
+  if ((manifest.edits?.length ?? 0) === 0) return { reversed, leftAsIs, warnings }
+  const appRoot = manifest.appRoot ?? "."
   for (const record of [...(manifest.edits ?? [])].reverse()) {
     if (blocked.has(record.file)) continue
+    if (isPolicyPath(record.file, appRoot)) {
+      blocked.add(record.file)
+      leftAsIs.push(record.file)
+      warnings.push(`Kept ${record.file} as it is: it is a policy page.`)
+      continue
+    }
     const outcome = reverseEditRecord(read(record.file), record)
     if (!outcome.ok) {
       // An older record of the same file can only be reversed on top of this one: stop the chain.
@@ -187,6 +198,8 @@ export function uninstallInstallation(options: UninstallInstallationOptions): Un
   const manifestPath = installManifestPath(options.root)
   if (!dryRun && !hasWiringLeftover) {
     rmSync(manifestPath)
+    rmSync(join(options.root, GENERATED_API_RECORD), { force: true })
+    removeDirIfEmpty(dirname(join(options.root, GENERATED_API_RECORD)))
     removeDirIfEmpty(dirname(manifestPath))
     // Also prune empty lib dirs left by adapter file removals
     const appRoot = manifest.appRoot === "." ? options.root : join(options.root, manifest.appRoot)

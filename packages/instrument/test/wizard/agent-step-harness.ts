@@ -2,6 +2,7 @@
 // against fakes only (never a sibling lane's code). Every collaborator records what it was asked.
 import { mkdirSync, readFileSync, writeFileSync, existsSync } from "node:fs"
 import { dirname } from "node:path"
+import { runGit } from "./repo.js"
 
 import type { AgentRunner } from "../../src/wizard/contracts/agents.js"
 import type { AskKind } from "../../src/wizard/contracts/asks.js"
@@ -240,6 +241,7 @@ export function fakeFs() {
 }
 
 export function makeDeps(parts: {
+  root?: string
   bridge: TagBridgeClient
   agents: AgentRunner
   checks?: CheckRunner
@@ -255,6 +257,10 @@ export function makeDeps(parts: {
     bridge: parts.bridge,
     agents: parts.agents,
     git: {
+      head: async () => {
+        if (!parts.root) throw new Error("The jobs fixture must pass root to makeDeps for owner-boundary measurement")
+        return runGit(parts.root, ["rev-parse", "HEAD"]).trim()
+      },
       remoteUrl: async () => parts.remoteUrl ?? "git@github.com:Acme/acme-store.git",
       isRepo: async () => true,
       cleanTree: async () => ({ clean: (parts.dirtyPaths ?? []).length === 0, dirtyPaths: parts.dirtyPaths ?? [] })

@@ -44,12 +44,18 @@ const EXPECTED_FILENAME = "infinite-tag-0.12.2.tgz"
 // wizard's _fbc capture edit, the GA4 realtime contract, the triage's code reads) crossed the packed ceiling.
 // Re-measured: 618 files, 1,287,308 bytes packed, 4,603,511 bytes unpacked; re-based to measured x1.15: 711 files
 // (710.7 rounded up), 1,481,000 packed (1,480,404 rounded up), 5,295,000 unpacked (5,294,038 rounded up).
+//
+// Commerce rebuild (2026-10-08): the event inventory, the commerce checks, the one outcome helper with its Stripe and
+// lead recipes, the owner hand-off, the server-conversion briefs and the shop-event proof crossed the packed and
+// unpacked ceilings. Re-measured: 706 files, 1,529,978 bytes packed, 5,470,245 bytes unpacked; re-based to measured
+// x1.15: 812 files (811.9 rounded up), 1,760,000 packed (1,759,474.7 rounded up), 6,291,000 unpacked (6,290,781.75
+// rounded up).
 const MIN_FILES = 50
-const MAX_FILES = 711
+const MAX_FILES = 812
 const MIN_PACKED_SIZE = 40_000
-const MAX_PACKED_SIZE = 1_481_000
+const MAX_PACKED_SIZE = 1_760_000
 const MIN_UNPACKED_SIZE = 200_000
-const MAX_UNPACKED_SIZE = 5_295_000
+const MAX_UNPACKED_SIZE = 6_291_000
 // The wizard's public contracts (1bu-1 vendors them and pins their sha256). Listed exactly, so a stray
 // file under contracts/ still fails the pack.
 const TAG_WIZARD_CONTRACT_FILES = [

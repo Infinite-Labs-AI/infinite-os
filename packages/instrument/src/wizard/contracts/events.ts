@@ -21,7 +21,7 @@ export const EVENT_LIMITS = {
   subTextMaxChars: 240,
   statusTextMaxChars: 160,
   narrateTextMaxChars: 120,
-  /** step.sub: at most one per this many ms per step… */
+  /** Progress step.sub window; explicit decision result lines bypass it. */
   subThrottleMs: 3_000,
   /** …and at most this many kept per step. */
   subKeptPerStep: 8
@@ -39,13 +39,14 @@ export interface WizardEventFields {
     resumedFrom?: WizardStepId
   }
   "step.start": { step: WizardStepId }
-  "step.sub": { step: WizardStepId; text: string; tone: "ok" | "warn" | "info" | "pending" }
+  "step.sub": { step: WizardStepId; text: string; tone: "ok" | "warn" | "info" | "pending" | "result" }
   "step.status": { step: WizardStepId; text: string }
   "step.done": { step: WizardStepId; outcome: StepOutcomeKind; code?: WizardCode; reason?: string }
   narrate: { agent: "claude_code" | "codex"; role: "worker" | "reviewer"; text: string }
   "ask.open": { askId: string; kind: AskKind; payload: unknown }
   "ask.closed": { askId: string; answer: unknown }
   "job.seeded": { item: ChecklistItem }
+  "job.progress": { itemId: string; state: "agent_claim" | "agent_blocked" | "agent_not_needed" | "checking" | "failed" }
   "job.state": { itemId: string; state: JobItemState; by: "wizard" | "agent_claim"; checkId?: string; note?: string }
   "check.result": {
     checkId: string
@@ -74,6 +75,7 @@ export const WIZARD_EVENT_TYPES = [
   "ask.open",
   "ask.closed",
   "job.seeded",
+  "job.progress",
   "job.state",
   "check.result",
   "receipt",
@@ -101,6 +103,7 @@ export const WIZARD_EVENT_SHAPES: { readonly [T in WizardEventType]: ObjectShape
   "ask.open": e<"ask.open">()("ask.open", ["askId", "kind", "payload"], []),
   "ask.closed": e<"ask.closed">()("ask.closed", ["askId", "answer"], []),
   "job.seeded": e<"job.seeded">()("job.seeded", ["item"], []),
+  "job.progress": e<"job.progress">()("job.progress", ["itemId", "state"], []),
   "job.state": e<"job.state">()("job.state", ["itemId", "state", "by"], ["checkId", "note"]),
   "check.result": e<"check.result">()("check.result", ["checkId", "tier", "state", "runId"], ["itemId", "reason"]),
   receipt: e<"receipt">()("receipt", ["lane", "state", "receiptAt", "runId"], []),
@@ -123,4 +126,3 @@ export interface AskAnswerLine {
   askId: string
   answer: unknown
 }
-

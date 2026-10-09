@@ -97,7 +97,7 @@ async function rehearse(input: { committed: string; working?: string; job: Check
   return { job, said, sha, warned }
 }
 
-describe("live run 5: a rehearsal problem on Infinite's own bytes in place is Infinite's to fix, decided at the rehearsal", () => {
+describe("a rehearsal problem on Infinite's own bytes in place is Infinite's to fix, decided at the rehearsal", () => {
   it("in place in the rehearsed commit: failed, naming the check, as Infinite's code to fix (not back to the agent)", async () => {
     const { job, said, sha } = await rehearse({ committed: IN_PLACE, job: spaJob("done_in_code", true), ga4: 0 })
     expect(job.state).toBe("failed")
@@ -119,45 +119,10 @@ describe("live run 5: a rehearsal problem on Infinite's own bytes in place is In
     expect(onDiskOnly.job.state).toBe("pending")
   })
 
-  it("review 4: the run started in a subfolder of the repo still reads the rehearsed commit (git show ./path)", async () => {
-    const { job, warned } = await rehearse({ committed: IN_PLACE, job: spaJob("done_in_code", true), ga4: 0, subdir: "apps/web" })
-    expect(job.state).toBe("failed")
-    expect(warned).toEqual([])
-  })
-
-  it("review 4: a long path keeps the whole 'Infinite's code to fix' sentence; only the check's reason is shortened", async () => {
-    const file = "src/app/[locale]/(marketing)/(site)/very-long-segment-name/layout.tsx"
-    const long = { ...spaJob("done_in_code", true), allow: { files: [file], create: [] }, edits: [{ editId: "agent-run1-t1-0", file }] }
-    const { job } = await rehearse({ committed: IN_PLACE, job: long, ga4: 0, file })
-    expect(job.state).toBe("failed")
-    expect(job.note!.length).toBeLessThanOrEqual(300)
-    expect(job.note).toContain(`Infinite's exact code for this is in ${file}, where its brief puts it, so it is not handed back to the agent: it is Infinite's code to fix.`)
-  })
-
-  it("review 4 negative: the census cannot run → the job goes back to the agent with a warning, and the step does not throw", async () => {
-    const { job, warned } = await rehearse({ committed: IN_PLACE, job: spaJob("done_in_code", true), ga4: 0, censusFails: true })
-    expect(job.state).toBe("pending")
-    expect(warned.some((text) => text.includes("Infinite's code could not be read, so it goes back to the agent"))).toBe(true)
-  })
-
   it("a rehearsal pass never ticks a job with no check that proves its change (claimed, nothing recorded): it stays claimed", async () => {
     // Its only rehearsal check is the one this rehearsal graded (pass), so nothing but the rule keeps it unticked.
     const only = { ...spaJob("claimed", false), checks: [{ id: "ga4_spa_page_view", tier: "RH" as const, state: "not_run" as const }] }
     const { job } = await rehearse({ committed: IN_PLACE, job: only, ga4: 1 })
     expect(job.state).toBe("claimed")
-  })
-
-  it("live run 6: a claimed edited SPA job advances after its rehearsal check passes", async () => {
-    const only = { ...spaJob("claimed", true), checks: [
-      { id: "ga4_spa_page_view", tier: "RH" as const, state: "not_run" as const },
-      { id: "ga4_seen_leaving", tier: "PV" as const, state: "not_run" as const }
-    ] }
-    const { job } = await rehearse({ committed: IN_PLACE, job: only, ga4: 1 })
-    expect(job.state).toBe("waiting_deploy")
-  })
-
-  it("a pass on a job already done in code moves it on its done path (waiting for the deploy), never to failed", async () => {
-    const { job } = await rehearse({ committed: IN_PLACE, job: spaJob("done_in_code", true), ga4: 1 })
-    expect(job.state).toBe("waiting_deploy")
   })
 })

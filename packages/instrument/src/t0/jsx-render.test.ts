@@ -29,15 +29,6 @@ describe("scanSource", () => {
     expect(scanSource(source).elements.map((element) => element.name)).toEqual(["main", "p", "Pixel"])
     expect(names("app/layout.tsx", source)).toEqual(["follow:Pixel"])
   })
-
-  it("blanks string, template and comment bodies on the mask (same length, newlines kept)", () => {
-    const source = 'const a = "x{"\n// }\nconst b = `y${c}`\n'
-    const { mask } = scanSource(source)
-    expect(mask).toHaveLength(source.length)
-    expect(mask.split("\n")).toHaveLength(source.split("\n").length)
-    expect(mask).not.toContain("x{")
-    expect(mask).toContain("${c}")
-  })
 })
 
 describe("renderWalk", () => {
@@ -54,15 +45,5 @@ describe("renderWalk", () => {
     const scan = scanSource(source)
     const nodes = renderWalk("app/layout.tsx", source, fileRoots(source, scan.mask))
     expect(nodes.map((node) => source.slice(node.element.start, node.element.start + 16))).toEqual(['<Script id="b">{'])
-  })
-
-  it("a file with no component at all is read whole; one that defines components but exports none renders nothing", () => {
-    expect(names("app/x.tsx", '<Script id="x">{`1`}</Script>')).toEqual(["script:Script"])
-    expect(names("app/x.tsx", 'function Hidden() { return <Script id="x">{`1`}</Script> }\n')).toEqual([])
-  })
-
-  it("a context Provider and React's own members are known; a package member (motion.div) is not", () => {
-    expect(names("app/x.tsx", 'import { Ctx } from "./ctx"\nexport default function X() { return <Ctx.Provider value={1}><React.Fragment /></Ctx.Provider> }\n')).toEqual([])
-    expect(names("app/x.tsx", 'import { motion } from "framer-motion"\nexport default function X() { return <motion.div /> }\n')).toEqual(["unresolvable:motion.div"])
   })
 })

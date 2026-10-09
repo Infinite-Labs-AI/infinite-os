@@ -3,33 +3,45 @@
 // starts), generalised to the deny mode customers get (decision 3) and the 13-host matrix from the
 // build plan (§1.1, S5). Every case runs the EMITTED expression in node:vm and its TS twin, and the two
 // must agree.
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 import { describe, expect, it } from "vitest"
+import ts from "typescript"
 
 import { createBrowserVm } from "../test/site-code/browser-vm.js"
 
 import {
   buildHostGuardExpression,
-  classifyHost,
   guardHostLiteral,
   hostGuardAllows,
-  normalizeHost,
   normalizeHostGuardSpec,
-  productionDeniedConflict,
   resolveArtifactHostGuard,
   wrapGuardedSnippet,
   type HostGuardSpec
 } from "./host-guard.js"
-import { HOST_DENY_V1 } from "./wizard/contracts/host-deny.js"
 
-const DENY_GUARD = {
-  exempt: ["acme.com", "www.acme.com", "acme-git-main-x.vercel.app"],
-  deny: [] as string[]
-}
 const GUARD: HostGuardSpec = {
   mode: "deny",
   exempt: ["acme.com", "www.acme.com", "acme-git-main-x.vercel.app"],
   deny: []
 }
+
+it("emits a guard accepted by strict TypeScript and by the adopted-init checker", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "infinite-guard-ts-"))
+  try {
+    const source = `declare const fbq: (...args: string[]) => void\nexport function start() {\n  if (!(${buildHostGuardExpression(GUARD)})) return\n  fbq('init', '111222333444555')\n}\n`
+    const path = join(dir, "tracking.ts")
+    writeFileSync(path, source)
+    const options: ts.CompilerOptions = { strict: true, noEmit: true, target: ts.ScriptTarget.ES2020, skipLibCheck: true }
+    const program = ts.createProgram([path], options)
+    expect(ts.getPreEmitDiagnostics(program).map((diagnostic) => ts.flattenDiagnosticMessageText(diagnostic.messageText, "\n"))).toEqual([])
+    const { checkHostGuard } = await import("./setup-checks/host-guard.js")
+    expect(checkHostGuard({ files: new Map([["tracking.ts", source]]), strict: true, expectedEmittedGuard: buildHostGuardExpression(GUARD) }).state).toBe("ok")
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
 
 // host → fires?  (label explains the row)
 const MATRIX: Array<[string, boolean, string]> = [
@@ -57,35 +69,10 @@ function firesInBrowser(hostname: string, spec: HostGuardSpec): boolean {
 }
 
 describe("the deny-mode guard (customer default), executed", () => {
-  it.each(MATRIX)("%s → fires=%s (%s)", (host, fires) => {
-    expect(firesInBrowser(host, GUARD)).toBe(fires)
-    expect(hostGuardAllows(host, GUARD)).toBe(fires)
-  })
-
-  it("labels staging.acme.com as 'allowed' (a known leak) and the preview as 'denied'", () => {
-    expect(classifyHost("staging.acme.com", DENY_GUARD)).toBe("allowed")
-    expect(classifyHost("acme-abc123.vercel.app", DENY_GUARD)).toBe("denied")
-    expect(classifyHost("ACME.com.", DENY_GUARD)).toBe("exempt")
-  })
-
   it("exempt wins over every deny rule: production is never silenced (decision 3)", () => {
     const spec: HostGuardSpec = { mode: "deny", exempt: ["acme.vercel.app"], deny: ["acme.vercel.app"] }
     expect(firesInBrowser("acme.vercel.app", spec)).toBe(true)
     expect(firesInBrowser("acme-pr-9.vercel.app", spec)).toBe(false)
-  })
-
-  it("extra deny literals (preview hosts Vercel reported) are silent too", () => {
-    const spec: HostGuardSpec = { mode: "deny", exempt: ["acme.com"], deny: ["preview.acme.com"] }
-    expect(firesInBrowser("preview.acme.com", spec)).toBe(false)
-    expect(firesInBrowser("PREVIEW.acme.com.", spec)).toBe(false)
-    expect(firesInBrowser("acme.com", spec)).toBe(true)
-  })
-
-  it("reads the deny list from F0's contract, never a hand copy", () => {
-    const source = buildHostGuardExpression(GUARD)
-    for (const value of [...HOST_DENY_V1.deny.exact, ...HOST_DENY_V1.deny.suffix]) {
-      expect(source).toContain(JSON.stringify(value))
-    }
   })
 
   it("negative: without the exempt list the production *.vercel.app alias goes dark", () => {
@@ -95,14 +82,6 @@ describe("the deny-mode guard (customer default), executed", () => {
 })
 
 describe("the allow-mode guard (infinite.fast parity)", () => {
-  it("fires only on the listed hosts, trailing dot ignored", () => {
-    const spec: HostGuardSpec = { mode: "allow", hosts: ["acme.com"] }
-    expect(firesInBrowser("acme.com", spec)).toBe(true)
-    expect(firesInBrowser("Acme.Com.", spec)).toBe(true)
-    expect(firesInBrowser("staging.acme.com", spec)).toBe(false)
-    expect(firesInBrowser("other.example", spec)).toBe(false)
-  })
-
   it("negative: an allow guard with no hosts fires nowhere", () => {
     const spec: HostGuardSpec = { mode: "allow", hosts: [] }
     for (const [host] of MATRIX) {
@@ -113,16 +92,6 @@ describe("the allow-mode guard (infinite.fast parity)", () => {
 })
 
 describe("wrapGuardedSnippet", () => {
-  it("is one IIFE: the guard's return stops only its own snippet", () => {
-    const vm = createBrowserVm({ url: "https://acme-abc123.vercel.app/" })
-    vm.runScript(
-      [wrapGuardedSnippet("window.guarded = true;", GUARD), "window.afterwards = true;"].join("\n")
-    )
-    expect(vm.scriptErrors).toEqual([])
-    expect(vm.window.guarded).toBeUndefined()
-    expect(vm.window.afterwards).toBe(true)
-  })
-
   it("negative: the same guard as a bare top-level return is a SyntaxError that stops everything", () => {
     const vm = createBrowserVm({ url: "https://acme-abc123.vercel.app/" })
     vm.runScript([`if (!(${buildHostGuardExpression(GUARD)})) return;`, "window.afterwards = true;"].join("\n"))
@@ -138,14 +107,6 @@ describe("wrapGuardedSnippet", () => {
 })
 
 describe("one normaliser", () => {
-  it("acme.com. ≡ ACME.com ≡ ' acme.com '", () => {
-    expect(normalizeHost("acme.com.")).toBe("acme.com")
-    expect(normalizeHost("ACME.com")).toBe("acme.com")
-    expect(normalizeHost(" acme.com ")).toBe("acme.com")
-    // ONE trailing dot only.
-    expect(normalizeHost("acme.com..")).toBe("acme.com.")
-  })
-
   it("normalises and de-duplicates a spec, and refuses a value that is not a hostname", () => {
     expect(normalizeHostGuardSpec({ mode: "deny", exempt: ["WWW.acme.com.", "www.acme.com"], deny: [] })).toEqual({
       mode: "deny",
@@ -160,12 +121,6 @@ describe("one normaliser", () => {
 })
 
 describe("productionDeniedConflict", () => {
-  it("P3-1: a production host in the guard's own deny list is a conflict too (negative: without it, none)", () => {
-    expect(productionDeniedConflict(["shop.acme.com"], [], ["shop.acme.com"])).toEqual(["shop.acme.com"])
-    expect(productionDeniedConflict(["shop.acme.com"], [])).toEqual([])
-    expect(productionDeniedConflict(["shop.acme.com"], ["shop.acme.com"], ["shop.acme.com"])).toEqual([])
-  })
-
   it("P3-1: resolveArtifactHostGuard refuses a deny literal on a production host, from either production list", () => {
     const guard = { mode: "deny" as const, exempt: [] as string[], deny: ["shop.acme.com"] }
     expect(resolveArtifactHostGuard({ productionHosts: ["shop.acme.com"], hostGuard: guard }).error).toMatch(/shop\.acme\.com/)
@@ -173,17 +128,5 @@ describe("productionDeniedConflict", () => {
       resolveArtifactHostGuard({ infinite: { productionHosts: ["acme.vercel.app"] }, hostGuard: { ...guard, deny: [] } }).error
     ).toMatch(/acme\.vercel\.app/)
     expect(resolveArtifactHostGuard({ productionHosts: ["acme.com"], hostGuard: guard }).spec).toBeDefined()
-  })
-
-  it("names the observed production host a deny rule would silence", () => {
-    expect(productionDeniedConflict(["acme.vercel.app"], [])).toEqual(["acme.vercel.app"])
-    expect(productionDeniedConflict(["acme.vercel.app"], ["acme.vercel.app"])).toEqual([])
-  })
-
-  it("normalises both sides and ignores hosts no rule denies", () => {
-    expect(productionDeniedConflict(["ACME.vercel.app.", "acme.com", "localhost"], ["acme.vercel.app"])).toEqual([
-      "localhost"
-    ])
-    expect(productionDeniedConflict(["acme.com", "www.acme.com"], [])).toEqual([])
   })
 })

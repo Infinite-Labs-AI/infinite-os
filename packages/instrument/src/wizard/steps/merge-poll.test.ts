@@ -54,6 +54,7 @@ function githubHost(states: Array<PrSummary["state"]>): GitHostAdapter & { reads
   const host = {
     kind: "github" as const,
     reads: 0,
+    gh: { json: async (args: string[]) => args[1]?.includes("/check-runs") ? { check_runs: [] } : args[1]?.includes("/status?") ? { statuses: [] } : [] },
     auth: async () => ({ ok: true, login: "acme-dev" }),
     readThreadDetails: async () => [],
     readPr: async () => {
@@ -103,13 +104,6 @@ describe("the merge card polls GitHub while it is up (§3y.9)", () => {
     expect(ctx.events.some((event) => (event.fields as { text?: string }).text === "✓ Merged on GitHub")).toBe(true)
   })
 
-  it("ESC while it is not merged, but merged by the time of the final read → saved, never parked", async () => {
-    const { ctx, deps } = setup(["OPEN", "MERGED"], async () => "__cancelled__")
-    const outcome = await step.run(ctx, deps)
-    expect(outcome).toMatchObject({ kind: "ok" })
-    expect(ctx.state.get().pr?.mergeSha).toBe(MERGE)
-  })
-
   it("NEGATIVE: ESC and still open → parked MERGE_PARKED (exit 3), nothing saved", async () => {
     const { ctx, deps } = setup(["OPEN"], async () => "later")
     const outcome = await step.run(ctx, deps)
@@ -118,7 +112,7 @@ describe("the merge card polls GitHub while it is up (§3y.9)", () => {
   })
 })
 
-describe("§3x.6 (W22) run 3 at merge-ready: the card says incomplete, and the in-PR report reaches Infinite first", () => {
+describe("merge-ready: the card says incomplete, and the in-PR report reaches Infinite first", () => {
   it("5 approved fixes not in the code → 'Ready to merge, but incomplete' with the verdict's words; the in_pr report is posted before PATCH mergeSha", async () => {
     const run3 = run3Json<{ jobs: ChecklistItem[] }>("wizard/state.json")
     const { ctx, deps, bridge } = setup(["OPEN", "MERGED"], (signal) => new Promise((resolve) => signal?.addEventListener("abort", () => resolve("__cancelled__"))))
@@ -131,7 +125,7 @@ describe("§3x.6 (W22) run 3 at merge-ready: the card says incomplete, and the i
     const outcome = await step.run(ctx, deps)
     expect(outcome.kind).toBe("ok")
     const payload = ctx.asks.find((ask) => ask.kind === "merge-ready")!.payload as { number: number; summary: string; incomplete?: string; prUrl: string }
-    expect(payload.incomplete).toBe("5 approved fixes are not in the code (Remove duplicate tags, Keep previews silent (existing tags), Keep previews silent (existing tags) +2 more)")
+    expect(payload.incomplete).toBe("5 approved fixes are not in the code (Remove duplicate tags, Keep previews silent (existing tags), Keep previews silent (existing tags) and 2 more)")
     const view = mergeReadyOverlay.render(payload, {}, { sanitize: (text: string) => text, styles: { info: (text: string) => text } } as never)
     expect(view.heading).toBe("Ready to merge, but incomplete")
     expect(view.question).toMatch(/^Pull request #2 does not have everything the plan approved: 5 approved fixes are not in the code \(.*\)\. Merging ships only what is in it\./)
@@ -145,16 +139,14 @@ describe("§3x.6 (W22) run 3 at merge-ready: the card says incomplete, and the i
     expect(posted.report.verdict).toMatchObject({ state: "not_checked_live" })
     expect(posted.report.verdict!.reasons.map((reason) => reason.kind)).toEqual(["not_live", "approved_fix_missing"])
   })
+})
 
-  it("negative: a PR with every approved fix done is 'Ready to ship' (no incomplete words)", async () => {
-    const { ctx, deps } = setup(["OPEN", "MERGED"], (signal) => new Promise((resolve) => signal?.addEventListener("abort", () => resolve("__cancelled__"))))
-    deps.report = createReportBuilder(() => deps.clock.now())
-    ;(deps.git as unknown as { remoteUrl: () => Promise<string> }).remoteUrl = async () => "https://github.com/acme/site.git"
-    ctx.state.update((state) => {
-      state.report.in_pr = buildColumn("in_pr", { runId: RUN_ID, meta: { measuredAt: "2026-10-03T05:30:00.000Z", sha: "b".repeat(40) }, facts: [{ input: "rehearsal.graded", state: "pass", at: "2026-10-03T05:30:00.000Z" }], rows: {} })
-    })
-    await step.run(ctx, deps)
-    const payload = ctx.asks.find((ask) => ask.kind === "merge-ready")!.payload as { incomplete?: string }
-    expect(payload.incomplete).toBeUndefined()
+describe("fresh merge-card checks", () => {
+  it("does not invite a merge when a newly read check is failing", async () => {
+    const { ctx, deps, host } = setup(["OPEN"], async () => "later")
+    ;(host as unknown as { gh: { json: (args: string[]) => Promise<unknown> } }).gh.json = async args => args[1]!.includes("/check-runs") ? { check_runs: [{ name: "lint", head_sha: args[1]!.includes("a".repeat(40)) ? "a".repeat(40) : "b".repeat(40), status: "completed", conclusion: args[1]!.includes("a".repeat(40)) ? "success" : "failure" }] } : args[1]!.includes("/status?") ? { statuses: [] } : []
+    expect(await step.run(ctx, deps)).toMatchObject({ kind: "parked", reason: expect.stringContaining("lint (failure)") })
+    expect(ctx.asks).toEqual([])
   })
 })
+

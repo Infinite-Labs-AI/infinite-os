@@ -8,12 +8,14 @@ export const CHECK_LABELS: Readonly<Record<string, string>> = {
   posthog_distinct_id_receipt: "PostHog received this visit",
   server_lane_probe_receipt: "Server reporting reached Infinite",
   ga4_loader_id: "GA4 ID matches your connection",
+  ga4_id_applied: "GA4 setup matches your connection",
+  spa_page_view_applied: "Page-change tracking is in the code",
   byte_census: "Each tag once per page",
   one_beacon_per_tool: "Each tag once per page",
   ga4_spa_page_view: "GA4: one page view per page change",
   meta_spa_page_view: "Meta: one page view per page change",
-  ga4_seen_leaving: "GA4 sent data from the visit",
-  meta_seen_leaving: "Meta sent data from the visit",
+  ga4_seen_leaving: "GA4 on the real visit",
+  meta_seen_leaving: "Meta on the real visit",
   ga4_one_page_view: "GA4 counts each page once",
   meta_pixel_once: "Meta counts each page once",
   posthog_via_proxy_once: "PostHog sends once through your site",
@@ -33,27 +35,20 @@ export const CHECK_LABELS: Readonly<Record<string, string>> = {
   census_posthog_init_once: "PostHog starts once per page",
   census_ga4_config_once: "GA4 starts once per page",
   census_meta_init_once: "Meta starts once per page",
-  adopted_init_guarded: "Existing tags stay silent on previews",
   host_matrix: "Tags run only on allowed addresses",
-  outcome_after_success: "Conversions are sent only after success",
   outcome_declared: "Conversion names are declared",
-  event_id_stable: "Conversion IDs stay consistent",
   no_pii_in_outcome: "Conversions exclude personal details",
+  outcome_value_currency: "Purchases carry their value and currency",
+  meta_event_id_from_server: "Meta event IDs come from your server",
   first_real_outcome: "A real server conversion arrived",
-  identify_on_auth_success: "Signed-in visits are linked to the account",
-  reset_on_every_signout: "Account tracking resets on sign-out",
   first_identify: "A signed-in visit arrived",
   click_test: "The right buttons send conversions",
-  no_fbq_standard_on_click: "Clicks do not pretend to be completed conversions",
   conversion_tracked: "Conversion tracking is in the code",
-  track_after_success: "Conversions are sent only after success",
   first_real_conversion: "A real conversion reached your tools",
-  setup_rerun_clean: "Setup checks pass",
   csp_hosts: "Your security policy allows the tags",
   csp_header: "Your live security policy allows the tags",
   no_csp_violation: "Your security policy does not block the tags",
   redirect_walk: "Campaign details survive redirects",
-  privacy_names_installed_tools: "Privacy text names the installed tools",
   build_green_or_baseline: "No new build failures",
   pr_checks_pass: "Pull request checks pass",
   turn_gate: "Changes stay within the approved work"
@@ -93,6 +88,17 @@ export function plainCheckDetail(reason: string | undefined, checkId?: string): 
     .replace(/MASKEDID(\d+)TOKEN/g, (_text, index: string) => masked[Number(index)]!)
     .replace(/\s+/g, " ").trim()
 }
+
+/** The site's own cookie banner kept the proof visit silent (the grader's `held_by_consent`). */
+export function heldByBanner(check: Pick<ChecklistItemCheck, "reason">): boolean {
+  return typeof check.reason === "string" && /^held_by_consent\b/.test(check.reason)
+}
+
+/**
+ * What a job's note says when every live check it was waiting on was kept silent by the site's own banner: not
+ * measured, never failed, and why (the test visit does not accept the banner; real visitors who accept are measured).
+ */
+export const NOT_MEASURED_BEHIND_BANNER = "Not measured after the deploy: your cookie banner keeps every tool off until a visitor accepts; real visitors who accept are measured from their own visits"
 
 export function checkWords(checks: readonly Pick<ChecklistItemCheck, "id" | "reason">[]): string {
   return [...new Set(checks.map(check => {

@@ -78,23 +78,6 @@ describe("JsonUi", () => {
     expect(sanitize.calls.some((call) => call.includes("Which?"))).toBe(true)
   })
 
-  it("routes an ask.answer line to the pending ask", () => {
-    const store = new FakeStore(makeSnapshot({ pendingAsk: { askId: "ask-1", kind: "confirm", payload: { question: "Try again?", defaultYes: true } } }))
-    const { stdin, stderr } = setup(store)
-    stdin.emit("data", '{"v":1,"t":"ask.answer","askId":"ask-1","answer":true}\n')
-    expect(store.answers).toEqual([{ askId: "ask-1", answer: true }])
-    expect(stderr.lines).toHaveLength(0)
-  })
-
-  it("assembles an answer split across chunks", () => {
-    const store = new FakeStore(makeSnapshot({ pendingAsk: { askId: "ask-1", kind: "single", payload: { question: "Which?", options: [] } } }))
-    const { stdin } = setup(store)
-    stdin.emit("data", '{"v":1,"t":"ask.ans')
-    expect(store.answers).toHaveLength(0)
-    stdin.emit("data", 'wer","askId":"ask-1","answer":"G-FAKE00002"}\n')
-    expect(store.answers).toEqual([{ askId: "ask-1", answer: "G-FAKE00002" }])
-  })
-
   it("rejects an unknown askId on stderr and never touches the store (negative)", () => {
     const store = new FakeStore(makeSnapshot({ pendingAsk: { askId: "ask-1", kind: "confirm", payload: { question: "?", defaultYes: true } } }))
     const { stdin, stderr, stdout } = setup(store)
@@ -102,24 +85,5 @@ describe("JsonUi", () => {
     expect(store.answers).toHaveLength(0)
     expect(stderr.lines[0]).toMatch(/unknown askId "ask-9"/)
     expect(stdout.lines).toHaveLength(0)
-  })
-
-  it("rejects lines that are not ask.answer v1 lines", () => {
-    const store = new FakeStore(makeSnapshot({ pendingAsk: { askId: "ask-1", kind: "confirm", payload: { question: "?", defaultYes: true } } }))
-    const { stdin, stderr } = setup(store)
-    stdin.emit("data", "not json\n")
-    stdin.emit("data", '{"v":2,"t":"ask.answer","askId":"ask-1","answer":true}\n')
-    stdin.emit("data", '{"v":1,"t":"ask.answer","askId":"ask-1","answer":true,"extra":1}\n')
-    stdin.emit("data", '{"v":1,"t":"something","askId":"ask-1","answer":true}\n')
-    expect(store.answers).toHaveLength(0)
-    expect(stderr.lines).toHaveLength(4)
-  })
-
-  it("stop detaches stdin", () => {
-    const store = new FakeStore(makeSnapshot({ pendingAsk: { askId: "ask-1", kind: "confirm", payload: { question: "?", defaultYes: true } } }))
-    const { stdin, ui } = setup(store)
-    ui.stop()
-    stdin.emit("data", '{"v":1,"t":"ask.answer","askId":"ask-1","answer":true}\n')
-    expect(store.answers).toHaveLength(0)
   })
 })

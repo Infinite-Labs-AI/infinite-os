@@ -3,10 +3,10 @@
 import type { GitHostAdapter, GitHostAdapterExtras, PrComment, PrSummary } from "../wizard/contracts/git-host.js"
 import { prChecks, type PrCheck } from "../github/checks.js"
 import type { GhClient } from "../github/gh.js"
-import { comment, createDraftPr, findPr, markReady, readPr, updateBranch, updateOwnComment } from "../github/pr.js"
-import { previewUrlForSha } from "../github/preview.js"
-import { latestProductionDeployment, productionDeploymentForSha, productionDeploymentUrl, vercelDeploymentSeen, type GhDeployState, type LatestProductionDeployment } from "../github/deployments.js"
-import { ghAuthStatus, ghRepoFacts, type GhRepoFacts } from "../github/repo.js"
+import { comment, createDraftPr, findPr, findWizardPrs, markReady, readPr, updateBranch, updateOwnComment } from "../github/pr.js"
+import { previewFailureForSha, previewUrlForSha } from "../github/preview.js"
+import { latestProductionDeployment, productionDeploymentForSha, productionDeploymentUrl, vercelDeploymentSeen, type ProductionDeploymentRead, type LatestProductionDeployment } from "../github/deployments.js"
+import { createViewerFork, ghAuthStatus, ghRepoFacts, type GhRepoFacts } from "../github/repo.js"
 import { postCommentReview } from "../github/review.js"
 import { baseRules } from "../github/rules.js"
 import { readThreads, replyToThread, resolveThread, type ReviewThreadDetail } from "../github/threads.js"
@@ -24,13 +24,15 @@ export interface GitHubHostAdapter extends GitHostAdapter, GitHostAdapterExtras 
   updateOwnComment(number: number, marker: string, edit: (body: string) => string): Promise<boolean>
   // GitHub supports every method: the return types narrow (never `{unsupported:true}`).
   readPr(number: number): Promise<PrSummary>
-  findPr(branch: string): Promise<PrSummary | null>
+  findPr(branch: string, headOwner?: string | null): Promise<PrSummary | null>
   createDraftPr(input: { base: string; head: string; title: string; bodyFile: string }): Promise<PrSummary>
+  createFork(preferSsh: boolean): Promise<{ remoteUrl: string; headOwner: string }>
   checks(number: number): Promise<PrCheck[]>
   rules(base: string): Promise<{ requiresReview: boolean; mergeQueue: boolean }>
   previewUrl(sha: string): Promise<string | null>
+  previewFailure(sha: string): Promise<{ reason: string; blocked: boolean } | null>
   /** §3y.4: the merge SHA's production deployment (GitHub Deployments; the linked project picks in a monorepo). */
-  productionDeployment(sha: string): Promise<{ state: GhDeployState }>
+  productionDeployment(sha: string): Promise<ProductionDeploymentRead>
   /** §3x.6: the merge SHA's production deployment's own preview-class address (`*.vercel.app`), or null. */
   productionDeploymentUrl(sha: string): Promise<string | null>
   /** §3y.4: the newest successful production deployment, or null. */
@@ -41,7 +43,7 @@ export interface GitHubHostAdapter extends GitHostAdapter, GitHostAdapterExtras 
 
 /** The deploy reads a host offers (§3y.4): the GitHub adapter's, or none (another host, or a test fake). */
 export interface DeploymentReader {
-  productionDeployment(sha: string): Promise<{ state: GhDeployState }>
+  productionDeployment(sha: string): Promise<ProductionDeploymentRead>
   /** §3x.6 the merge SHA's production deployment's own preview-class address, or null. */
   productionDeploymentUrl?(sha: string): Promise<string | null>
   latestProductionDeployment(): Promise<LatestProductionDeployment | null>
@@ -84,9 +86,11 @@ export function createGitHubAdapter(gh: GhClient): GitHubHostAdapter {
     auth: () => ghAuthStatus(gh),
     async repoFacts() {
       const value = await repo()
-      return { isPrivate: value.isPrivate, defaultBranch: value.defaultBranch, viewerPermission: value.viewerPermission, homepageUrl: value.homepageUrl }
+      return { isPrivate: value.isPrivate, defaultBranch: value.defaultBranch, viewerPermission: value.viewerPermission, homepageUrl: value.homepageUrl, allowForking: value.allowForking, nameWithOwner: value.nameWithOwner }
     },
-    findPr: (branch) => findPr(gh, branch),
+    createFork: async (preferSsh) => createViewerFork(gh, await repo(), preferSsh),
+    findPr: (branch, headOwner) => findPr(gh, branch, headOwner),
+    olderWizardPrs: async branch => (await findWizardPrs(gh)).filter(row => row.pr.state === "OPEN" && row.branch !== branch).map(row => ({ number: row.pr.number })),
     createDraftPr: (input): Promise<PrSummary> => createDraftPr(gh, input),
     readPr: (number) => readPr(gh, number),
     async readThreadDetails(number) {
@@ -124,6 +128,7 @@ export function createGitHubAdapter(gh: GhClient): GitHubHostAdapter {
     },
     updateBranch: (number) => updateBranch(gh, number),
     previewUrl: (sha) => previewUrlForSha(gh, sha, previewProject),
+    previewFailure: (sha) => previewFailureForSha(gh, sha, previewProject),
     productionDeployment: (sha) => productionDeploymentForSha(gh, sha, previewProject),
     productionDeploymentUrl: (sha) => productionDeploymentUrl(gh, sha, previewProject),
     latestProductionDeployment: () => latestProductionDeployment(gh, previewProject),

@@ -1,4 +1,4 @@
-/* global process */
+/* global process, URL */
 // A fake `gh` for lane O4's tests (and I1's offline E2E). It keeps its state in the JSON file named by
 // FAKE_GH_STATE, appends every call (argv + stdin) to `<FAKE_GH_STATE>.calls.jsonl`, and answers the subset of gh
 // the wizard uses:
@@ -40,6 +40,7 @@ try {
 }
 appendFileSync(`${statePath}.calls.jsonl`, `${JSON.stringify({ argv, stdin: stdin === "" ? null : stdin })}\n`)
 
+if (argv[0] === "run" && argv[1] === "view") { process.stdout.write(state.failedLogs?.[argv[2]] ?? ""); process.exit(0) }
 /** Set by every command that changes the state; only then is the file written. */
 let dirty = false
 function changed() {
@@ -72,7 +73,7 @@ function nextId(prefix) {
   return id
 }
 function headOf(pr) {
-  const remote = process.env.FAKE_GH_REMOTE
+  const remote = pr.isCrossRepository ? state.forkRemote : process.env.FAKE_GH_REMOTE
   if (!remote) return pr.headRefOid ?? ""
   try {
     return execFileSync("git", ["--git-dir", remote, "rev-parse", `refs/heads/${pr.headRefName}`], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim()
@@ -89,6 +90,7 @@ function prView(pr, fields) {
     state: pr.state,
     headRefOid: headOf(pr),
     headRefName: pr.headRefName,
+    headRepositoryOwner: { login: pr.headOwner ?? (state.repo?.nameWithOwner ?? "acme/acme-store").split("/")[0] },
     baseRefName: pr.baseRefName,
     title: pr.title,
     body: pr.body,
@@ -147,6 +149,7 @@ if (group === "pr") {
       fail("pull request create failed: GraphQL: Draft pull requests are not supported in this repository. (createPullRequest) HTTP 422")
     }
     const head = flag("--head")
+    const [headOwner, headBranch] = head?.includes(":") ? head.split(":") : [null, head]
     const bodyFile = flag("--body-file")
     // Like the real gh: "-" is stdin, a relative path is from the cwd, an absolute one is used as is.
     const body = bodyFile === "-" ? stdin : readFileSync(isAbsolute(bodyFile) ? bodyFile : join(process.cwd(), bodyFile), "utf8")
@@ -160,7 +163,9 @@ if (group === "pr") {
       id: `PR_${number}`,
       isDraft: draft,
       state: "OPEN",
-      headRefName: head,
+      headRefName: headBranch,
+      headOwner,
+      isCrossRepository: headOwner !== null,
       baseRefName: flag("--base"),
       title: flag("--title"),
       body,
@@ -217,12 +222,26 @@ if (group === "pr") {
     if (!rows || rows.length === 0) fail("no required checks reported on the 'infinite' branch")
     save()
     process.stdout.write(`${JSON.stringify(rows)}\n`)
-    process.exit(rows.some((row) => row.bucket === "pending") ? 8 : 0)
+    process.exit(rows.some((row) => row.bucket === "fail" || row.bucket === "cancel") ? 1 : rows.some((row) => row.bucket === "pending") ? 8 : 0)
   }
 }
 
 if (group === "api") {
   const path = argv[1]
+  if (path === "repos/{owner}/{repo}") out({ allow_forking: state.repo?.allowForking ?? true })
+  const viewerRepo = /^repos\/([^/]+)\/([^/]+)$/.exec(path)
+  if (viewerRepo) {
+    if (state.forkExists !== true) fail("HTTP 404 Not Found")
+    const name = (state.repo?.nameWithOwner ?? "acme/acme-store").split("/")[1]
+    out({ owner: { login: state.login }, name, clone_url: `https://github.com/${state.login}/${name}.git`, ssh_url: `git@github.com:${state.login}/${name}.git`, parent: { full_name: state.repo?.nameWithOwner ?? "acme/acme-store" } })
+  }
+  if (path === "-X" && argv[2] === "POST" && argv[3] === "repos/{owner}/{repo}/forks") {
+    if (state.repo?.allowForking === false) fail("Repository forking is disabled")
+    const name = (state.repo?.nameWithOwner ?? "acme/acme-store").split("/")[1]
+    state.forkExists = true
+    changed()
+    out({ owner: { login: state.login }, name, clone_url: `https://github.com/${state.login}/${name}.git`, ssh_url: `git@github.com:${state.login}/${name}.git` })
+  }
   if (path === "graphql") {
     const { query, variables } = JSON.parse(stdin)
     if (query.includes("addPullRequestReview(")) {
@@ -304,6 +323,25 @@ if (group === "api") {
     created_at: entry.created_at ?? "2026-10-02T10:00:00Z",
     creator: { login: entry.creator }
   })
+  const checksAt = /\/commits\/([a-f0-9]{40})\/(check-runs|status)(?:\?|$)/.exec(path)
+  if (checksAt) {
+    const sha = checksAt[1]
+    const pr = state.prs.find(entry => headOf(entry) === sha)
+    if (state.unreadableChecks || state.unreadableCheckActivity) fail("head check run or commit status inventory unavailable")
+    const query = new URL(path, "https://fixture.invalid").searchParams
+    const page = Number(query.get("page") ?? "1"), size = Number(query.get("per_page") ?? "100")
+    const rows = pr ? state.checks[String(pr.number)] ?? [] : (state.baseChecks ?? []).map(check => ({ ...check, state: check.conclusion, link: check.details_url }))
+    if (checksAt[2] === "check-runs") {
+      const runs = pr && state.headCheckRuns ? state.headCheckRuns : rows.map((check, index) => {
+        const value = String(check.state ?? check.conclusion ?? "").toLowerCase()
+        const active = ["pending", "queued", "in_progress", "waiting", "requested"].includes(value)
+        return { id: index + 1, name: check.name, head_sha: sha, status: active ? value === "pending" ? "queued" : value : "completed", conclusion: active ? null : value === "cancel" ? "cancelled" : value, details_url: check.link, ...(check.description ? { output: { summary: check.description } } : {}) }
+      })
+      out({ total_count: runs.length, check_runs: runs.slice((page - 1) * size, page * size).map(row => ({ head_sha: sha, ...row })) })
+    }
+    const statuses = pr ? state.commitStatuses?.[sha] ?? state.commitStatuses?.[String(pr.number)] ?? [] : state.baseStatuses ?? []
+    out({ sha, total_count: statuses.length, statuses: statuses.slice((page - 1) * size, page * size) })
+  }
   const newestFirst = (rows) => [...rows].sort((a, b) => Date.parse(b.created_at ?? "") - Date.parse(a.created_at ?? ""))
   const deployments = /^repos\/\{owner\}\/\{repo\}\/deployments\?sha=([0-9a-f]{40})/.exec(path)
   if (deployments) {
