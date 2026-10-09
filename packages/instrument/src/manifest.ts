@@ -11,7 +11,6 @@ import { isEditRecordShape } from "./install/edits.js"
 import { providerInstallEvidence } from "./provider-evidence.js"
 import { SERVER_LANE_SECRET_ENV, SERVER_LANE_SOURCE_KEY_ENV } from "./server-lane/helpers.js"
 import type { InstallManifest, ProviderId, SupportedFramework } from "./types.js"
-import type { InstallManifestIds } from "./wizard/contracts/jobs.js"
 
 export const installManifestRelativePath = ".infinite/install.json"
 
@@ -255,10 +254,11 @@ const SERVER_LANE_ENV_KEY_SET = new Set<string>([SERVER_LANE_SOURCE_KEY_ENV, SER
  *  - edits: kept in order, this run's new records appended (by id), so uninstall still walks them newest first.
  *  - providers, requiresManual: this run's when it planned the browser tag (what the page now carries),
  *    else the earlier receipt's.
- *  - ids: per tool, this run's id when it emitted one, else the earlier receipt's.
+ *  - ids: this run's, whole, when it rendered the browser tag (a dropped tool's id goes); else the earlier receipt's.
  *  - workspaceId: the earlier receipt's (the install that created the receipt).
  *  - runId, managedCapture: only the wizard writes them; kept unless this run carries its own.
- *  - browserTag: once the browser adapter wrote the tag, it stays recorded (uninstall runs its reversal).
+ *  - browserTag: once the browser adapter wrote the tag, it stays recorded (uninstall runs its reversal); a
+ *    pre-marker receipt gets it from the old inference before a lane is merged in.
  *  - serverLane: this run's when it planned the lane (its `created` files unioned with the earlier
  *    record's, minus any the plan now leaves to the customer), else the earlier receipt's.
  *
@@ -297,10 +297,12 @@ export function mergeInstallManifest(
   ]
   const known = new Set((previous.edits ?? []).map((edit) => edit.id))
   const edits = [...(previous.edits ?? []), ...(run.edits ?? []).filter((edit) => !known.has(edit.id))]
-  const ids = mergeIds(previous.ids, run.ids)
+  // A run that rendered the browser tag says exactly which ids the page carries now (a dropped tool's id
+  // goes); a lane-only run leaves the earlier ids whole.
+  const ids = scope.browser ? (run.ids ?? previous.ids) : (previous.ids ?? run.ids)
   const managedCapture = run.managedCapture ?? previous.managedCapture
   const runId = run.runId ?? previous.runId
-  const browserTag = previous.browserTag === true || run.browserTag === true
+  const browserTag = previous.browserTag === true || legacyBrowserTag(previous) || run.browserTag === true
   return {
     ...(managedCapture ? { managedCapture } : {}),
     workspaceId: previous.workspaceId,
@@ -322,17 +324,14 @@ export function mergeInstallManifest(
   }
 }
 
-/** Per tool: the id this run emitted, else the earlier receipt's. A run that emitted none changes nothing. */
-function mergeIds(previous: InstallManifestIds | undefined, run: InstallManifestIds | undefined): InstallManifestIds | undefined {
-  if (!run) return previous
-  if (!previous) return run
-  return {
-    ...previous,
-    ga4: run.ga4.length > 0 ? run.ga4 : previous.ga4,
-    posthog: run.posthog ?? previous.posthog,
-    meta: run.meta.length > 0 ? run.meta : previous.meta,
-    infinite: run.infinite ?? previous.infinite
-  }
+/**
+ * A receipt written before `browserTag` existed (0.13.0 and earlier): the adapter ran exactly when the old
+ * uninstall inference held on it. Stamped while merging, BEFORE a lane joins the receipt: with a lane in
+ * it the inference would conclude the adapter never ran and uninstall would leave the tag behind.
+ */
+function legacyBrowserTag(previous: InstallManifest): boolean {
+  if (previous.browserTag !== undefined) return false
+  return previous.providers.length > 0 || (!previous.serverLane && (previous.edits ?? []).length === 0)
 }
 
 export function computeContentHashes(root: string, files: string[]): Record<string, string> {

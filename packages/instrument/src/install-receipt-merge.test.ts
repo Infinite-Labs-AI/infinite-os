@@ -345,12 +345,13 @@ describe("install receipt merge: review round 1", () => {
     expect(merged.managedCapture).toEqual(browser.managedCapture)
   })
 
-  it("3b: a run that emits a new id for a tool records it; the other tools' ids stand", () => {
+  it("3b: a lane-only run keeps the earlier ids whole", () => {
     const root = copyFixture("next-app-router-basic")
     const browser = installBrowserTagLikeTheWizard(root)
-    writeInstallManifest(root, { ...browser, ids: { ...browser.ids!, meta: ["1234567890123456"] } })
-    apply(root, LANE_WORKSPACE, { infinite: { ...infinite, siteSourceKey: "site_public_receipt_test_2" } }, true)
-    expect(readInstallManifest(root)!.ids).toEqual({ ga4: [], posthog: null, meta: ["1234567890123456"], infinite: { siteSourceKey: "site_public_receipt_test_2" } })
+    const ids = { ...browser.ids!, meta: ["1234567890123456"] }
+    writeInstallManifest(root, { ...browser, ids })
+    apply(root, LANE_WORKSPACE, {}, true)
+    expect(readInstallManifest(root)!.ids).toEqual(ids)
   })
 
   it("4: static HTML helpers beside an adopted tag + a wizard edit on index.html, then the lane: uninstall takes the managed block off", () => {
@@ -407,5 +408,38 @@ describe("install receipt merge: review round 1", () => {
     const envKeys = readInstallManifest(root)!.envKeys
     expect(withGa4.length).toBeGreaterThan(0)
     expect([...envKeys].sort()).toEqual([...new Set([...infiniteOnly.envKeys, "INFINITE_SITE_SOURCE_KEY", "INFINITE_SERVER_EVENT_SECRET"])].sort())
+  })
+})
+
+// Review round 2 (PR #15).
+describe("install receipt merge: review round 2", () => {
+  it("J: a pre-browserTag receipt for helpers beside an adopted tag, then a new lane run: uninstall still takes the tag off", () => {
+    const root = copyFixture("next-app-router-basic")
+    const layout = join(root, "app/layout.tsx")
+    writeFileSync(layout, readFileSync(layout, "utf8").replace("<body>", `<head>${ADOPTED_GA4}</head>\n      <body>`))
+    const original = snapshotTree(root)
+    apply(root, BROWSER_WORKSPACE, { ga4: { measurementId: "G-ADOPTED0" }, conversions: { helpers: true } }, false)
+    // What 0.13.0 wrote: no browserTag marker, no ids.
+    const { browserTag: _browserTag, ids: _ids, ...legacy } = readInstallManifest(root)!
+    expect(legacy.providers).toEqual([])
+    writeInstallManifest(root, legacy as InstallManifest)
+
+    apply(root, LANE_WORKSPACE, {}, true)
+    expect(readInstallManifest(root)!.browserTag).toBe(true)
+
+    uninstallInstallation({ root, dryRun: false })
+    expectTreeEquals(root, original)
+  })
+
+  it("K: a browser re-run that drops a tool drops its id too (the run's ids are taken whole)", () => {
+    const root = copyFixture("next-app-router-basic")
+    const posthog = { projectKey: "phc_test", apiHost: "/ingest", proxy: { path: "/ingest", assetsHost: "https://us-assets.i.posthog.com", ingestHost: "https://us.i.posthog.com" } }
+    apply(root, BROWSER_WORKSPACE, { infinite, posthog }, false)
+    expect(readInstallManifest(root)!.ids?.posthog).toEqual({ projectKey: "phc_test", apiHost: "/ingest" })
+    apply(root, BROWSER_WORKSPACE, { infinite }, false)
+    const merged = readInstallManifest(root)!
+    expect(merged.providers).toEqual(["infinite"])
+    expect(readFileSync(join(root, "lib/infinite-analytics.ts"), "utf8")).not.toContain("phc_test")
+    expect(merged.ids).toEqual({ ga4: [], posthog: null, meta: [], infinite: { siteSourceKey: infinite.siteSourceKey } })
   })
 })
