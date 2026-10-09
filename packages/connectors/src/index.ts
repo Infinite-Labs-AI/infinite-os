@@ -14227,7 +14227,8 @@ export type MetaAdsAdHourlyResult = MetaAdsCampaignHourlyResult;
 /**
  * AD hourly delivery WITH results (engine 0086): level=ad, time_increment=1,
  * breakdowns=hourly_stats_aggregated_by_advertiser_time_zone over [since, until] (today allowed), with the daily read's
- * attribution windows. Spend, impressions, clicks, link clicks and Meta's actions[] / action_values[] per ad per
+ * attribution windows. Spend, impressions, clicks, link clicks, Meta's actions[] / action_values[] and its `results`
+ * (actions_raw.provider_result_evidence.results, the daily rows' key: trials live only there) per ad per
  * account-local hour; ad set and campaign hours are sums of these rows. No action_report_time is sent: Meta disregards
  * it since 2025-06-10 and reports off-Meta conversions in the hour they happened (see the migration).
  * Supersedes syncMetaAdsCampaignHourly as the scheduled read (that one stays for its stored table).
@@ -14295,7 +14296,15 @@ export async function syncMetaAdsAdHourly(
       impressions: integerOrNull(record.impressions),
       clicks: integerOrNull(record.clicks),
       inline_link_clicks: integerOrNull(record.inline_link_clicks),
-      actions_raw: { actions: metaInsightsActions(record) ?? [], action_values: metaInsightsActionValues(record) ?? [] },
+      // Meta's `results` kept verbatim under provider_result_evidence.results, the key the daily fact rows use
+      // (metaAdsActionsRaw), so a reader counts a trial hour exactly as a trial day: an entry for the indicator WITH
+      // values is a count; no entry or no values is unknown, never 0. Rows read before `results` was requested have
+      // no provider_result_evidence key at all (unknown too).
+      actions_raw: {
+        actions: metaInsightsActions(record) ?? [],
+        action_values: metaInsightsActionValues(record) ?? [],
+        provider_result_evidence: { results: record.results ?? null },
+      },
       currency: stringOrNull(record.account_currency)?.toLowerCase() ?? null,
     });
   }, telemetry, "ad_insights");
