@@ -397,6 +397,11 @@ describe("browser-leg match data on the mirror (parity gap 5)", () => {
     const page = store({ helpers: { metaAdvancedMatching: true } })
     expect(typeof page.vm.window.infiniteMetaAdvancedMatch).toBe("function")
     const done = page.vm.evaluate<Promise<void>>("infiniteMetaMirror('Lead', 'lead:abc', { identity: { email: ' Buyer@Example.com ', externalId: 'cus_123' } })")
+    // The identity hash is real WebCrypto (truly async, not on the fake clock): wait for the event itself before
+    // the request "loads", or a slow machine fires the load before the mirror watches for it (seen on CI).
+    for (let waited = 0; !page.calls.fbq.some((call) => call[0] === "trackSingle") && waited < 3000; waited += 5) {
+      await new Promise((resolve) => setTimeout(resolve, 5))
+    }
     await page.vm.advance(10)
     await page.vm.resourceLoaded(`https://www.facebook.com/tr/?id=${PIXEL}&ev=Lead&eid=lead%3Aabc`)
     await done

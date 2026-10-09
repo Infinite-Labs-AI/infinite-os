@@ -589,7 +589,8 @@ describe.each([ "js"] as const)("the outcome helper (%s), executed", (form) => {
       expect(stubCalls.after).toHaveLength(1)
       stubCalls.afterThrows = true
       await helper.reportInfiniteOutcomeInBackground({ type: "lead", eventId: "2", path: "/" })
-      expect(fetchMock).toHaveBeenCalledTimes(2)
+      // after() runs the first send's callback on its own schedule; on a slow machine it lands after this line.
+      await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2), { timeout: 3000 })
     })
   })
 })
