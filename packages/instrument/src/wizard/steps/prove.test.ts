@@ -21,7 +21,7 @@ import { createRunState } from "../run-state.js"
 import { HELD_BY_BANNER } from "../../checks/grade-test-run.js"
 import { FINISH_LINE_IDS, FINISH_LINE_SOURCES, type Cell } from "../contracts/report.js"
 import { computeVerdict } from "../verdict.js"
-import { PROVE_LIMITS, buildProvenColumn, keepsTrackersBehindBanner, ownReceipt, step } from "./prove.js"
+import { MERGE_ADDRESS_NEEDS_LOGIN, PROVE_LIMITS, buildProvenColumn, keepsTrackersBehindBanner, ownReceipt, step, unloaded } from "./prove.js"
 
 function mergedState() {
   const state = createRunState({ tagVersion: "0.12.0", root: "/repo", appRoot: ".", now: new Date("2026-10-02T09:00:00Z"), displayId: "r-7f3c" })
@@ -200,6 +200,35 @@ describe("prove: the proven_live column is honest", () => {
     expect(unset.cells.server_conversions).toMatchObject({ display: "1 wired · sends nothing until you do the setup steps", state: "pending" })
     const set = buildProvenColumn({ ...input, keys: { ...keysFixture(), serverLane: { laneState: "awaiting_first_event", envWriteGranted: true } } })
     expect(set.cells.server_conversions).toMatchObject({ display: "1 wired · waits for a real conversion", state: "pending" })
+  })
+})
+
+describe("prove: the merge's own deployment address behind Vercel's login (P0-2)", () => {
+  const base = {
+    runId: RUN_ID,
+    mergeSha: MERGE_SHA,
+    installed: null,
+    at: "2026-10-02T09:43:00.000Z",
+    keys: keysFixture(),
+    t1: [],
+    serverLaneInstalled: true,
+    conversionsWaiting: 0,
+    expect: {},
+    visit: null,
+    receipts: receiptsAll({})
+  }
+  const none = { kind: "none" as const, reason: "not_exercised" as const }
+
+  it("the previews check reads 'not tried (the deployment address needs a Vercel login)', never a refusal or 'unknown'", () => {
+    const column = buildProvenColumn({ ...base, postDeploy: { byteCensus: [], mergePreview: { kind: "none", reason: "preview_protected", said: MERGE_ADDRESS_NEEDS_LOGIN }, deployedDry: none } })
+    expect(column.finishLine.previews_silent).toMatchObject({ state: "info", display: "not tried (the deployment address needs a Vercel login)", reason: "preview_protected" })
+    expect(column.finishLine.previews_silent!.display).not.toMatch(/refused|tie that address/)
+  })
+
+  it("NEGATIVE: a desktop refusal of an open address is still said as a refusal (unknown)", () => {
+    const column = buildProvenColumn({ ...base, postDeploy: { byteCensus: [], mergePreview: unloaded("preview_refused", "the merge's own deployment address"), deployedDry: none } })
+    expect(column.finishLine.previews_silent).toMatchObject({ state: "undetermined" })
+    expect(column.finishLine.previews_silent!.display).toMatch(/refused to load/)
   })
 })
 

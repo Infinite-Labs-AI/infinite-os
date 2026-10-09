@@ -165,7 +165,8 @@ function earlierProblemsUnchecked(finishLine: VerdictInput["finishLine"]): strin
       const before = (["live_today", "in_pr"] as ReportColumnId[]).some((column) => line.cells[column].state === "problem")
       if (!before) return false
       const live: Cell = line.cells.proven_live
-      return live.state === "not_measured" || (live.state === "undetermined" && live.reason !== "not_connected")
+      // P0-2: an address behind a login reads "not tried" (info), and was not re-checked either.
+      return live.state === "not_measured" || (live.state === "undetermined" && live.reason !== "not_connected") || (live.state === "info" && live.reason === "preview_protected")
     })
     .map((line) => label(line.id))
 }

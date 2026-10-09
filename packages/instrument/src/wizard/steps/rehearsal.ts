@@ -443,8 +443,11 @@ async function rehearsalRun(ctx: WizardContext, deps: WizardDeps): Promise<StepO
   // R4-10: the one count the report's "Live test per tool" cell uses (never every graded tool).
   const count = rehearsalToolCount(outcome)
   const prLabel = prState?.number ? `Pull request #${prState.number}` : "Branch pushed"
+  // P0-2: a preview behind Vercel's login was not tried; the line above already says why, in plain words.
   const line =
-    outcome.state === "undetermined"
+    outcome.state === "undetermined" && outcome.reason === "preview_protected"
+      ? `${prLabel} · not tried before merge`
+      : outcome.state === "undetermined"
       ? `${prLabel} · rehearsal undetermined (${outcome.reason?.replace(/_/g, " ")})`
       : `${prLabel} · rehearsal: ${rehearsalCountWords(count)} · nothing sent`
   status(ctx, "rehearsal", line)

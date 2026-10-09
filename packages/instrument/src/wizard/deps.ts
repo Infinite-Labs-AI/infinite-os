@@ -354,10 +354,12 @@ export async function createDefaultWizardDeps(input: DefaultDepsInput, overrides
       return baselineTree(root, input.appRoot, sha, git)
     }
   })
+  // One proxy-aware fetch for the live checks and the wizard's own anonymous reads (a preview's login answer).
+  const liveFetch = overrides.fetch ?? envProxyFetch(env)
   registerO9Checks(checks, {
     root,
     version: tagVersion,
-    fetch: overrides.fetch ?? envProxyFetch(env),
+    fetch: liveFetch,
     run: () => o9RunContext(root, runId())
   })
   // Review I1 P1-5: the job table's S checks on an agent's edit (jobs 1, 2, 3, 8, 9, 12, 14).
@@ -442,6 +444,7 @@ export async function createDefaultWizardDeps(input: DefaultDepsInput, overrides
     env,
     platform,
     tagVersion,
+    fetch: liveFetch,
     // B29: the merge-ready "open" answer opens the PR, in a darwin terminal run only.
     ...(platform === "darwin" && !options.json && !options.nested ? { openUrl: openInBrowser } : {})
   }

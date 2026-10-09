@@ -86,7 +86,7 @@ export const REASON_TEXT: Record<Reason, string> = {
   not_built: "this check is not available in this version",
   below_sample_floor: "below 50 page views: raw counts shown",
   held_by_consent: "your cookie banner keeps every tool off until a visitor accepts; real visitors who accept are measured from their own visits",
-  preview_protected: "the preview is password-protected, so the rehearsal could not load it",
+  preview_protected: "previews need a login, so they were not tried",
   env_dependent: "the ID comes from a setting that previews do not have",
   pending_deploy: "waiting for the deploy",
   pending_open_infinite: "open Infinite (or re-run npx infinite-tag) to finish the live checks",

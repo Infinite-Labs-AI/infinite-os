@@ -144,15 +144,15 @@ describe("step `rehearsal` (§3d.1 step 8)", { timeout: 60_000 }, () => {
     expect(w.fx.remoteSha(BRANCH)).toBeNull()
   })
 
-  it("a protected preview is undetermined at once (negative: no waiting, no test)", async () => {
+  it("a protected preview is not tried at once, said plainly (negative: no waiting, no test, no 'unknown' cell)", async () => {
     const clock = fakeClock()
     const w = await world({ hosting: fakeHosting({ previewProtection: "vercel_authentication" }), clock })
     const outcome = await rehearsalStep.run(w.ctx, w.deps)
     expectOk(outcome)
-    expect(outcome.status).toMatch(/preview protected/)
+    expect(outcome.status).toMatch(/not tried before merge/)
     expect(clock.slept).toEqual([])
     expect(w.bridge.testRequests).toEqual([])
-    expect(w.ctx.state.get().report.in_pr!.finishLine.previews_silent).toMatchObject({ state: "undetermined", reason: "preview_protected" })
+    expect(w.ctx.state.get().report.in_pr!.finishLine.previews_silent).toMatchObject({ state: "info", display: "not tried (previews need a login)", reason: "preview_protected" })
   })
 
   it("no push access without an early approved fork stops before any push", async () => {

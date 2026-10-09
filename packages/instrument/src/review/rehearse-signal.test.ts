@@ -93,7 +93,7 @@ describe("the rehearsal gate without an Infinite Vercel connection (§3y.4)", ()
       ghReady: true
     })
     expect(claimed.reason).toBe("preview_unserved")
-    expect(rehearsalLines(claimed)[0]!.text).toBe("Rehearsal: undetermined (the preview did not serve this pull request's proof file, e.g. it is protected)")
+    expect(rehearsalLines(claimed)[0]!.text).toBe("Rehearsal: undetermined (the preview did not serve this pull request's proof file)")
   })
 
   it("NEGATIVE: no signal at all → undetermined 'not_vercel', worded 'no Vercel preview found for this site'", async () => {

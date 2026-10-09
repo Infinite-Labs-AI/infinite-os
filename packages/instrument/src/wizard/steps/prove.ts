@@ -47,7 +47,7 @@ import {
 import { bridgeErrorCode, bridgeErrorState } from "../bridge-errors.js"
 import { gradeReasonCode, gradeWords } from "../before-column.js"
 import { buildColumn, type ColumnFact, type RowCellInput } from "../report.js"
-import { PREVIEW_REFUSED, productionMatcher, rehearsalTargets, runDesktopTest } from "../../review/rehearse.js"
+import { PREVIEW_REFUSED, previewNeedsLogin, productionMatcher, rehearsalTargets, runDesktopTest } from "../../review/rehearse.js"
 import { GhError } from "../../github/gh.js"
 import { testPageUrls } from "./rehearsal.js"
 import { readBeforeFactsFile } from "../handoff/before-facts.js"
@@ -538,6 +538,9 @@ export type PostDeployLoad =
   /** `said`: what stopped the load in words (review P1-5: a refused address is said as refused, never a "test error"). */
   | { kind: "none"; reason: Reason; said?: string }
 
+/** P0-2: how the previews check after the deploy reads when the merge's own address needs a Vercel login. */
+export const MERGE_ADDRESS_NEEDS_LOGIN = "not tried (the deployment address needs a Vercel login)"
+
 /** Review P1-5: a post-deploy load that returned no result, as what really happened (runDesktopTest's own error). */
 export function unloaded(error: string | null, what: string): Extract<PostDeployLoad, { kind: "none" }> {
   if (error === PREVIEW_REFUSED) return { kind: "none", reason: "not_exercised", said: `the Infinite app refused to load ${what}: it could not tie that address to this site` }
@@ -804,7 +807,10 @@ function postDeployFacts(post: NonNullable<ProvenColumnInput["postDeploy"]>, ins
     })
   }
   const leftPreview = withheldPreviewTools(jobs)
-  if (post.mergePreview.kind === "none") {
+  if (post.mergePreview.kind === "none" && post.mergePreview.reason === "preview_protected") {
+    // P0-2: an address behind a login was not tried: said as such, never "unknown".
+    facts.push({ input: "merge_preview.graded", state: "info", display: MERGE_ADDRESS_NEEDS_LOGIN, at, reason: "preview_protected" })
+  } else if (post.mergePreview.kind === "none") {
     facts.push({ input: "merge_preview.graded", state: "undetermined", display: post.mergePreview.said ?? "the merge's own deployment address was not loaded", at, reason: post.mergePreview.reason })
   } else {
     const scoped = leftPreview.length ? previewScope(post.mergePreview.grades, leftPreview) : null
@@ -1604,7 +1610,12 @@ async function measureAfterDeploy(
       ctx.emit.emit("step.sub", { step: "prove", text: `! The merge's own deployment address could not be read from GitHub (${kind}); previews are not re-checked after the deploy`, tone: "warn" })
     }
   }
-  if (deploymentUrl && !isProd(new URL(deploymentUrl).hostname) && isDeniedHost(new URL(deploymentUrl).hostname)) {
+  // P0-2: Vercel's login answers the desktop's proof read with a 302 to vercel.com, so the desktop would refuse the
+  // address. Asked first, without credentials: a login is said as a login, never as a refusal.
+  if (deploymentUrl && !isProd(new URL(deploymentUrl).hostname) && isDeniedHost(new URL(deploymentUrl).hostname) && (await previewNeedsLogin(deps.fetch, deploymentUrl))) {
+    mergePreview = { kind: "none", reason: "preview_protected", said: MERGE_ADDRESS_NEEDS_LOGIN }
+    ctx.emit.emit("step.sub", { step: "prove", text: "The merge's own deployment address needs a Vercel login, so previews were not loaded after the deploy", tone: "info" })
+  } else if (deploymentUrl && !isProd(new URL(deploymentUrl).hostname) && isDeniedHost(new URL(deploymentUrl).hostname)) {
     ctx.emit.emit("step.sub", { step: "prove", text: `Loading the merge's own address ${new URL(deploymentUrl).host} (nothing sent)…`, tone: "pending" })
     const loaded = await runDesktopTest(ctx, deps, "prove", {
       mode: "dry_live",

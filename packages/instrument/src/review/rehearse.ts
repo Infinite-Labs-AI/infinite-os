@@ -30,7 +30,7 @@ import { GhError } from "../github/gh.js"
 import { isGitHubAdapter } from "../hosts/github.js"
 import { isUnsupported } from "../hosts/other.js"
 import { checksPassingCell } from "../wizard/report.js"
-import type { TagKeys } from "../wizard/contracts/bridge.js"
+import { SITE_PROOF_PATH, type TagKeys } from "../wizard/contracts/bridge.js"
 import type { RunFacts } from "./context.js"
 import { derivedInPrCells, ga4KeyEventCells, preMergeCells } from "./in-pr-cells.js"
 import { bridgeErrorCode, bridgeStopCode, sub } from "./context.js"
@@ -97,6 +97,58 @@ export interface RehearsalOutcome {
 
 const POLL_WAIT_SECONDS = 25
 const PREVIEW_POLL_MS = 15_000
+
+/** P0-2: how long one anonymous request to a preview may take before it counts as "no answer". */
+export const PREVIEW_LOGIN_PROBE_MS = 5_000
+
+/** P0-2: the one line a run says when Vercel's login keeps the wizard off the pull request's preview. */
+export const PREVIEW_LOGIN_LINE = "Your Vercel previews need a Vercel login, so the pull request was not tried before merge."
+
+/** P0-2: how each cell the rehearsal would have measured reads instead (never "unknown"). */
+export const PREVIEW_LOGIN_CELL = "not tried (previews need a login)"
+
+/**
+ * P0-2: whether one anonymous answer is Vercel's deployment protection: a 401, or a redirect to Vercel's login
+ * (`vercel.com/sso-api`, any `*.vercel.com`, or the deployment's own `/_vercel/sso`).
+ */
+export function isVercelLoginAnswer(status: number, location: string | null, requested: string): boolean {
+  if (status === 401) return true
+  if (status < 300 || status >= 400 || !location) return false
+  let target: URL
+  try {
+    target = new URL(location, requested)
+  } catch {
+    return false
+  }
+  const host = normalizeHost(target.hostname)
+  return host === "vercel.com" || host.endsWith(".vercel.com") || target.pathname.startsWith("/_vercel/sso")
+}
+
+/**
+ * P0-2: asks the address and its proof file once each, without credentials, never following a redirect, each cut
+ * after {@link PREVIEW_LOGIN_PROBE_MS}. True only when one of them answers with Vercel's login. A network error, a
+ * timeout or any other answer is false: the desktop then tries the address as before. No fetch = nothing asked.
+ */
+export async function previewNeedsLogin(fetchFn: WizardDeps["fetch"], address: string): Promise<boolean> {
+  if (!fetchFn) return false
+  let origin: string
+  try {
+    origin = new URL(address).origin
+  } catch {
+    return false
+  }
+  const ask = async (url: string): Promise<boolean> => {
+    try {
+      const response = await fetchFn(url, { method: "GET", redirect: "manual", credentials: "omit", signal: AbortSignal.timeout(PREVIEW_LOGIN_PROBE_MS) })
+      await response.body?.cancel().catch(() => undefined)
+      return isVercelLoginAnswer(response.status, response.headers.get("location"), url)
+    } catch {
+      return false
+    }
+  }
+  const answers = await Promise.all([...new Set([address, `${origin}${SITE_PROOF_PATH}`])].map(ask))
+  return answers.some(Boolean)
+}
 
 /** Whether a normalised host is the production host or a registrable-domain sibling (`www.` and subdomains). */
 export function productionMatcher(productionHost: string): (host: string) => boolean {
@@ -308,6 +360,9 @@ export async function rehearse(
   const waited = await waitForPreview(ctx, deps, input.step, input.head)
   if (waited.url === null) return empty(waited.why)
   const previewUrl = waited.url
+  // P0-2: Vercel's login answers the desktop's proof read with a 302 to vercel.com, so the desktop refuses the origin.
+  // Asked first, without credentials, so the run says the real reason instead of a missing proof file.
+  if (await previewNeedsLogin(deps.fetch, previewUrl)) return empty("preview_protected", previewUrl)
 
   const expect: TestExpect = facts.keys ? testExpectFromKeys(facts.keys, facts.claim ?? null) : {}
   const consentSeed =
@@ -515,6 +570,11 @@ export function rehearsalCells(outcome: RehearsalOutcome, input: { head: string;
   const cells: Partial<Record<ReportRowId, Cell>> = {}
   const ids: FinishLineId[] = ["each_tool_once", "ids_match_connections", "previews_silent", "survives_ad_blockers", "spa_page_views", "csp_allows", "no_pii"]
   if (outcome.state === "undetermined") {
+    // P0-2: a preview behind a login was not tried at all; its cells say so instead of seven "unknown"s.
+    if (outcome.reason === "preview_protected") {
+      for (const id of ids) finishLine[id] = makeCell("info", "not_tried", PREVIEW_LOGIN_CELL, at, runId, "preview_protected")
+      return { cells, finishLine }
+    }
     const reason = UNDETERMINED_REASON[outcome.reason ?? "test_error"]
     for (const id of ids) finishLine[id] = makeCell("undetermined", null, NULL_DISPLAY, at, runId, reason)
     return { cells, finishLine }
@@ -784,9 +844,9 @@ export function rehearsalLines(outcome: RehearsalOutcome, jobs?: readonly Checkl
     const why: Record<RehearsalUndetermined, string> = {
       not_vercel: "Rehearsal: undetermined (no Vercel preview found for this site)",
       preview_unconfirmed: "Rehearsal: undetermined (Infinite can't confirm the preview is this site's without a Vercel connection)",
-      preview_unserved: "Rehearsal: undetermined (the preview did not serve this pull request's proof file, e.g. it is protected)",
+      preview_unserved: "Rehearsal: undetermined (the preview did not serve this pull request's proof file)",
       preview_refused: "Rehearsal: undetermined (Infinite refused the preview: it is not this site's Vercel project)",
-      preview_protected: "Rehearsal: undetermined (the preview is protected)",
+      preview_protected: PREVIEW_LOGIN_LINE,
       no_preview: "Rehearsal: undetermined (no preview appeared within 10 minutes)",
       preview_blocked: "Rehearsal: undetermined (Vercel blocked the preview; ask the repo owner to authorize it)",
       preview_failed: "Rehearsal: undetermined (Vercel preview deployment failed)",
@@ -797,7 +857,7 @@ export function rehearsalLines(outcome: RehearsalOutcome, jobs?: readonly Checkl
       test_busy: "Rehearsal: undetermined (the desktop's test window was busy)",
       facts_unreadable: "Rehearsal: undetermined (the Infinite app could not read the connections or hosting)"
     }
-    return [{ text: why[outcome.reason ?? "test_error"], tone: "warn" }]
+    return [{ text: why[outcome.reason ?? "test_error"], tone: outcome.reason === "preview_protected" ? "info" : "warn" }]
   }
   const lines: Array<{ text: string; tone: "ok" | "warn" | "info" }> = []
   for (const tool of ["ga4", "posthog", "meta", "infinite"] as const) {

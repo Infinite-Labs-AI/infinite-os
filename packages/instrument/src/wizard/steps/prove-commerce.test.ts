@@ -149,6 +149,58 @@ describe("running it", () => {
     expect(lines.map((line) => `${line.id}:${line.state}`)).toEqual(["meta:view_item:seen", "meta:add_to_cart:seen", "meta:value_currency:not_measured", "infinite:purchase:seen", "infinite:lead:not_measured"])
   })
 
+  it("P0-2: the merge's own address behind Vercel's login → production itself is loaded (no-send, no clicks): ViewContent graded, AddToCart said plainly", async () => {
+    const bundle = fakeDeps({ bridge: { testPolls: [{ state: "done", progress: [], result: rehearsalResult({ mode: "dry_live", clicks: [] }) }] } })
+    const asked: Array<{ url: string; init: RequestInit | undefined }> = []
+    bundle.deps.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      asked.push({ url: String(input), init })
+      return new Response(null, { status: 302, headers: { location: "https://vercel.com/sso-api?url=x" } })
+    }) as typeof fetch
+    const ctx = fakeContext(state(), {}, bundle.clock)
+    const lines = await proveCommerce(ctx, bundle.deps, {
+      runId: RUN_ID,
+      mergeSha: MERGE_SHA,
+      productionHost: HOST,
+      expect: {},
+      reader: reader("https://acme-store-git-9f1e2d.vercel.app"),
+      inventory: INVENTORY,
+      files: FILES,
+      since: null
+    })
+    expect(asked.map((entry) => entry.url)).toContain("https://acme-store-git-9f1e2d.vercel.app")
+    for (const { init } of asked) expect(init).toMatchObject({ redirect: "manual", credentials: "omit" })
+    const started = bundle.log.calls.filter((call) => call.what === "startTest").map((call) => call.args[0] as TestRunRequest)
+    expect(started).toHaveLength(1)
+    expect(started[0]).toMatchObject({ mode: "dry_live", productionHost: HOST, targets: [{ url: `https://${HOST}/products/oak-one`, label: "product_page" }, { url: `https://${HOST}/`, label: "home" }] })
+    expect(started[0]!.rehearsal).toBeUndefined()
+    expect(started[0]!.clicks).toBeUndefined()
+    expect(lines.find((line) => line.id === "meta:view_item")!.state).toBe("seen")
+    expect(lines.find((line) => line.id === "meta:add_to_cart")).toEqual({
+      id: "meta:add_to_cart",
+      state: "not_measured",
+      words: "Meta AddToCart: not measured (the deployment address needs a Vercel login, and the test browser never clicks on your live site)."
+    })
+  })
+
+  it("NEGATIVE (P0-2): an open deployment address keeps the rehearsal under the production host, with the Buy click", async () => {
+    const bundle = fakeDeps({ bridge: { testPolls: [{ state: "done", progress: [], result: rehearsalResult() }] } })
+    bundle.deps.fetch = (async () => new Response("ok", { status: 200 })) as typeof fetch
+    const ctx = fakeContext(state(), {}, bundle.clock)
+    const lines = await proveCommerce(ctx, bundle.deps, {
+      runId: RUN_ID,
+      mergeSha: MERGE_SHA,
+      productionHost: HOST,
+      expect: {},
+      reader: reader("https://acme-store-git-9f1e2d.vercel.app"),
+      inventory: INVENTORY,
+      files: FILES,
+      since: null
+    })
+    const started = bundle.log.calls.filter((call) => call.what === "startTest").map((call) => call.args[0] as TestRunRequest)
+    expect(started.map((request) => request.mode)).toEqual(["rehearsal"])
+    expect(lines.find((line) => line.id === "meta:add_to_cart")!.state).toBe("seen")
+  })
+
   it("no deployment address, or no inventory: nothing is claimed (not measured, or no lines at all)", async () => {
     const bundle = fakeDeps()
     const ctx = fakeContext(state(), {}, bundle.clock)

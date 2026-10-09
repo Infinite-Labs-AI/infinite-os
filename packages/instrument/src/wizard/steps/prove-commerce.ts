@@ -12,7 +12,8 @@
 // So after the deploy this file:
 //   1. loads the merge's own production deployment (its `*.vercel.app` address, from GitHub) as a rehearsal: a product
 //      page, checking Meta got ViewContent there, and a click on the Buy button marked
-//      `data-infinite-conversion="add_to_cart"`, checking Meta got AddToCart from it;
+//      `data-infinite-conversion="add_to_cart"`, checking Meta got AddToCart from it. When that address answers with
+//      Vercel's login, production itself is loaded instead (no-send, no clicks), so ViewContent is still checked;
 //   2. says plainly that value and currency are not measured by a browser test (the static checks read them in code);
 //   3. reads Infinite's own record (the baseline read, since the merge) for the server events the plan promised
 //      (purchase, begin_checkout, lead, …): a real one counts; none yet is "waiting for the first real one", never a fail.
@@ -20,14 +21,14 @@
 // `not_measured` with the reason.
 import type { BaselineResponseFields } from "../contracts/report.js"
 import type { TestExpect, TestResult } from "../contracts/test-engine.js"
-import { testRequestModeErrors } from "../contracts/test-engine.js"
+import { TEST_LIMITS, testRequestModeErrors } from "../contracts/test-engine.js"
 import type { WizardContext, WizardDeps } from "../contracts/deps.js"
 import { HOST_DENY_V1, normalizeHost } from "../contracts/host-deny.js"
 import type { DeploymentReader } from "../../hosts/github.js"
 import { META_BROWSER_EVENTS, promisesOf, type EventInventory, type InventoryEvent } from "../../checks/commerce-inventory.js"
 import { canonicalEvent, META_EVENT_NAMES } from "../../checks/commerce-static.js"
 import { routePathOf } from "../../jobs/detectors/shared.js"
-import { conversionSelector, PREVIEW_REFUSED, productionMatcher, rehearsalDeadlineMs, runDesktopTest } from "../../review/rehearse.js"
+import { conversionSelector, PREVIEW_REFUSED, previewNeedsLogin, productionMatcher, rehearsalDeadlineMs, runDesktopTest } from "../../review/rehearse.js"
 import { isTransientBridgeFailure } from "../../bridge/outcomes.js"
 import { bridgeErrorCode } from "../bridge-errors.js"
 
@@ -93,8 +94,11 @@ function metaLoaded(result: TestResult, label: string | null): boolean {
 
 const NOT_LOADED = "Meta's pixel did not run in the test browser there (a site that waits for its cookie banner never starts it in a test), so this could not be measured"
 
-/** Grades the rehearsal of the deployed code for Meta's browser events. `result` null = the load did not run (`why`). */
-export function gradeCommerceBrowser(plan: CommerceProofPlan, result: TestResult | null, why: string | null): CommerceProofLine[] {
+/**
+ * Grades the rehearsal of the deployed code for Meta's browser events. `result` null = the load did not run (`why`).
+ * `noClick`: why the load clicked nothing on purpose (P0-2: production itself is loaded, where the test never clicks).
+ */
+export function gradeCommerceBrowser(plan: CommerceProofPlan, result: TestResult | null, why: string | null, noClick: string | null = null): CommerceProofLine[] {
   const lines: CommerceProofLine[] = []
   for (const event of plan.browser) {
     const id = `meta:${event}`
@@ -113,6 +117,10 @@ export function gradeCommerceBrowser(plan: CommerceProofPlan, result: TestResult
       } else {
         lines.push({ id, state: "not_measured", words: `Meta ${name}: not measured on ${plan.productPath}. ${NOT_LOADED}.` })
       }
+      continue
+    }
+    if (noClick !== null) {
+      lines.push({ id, state: "not_measured", words: `Meta ${name}: not measured (${noClick}).` })
       continue
     }
     const click = result.clicks.find((entry) => entry.label === event)
@@ -203,12 +211,16 @@ export async function proveCommerce(
       why = "the merge's deployment address is not a Vercel deployment address the test browser can load under your domain"
       deploymentUrl = null
     }
-    if (deploymentUrl !== null) {
+    const targets = [
+      ...(plan.productPath ? [{ url: `https://${input.productionHost}${plan.productPath}`, label: PRODUCT_LABEL }] : []),
+      { url: `https://${input.productionHost}/`, label: HOME_LABEL }
+    ]
+    let noClick: string | null = null
+    // P0-2: Vercel's login answers the desktop's read of the deployment address with a 302 to vercel.com, so the
+    // desktop would refuse it. Asked first, without credentials; behind a login, production itself is loaded instead.
+    let needsLogin = deploymentUrl !== null && (await previewNeedsLogin(deps.fetch, deploymentUrl))
+    if (deploymentUrl !== null && !needsLogin) {
       const origin = new URL(deploymentUrl).origin
-      const targets = [
-        ...(plan.productPath ? [{ url: `https://${input.productionHost}${plan.productPath}`, label: PRODUCT_LABEL }] : []),
-        { url: `https://${input.productionHost}/`, label: HOME_LABEL }
-      ]
       const clicks = plan.browser.includes("add_to_cart") ? [{ selector: conversionSelector("add_to_cart"), label: "add_to_cart" }] : []
       const request = {
         mode: "rehearsal" as const,
@@ -229,11 +241,23 @@ export async function proveCommerce(
         if (!result) why = loaded.error === PREVIEW_REFUSED ? "the Infinite app could not tie the deployment address to this site" : `the test browser did not finish (${loaded.error ?? "no result"})`
         else if (result.environment.previewProtected) {
           result = null
-          why = "the deployment address is password protected"
+          needsLogin = true
         }
       }
     }
-    lines.push(...gradeCommerceBrowser(plan, result, why))
+    if (needsLogin) {
+      ctx.emit.emit("step.sub", { step: "prove", text: `The merge's own deployment address needs a Vercel login, so Meta's shop events are checked on ${input.productionHost} itself (nothing sent)…`, tone: "pending" })
+      const request = { mode: "dry_live" as const, runId: input.runId, productionHost: input.productionHost, targets, expect: input.expect, deadlineMs: TEST_LIMITS.deadlineMs.dry_live }
+      const errors = testRequestModeErrors({ protocolVersion: 1, requestId: "check", ...request }, productionMatcher(input.productionHost))
+      if (errors.length > 0) why = `the test could not be asked for (${errors[0]})`
+      else {
+        const loaded = await runDesktopTest(ctx, deps, "prove", request)
+        result = loaded.result
+        why = result ? null : `the test browser did not finish on ${input.productionHost} (${loaded.error ?? "no result"})`
+        noClick = "the deployment address needs a Vercel login, and the test browser never clicks on your live site"
+      }
+    }
+    lines.push(...gradeCommerceBrowser(plan, result, why, result ? noClick : null))
   }
 
   if (plan.server.length > 0) {
