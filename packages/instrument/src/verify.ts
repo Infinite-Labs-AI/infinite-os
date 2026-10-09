@@ -7,6 +7,12 @@ import type { VerifyResult, ManualRequirement } from "./types.js"
 
 export interface VerifyInstallationOptions {
   root: string
+  /**
+   * Hash-check only these managed files (the ones the install that just ran wrote). The receipt also
+   * carries EARLIER installs' files, which the customer may have edited since: an install never fails on
+   * those. Absent = every managed file (`verify`).
+   */
+  files?: readonly string[]
 }
 
 const FORBIDDEN_INFINITE_LOADER_MARKERS = ["app.ultima.inc", "/tracking/", "/sdk/"]
@@ -27,7 +33,9 @@ export function verifyInstallation(options: VerifyInstallationOptions): VerifyRe
   let verifiedFileCount = 0
   let requiredConsentRuntimeFound = false
 
+  const scope = options.files ? new Set(options.files) : null
   for (const relativePath of manifest.files) {
+    if (scope && !scope.has(relativePath)) continue
     const absolutePath = join(options.root, relativePath)
     if (!existsSync(absolutePath)) {
       failures.push(`Missing managed file: ${relativePath}`)

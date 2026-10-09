@@ -7,7 +7,7 @@ import { spawnSync } from "node:child_process"
 import { existsSync, readFileSync } from "node:fs"
 import { basename, join, relative, resolve } from "node:path"
 
-import { applyInstallation, restoreSnapshot, snapshotFiles, type FileSnapshot } from "../apply.js"
+import { applyInstallation, managedFilesOfRun, restoreSnapshot, snapshotFiles, type FileSnapshot } from "../apply.js"
 import { isSupportedFramework } from "../frameworks/index.js"
 import { assertWriteTargetInsideRoot, writeFileAtomic } from "../frameworks/shared.js"
 import { detectRepoStatus, inspectWorkspace } from "../inspect.js"
@@ -454,7 +454,8 @@ export function applyPhase(input: ApplyPhaseInput): ApplyPhaseResult {
     plan: p,
     allowDirty: input.allowDirty
   })
-  const staticVerify = verifyInstallation({ root: input.root })
+  // Only what this run wrote: an earlier install's files the customer edited since never roll this one back.
+  const staticVerify = verifyInstallation({ root: input.root, files: managedFilesOfRun(p, applyResult.requiresManual) })
   let outcome: ApplyPhaseResult["outcome"] = "applied"
   if (!staticVerify.buildOk) {
     try {

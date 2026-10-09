@@ -9,7 +9,9 @@ import {
 } from "./frameworks/shared.js"
 import { isEditRecordShape } from "./install/edits.js"
 import { providerInstallEvidence } from "./provider-evidence.js"
+import { SERVER_LANE_SECRET_ENV, SERVER_LANE_SOURCE_KEY_ENV } from "./server-lane/helpers.js"
 import type { InstallManifest, ProviderId, SupportedFramework } from "./types.js"
+import type { InstallManifestIds } from "./wizard/contracts/jobs.js"
 
 export const installManifestRelativePath = ".infinite/install.json"
 
@@ -95,7 +97,8 @@ function isInstallManifestShape(value: unknown): value is InstallManifest {
     (candidate.configOwnership === undefined || isConfigOwnershipShape(candidate.configOwnership)) &&
     (candidate.serverLane === undefined || isServerLaneManifestShape(candidate.serverLane)) &&
     (candidate.edits === undefined || (Array.isArray(candidate.edits) && candidate.edits.every(isEditRecordShape))) &&
-    (candidate.ids === undefined || isManifestIdsShape(candidate.ids))
+    (candidate.ids === undefined || isManifestIdsShape(candidate.ids)) &&
+    (candidate.browserTag === undefined || candidate.browserTag === true)
   )
 }
 
@@ -225,11 +228,18 @@ export function assertReceiptDescribesApp(
 
 /** Which halves of the install THIS run planned, and so owns in the receipt it writes. */
 export interface InstallReceiptScope {
-  /** The browser tag (providers, its managed files, ids, manual wiring) was planned and rendered. */
+  /** The browser tag (providers, its managed files, manual wiring) was planned and rendered. */
   browser: boolean
   /** The server lane was planned and written. */
   serverLane: boolean
+  /**
+   * Lane files this run's plan leaves to the customer (`manual`: their own file now sits there). An
+   * earlier record of them is dropped, so uninstall never touches the customer's file.
+   */
+  laneDisowned?: readonly string[]
 }
+
+const SERVER_LANE_ENV_KEY_SET = new Set<string>([SERVER_LANE_SOURCE_KEY_ENV, SERVER_LANE_SECRET_ENV])
 
 /**
  * ONE receipt per repo: a run merges what it did into the receipt already there, never replaces it.
@@ -238,14 +248,19 @@ export interface InstallReceiptScope {
  * wizard's re-runs follow (`WizardInstaller.writeReceipt` builds on the current receipt, its edits are
  * kept oldest first, its ids stand unless this run emits new ones):
  *
- *  - files, envKeys: the union, earlier entries first (stable, so an identical re-run writes nothing).
- *  - contentHashes, configOwnership: the union; this run's entry wins for every path it wrote.
+ *  - files, contentHashes, configOwnership: the union; this run's entry wins for every path it wrote.
+ *    Earlier entries come first (stable, so an identical re-run writes nothing). The post-install check
+ *    hash-verifies only this run's files (`managedFilesOfRun`): earlier entries are carried, not re-verified.
+ *  - envKeys: each half's keys from the run that last planned that half (a dropped provider's keys go).
  *  - edits: kept in order, this run's new records appended (by id), so uninstall still walks them newest first.
- *  - the browser half (providers, workspaceId, ids, requiresManual): this run's when it planned the browser
- *    tag, else the earlier receipt's, untouched.
- *  - serverLane: this run's when it planned the lane (its `created` files unioned with the earlier record's),
+ *  - providers, requiresManual: this run's when it planned the browser tag (what the page now carries),
  *    else the earlier receipt's.
- *  - managedCapture, runId: only the wizard writes them; kept unless this run carries its own.
+ *  - ids: per tool, this run's id when it emitted one, else the earlier receipt's.
+ *  - workspaceId: the earlier receipt's (the install that created the receipt).
+ *  - runId, managedCapture: only the wizard writes them; kept unless this run carries its own.
+ *  - browserTag: once the browser adapter wrote the tag, it stays recorded (uninstall runs its reversal).
+ *  - serverLane: this run's when it planned the lane (its `created` files unioned with the earlier
+ *    record's, minus any the plan now leaves to the customer), else the earlier receipt's.
  *
  * One receipt describes one app: a different app root or framework is refused, never silently merged.
  */
@@ -257,35 +272,66 @@ export function mergeInstallManifest(
   if (!previous) return run
   assertReceiptDescribesApp(previous, run)
   const browser = scope.browser ? run : previous
+  const disowned = new Set(scope.laneDisowned ?? [])
+  const kept = (path: string): boolean => !disowned.has(path)
   // This run's lane record, keeping every whole file an earlier run's lane record lists as created (the
   // wizard's server-events handoff is one): uninstall removes exactly what `created` lists.
-  const laneCreated = [...new Set([...(previous.serverLane?.created ?? []), ...(run.serverLane?.created ?? [])])]
+  const laneCreated = [...new Set([...(previous.serverLane?.created ?? []), ...(run.serverLane?.created ?? [])])].filter(kept)
   const lane =
     scope.serverLane && run.serverLane
       ? { ...run.serverLane, ...(laneCreated.length > 0 ? { created: laneCreated } : {}) }
       : previous.serverLane
-  const configOwnership = { ...previous.configOwnership, ...run.configOwnership }
+  const configOwnership = Object.fromEntries(
+    Object.entries({ ...previous.configOwnership, ...run.configOwnership }).filter(([path]) => kept(path))
+  )
+  const contentHashes = Object.fromEntries(
+    Object.entries({ ...previous.contentHashes, ...run.contentHashes }).filter(([path]) => kept(path))
+  )
+  const laneKeys = (manifest: InstallManifest) => manifest.envKeys.filter((key) => SERVER_LANE_ENV_KEY_SET.has(key))
+  const browserKeys = (manifest: InstallManifest) => manifest.envKeys.filter((key) => !SERVER_LANE_ENV_KEY_SET.has(key))
+  const envKeys = [
+    ...new Set([
+      ...browserKeys(scope.browser ? run : previous),
+      ...laneKeys(scope.serverLane ? run : previous)
+    ])
+  ]
   const known = new Set((previous.edits ?? []).map((edit) => edit.id))
   const edits = [...(previous.edits ?? []), ...(run.edits ?? []).filter((edit) => !known.has(edit.id))]
+  const ids = mergeIds(previous.ids, run.ids)
   const managedCapture = run.managedCapture ?? previous.managedCapture
   const runId = run.runId ?? previous.runId
+  const browserTag = previous.browserTag === true || run.browserTag === true
   return {
     ...(managedCapture ? { managedCapture } : {}),
-    workspaceId: browser.workspaceId,
+    workspaceId: previous.workspaceId,
     ...(runId ? { runId } : {}),
     appRoot: run.appRoot,
     framework: run.framework,
+    ...(browserTag ? { browserTag: true as const } : {}),
     providers: browser.providers,
-    files: [...new Set([...previous.files, ...run.files])],
-    envKeys: [...new Set([...previous.envKeys, ...run.envKeys])],
-    contentHashes: { ...previous.contentHashes, ...run.contentHashes },
+    files: [...new Set([...previous.files, ...run.files])].filter(kept),
+    envKeys,
+    contentHashes,
     ...(Object.keys(configOwnership).length > 0 ? { configOwnership } : {}),
     ...(lane ? { serverLane: lane } : {}),
     ...(browser.requiresManual && browser.requiresManual.length > 0 ? { requiresManual: browser.requiresManual } : {}),
     ...(edits.length > 0 ? { edits } : {}),
-    ...(browser.ids ? { ids: browser.ids } : {}),
+    ...(ids ? { ids } : {}),
     wiringVersion: run.wiringVersion,
     verifiedAt: run.verifiedAt
+  }
+}
+
+/** Per tool: the id this run emitted, else the earlier receipt's. A run that emitted none changes nothing. */
+function mergeIds(previous: InstallManifestIds | undefined, run: InstallManifestIds | undefined): InstallManifestIds | undefined {
+  if (!run) return previous
+  if (!previous) return run
+  return {
+    ...previous,
+    ga4: run.ga4.length > 0 ? run.ga4 : previous.ga4,
+    posthog: run.posthog ?? previous.posthog,
+    meta: run.meta.length > 0 ? run.meta : previous.meta,
+    infinite: run.infinite ?? previous.infinite
   }
 }
 

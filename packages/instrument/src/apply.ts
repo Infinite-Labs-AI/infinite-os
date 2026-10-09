@@ -12,12 +12,14 @@ import {
   readInstallManifest,
   writeInstallManifestIfChanged
 } from "./manifest.js"
+import { manifestIdsFor } from "./install/keys-adapter.js"
 import { SERVER_LANE_GUIDE_FILE } from "./server-lane/copy.js"
 import { applyServerLane } from "./server-lane/install.js"
 import type {
   ApplyResult,
   InstallManifest,
   InstallPlan,
+  ManualRequirement,
   ProviderId,
   SupportedFramework
 } from "./types.js"
@@ -119,14 +121,20 @@ export function applyInstallation(options: ApplyInstallationOptions): ApplyResul
         })
       : null
 
-    // The lane's reversal is hash-gated, and uninstall reverses recorded edits BEFORE the lane. A lane write
-    // on top of an earlier run's recorded edit could then never come off byte for byte (the edit no longer
-    // matches, and the lane would restore the edited bytes), so it is refused here and rolled back.
+    // A lane PATCH of the customer's own file (text edits / vercel.json insertions) is reversed by exact
+    // offsets after uninstall has reversed the recorded edits; patched on top of an earlier run's recorded
+    // edit, neither could come off byte for byte, so it is refused and rolled back. The lane's own WHOLE
+    // files (a created middleware, the module, the outcome helper) stay re-renderable: a managed refresh
+    // records edits on those, and an upgrade must still be able to rewrite them.
     const laneWritten = new Set(serverLaneResult?.changedFiles ?? [])
-    const editedBeneath = [...new Set((previousManifest?.edits ?? []).map((edit) => edit.file))].filter((file) => laneWritten.has(file))
+    const lanePatched = (file: string): boolean => {
+      const ownership = serverLaneResult?.configOwnership?.[file]
+      return laneWritten.has(file) && ownership !== undefined && ownership.kind !== "created"
+    }
+    const editedBeneath = [...new Set((previousManifest?.edits ?? []).map((edit) => edit.file))].filter(lanePatched)
     if (editedBeneath.length > 0) {
       throw new Error(
-        `Refusing to install the server lane: ${editedBeneath.join(", ")} carries an edit an earlier infinite-tag run recorded, and uninstall could not then reverse both byte for byte. Every file this run wrote was put back. Run npx infinite-tag uninstall first, then install again.`
+        `Refusing to install the server lane: ${editedBeneath.join(", ")} carries an edit an earlier infinite-tag run recorded, and uninstall could not then reverse both byte for byte. The install was rolled back: every file it wrote is restored (an empty directory it created may remain). Run npx infinite-tag uninstall first, then install again.`
       )
     }
 
@@ -135,14 +143,14 @@ export function applyInstallation(options: ApplyInstallationOptions): ApplyResul
       ...(serverLaneResult?.configOwnership ?? {})
     }
     const requiresManual = frameworkResult.requiresManual ?? []
-    const ownerFiles = new Set(requiresManual.filter(requirement => requirement.ownerBoundary).map(requirement => requirement.path))
-    const managedFiles = options.plan.files.filter(file => !ownerFiles.has(file))
+    const managedFiles = managedFilesOfRun(options.plan, requiresManual)
     // This run's own record, merged into the receipt already there (never replacing it): a server-lane
     // run after the browser tag keeps the tag's files, edits, capture, providers and ids, and the reverse.
     const runManifest: InstallManifest = {
       workspaceId: options.workspaceId,
       appRoot: options.plan.appRoot,
       framework: options.plan.framework as SupportedFramework,
+      ...(runAdapter ? { browserTag: true as const } : {}),
       providers: options.plan.providers as ProviderId[],
       files: managedFiles,
       envKeys: options.plan.envKeys,
@@ -152,12 +160,15 @@ export function applyInstallation(options: ApplyInstallationOptions): ApplyResul
       // The `requires_manual_snippet` state: recorded WITH the snippet so verify can later confirm the
       // wiring is actually present on disk (satisfied) instead of replaying a stale requirement.
       ...(requiresManual.length > 0 ? { requiresManual } : {}),
+      // The public ids the browser tag this run wrote carries (merged per tool into the earlier receipt's).
+      ...(runAdapter ? { ids: manifestIdsFor(options.plan.artifacts) } : {}),
       wiringVersion: 1,
       verifiedAt: null
     }
     const manifest = mergeInstallManifest(previousManifest, runManifest, {
       browser: runAdapter,
-      serverLane: serverLaneResult !== null
+      serverLane: serverLaneResult !== null,
+      laneDisowned: (options.plan.serverLane?.created ?? []).filter((file) => file.action === "manual").map((file) => file.path)
     })
 
     const manifestWrite = writeInstallManifestIfChanged(options.root, manifest)
@@ -185,6 +196,15 @@ export function applyInstallation(options: ApplyInstallationOptions): ApplyResul
     restoreSnapshot(options.root, snapshot)
     throw error
   }
+}
+
+/**
+ * The managed files THIS run wrote and recorded: the plan's files minus those left to the owner. The
+ * post-install static check hash-verifies only these; the receipt's earlier entries are carried.
+ */
+export function managedFilesOfRun(plan: InstallPlan, requiresManual: readonly ManualRequirement[] | undefined): string[] {
+  const ownerFiles = new Set((requiresManual ?? []).filter((requirement) => requirement.ownerBoundary).map((requirement) => requirement.path))
+  return plan.files.filter((file) => !ownerFiles.has(file))
 }
 
 /** "Nothing to install: Google Analytics already exists in index.html and was left untouched." */
