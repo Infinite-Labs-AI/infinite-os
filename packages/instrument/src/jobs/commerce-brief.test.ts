@@ -60,7 +60,7 @@ const facts: BriefFacts = {
   router: "pages",
   appRoot: ".",
   plan: { conversionNames: ["lead", "purchase"], privacyText: null, lines: [] },
-  connections: { ga4MeasurementIds: [], posthog: null, metaPixelIds: ["1116400780828774"] },
+  connections: { ga4MeasurementIds: [], posthog: null, metaPixelIds: ["1234567890123456"] },
   helpers: { module: "lib/infinite-analytics.ts" },
   consentMode: "not_required"
 }

@@ -9,7 +9,7 @@ import { createBrowserVm, plain } from "../../test/site-code/browser-vm.js"
 
 import { buildConversionHelpersScript, type ConversionHelpersOptions } from "./globals.js"
 
-const PIXEL = "1116400780828774"
+const PIXEL = "1234567890123456"
 const OTHER_PIXEL = "0000000000000001"
 const PRODUCT = "{ item_id: 'sku_2', item_name: 'Trail Pack', price: 249, quantity: 1 }"
 

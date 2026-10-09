@@ -18,7 +18,7 @@ const INFINITE: InfinitePublicArtifact = {
   productionHosts: ["shop.example"],
   consentMode: "not_required"
 }
-const PIXEL = "1116400780828774"
+const PIXEL = "1234567890123456"
 
 function site(files: Record<string, string>): string {
   const root = mkdtempSync(join(tmpdir(), "browser-wiring-"))

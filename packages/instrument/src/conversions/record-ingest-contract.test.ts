@@ -62,7 +62,7 @@ function storePage() {
     productionHosts: ["acme.com"]
   })
   vm.runScript(tag.replace(/^<script[^>]*>/i, "").replace(/<\/script[^>]*>$/i, ""))
-  vm.runScript(buildConversionHelpersScript({ consentMode: "not_required", ownHosts: ["acme.com"], currency: "USD", metaPixelId: "1116400780828774" }))
+  vm.runScript(buildConversionHelpersScript({ consentMode: "not_required", ownHosts: ["acme.com"], currency: "USD", metaPixelId: "1234567890123456" }))
   expect(vm.scriptErrors).toEqual([])
   const bodies = () => vm.beacons.map((beacon) => JSON.parse(String(beacon.body)) as Record<string, unknown>)
   return { vm, fbq, bodies }
