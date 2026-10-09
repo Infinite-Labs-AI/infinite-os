@@ -53,6 +53,7 @@ export {
   type MetaAdsWindowReadDimension,
 } from "./meta-extended-reads.js";
 import {
+  META_ADS_AD_HOURLY_FIELDS,
   META_ADS_DAILY_BREAKDOWN_FIELDS,
   META_ADS_DAILY_BREAKDOWN_MAX_WINDOW_DAYS,
   META_ADS_HOURLY_BREAKDOWN,
@@ -67,6 +68,7 @@ import {
   type MetaAdsDailyBreakdownDimension,
 } from "./meta-daily-breakdowns.js";
 export {
+  META_ADS_AD_HOURLY_FIELDS,
   META_ADS_DAILY_BREAKDOWN_DIMENSIONS,
   META_ADS_DAILY_BREAKDOWN_MAX_WINDOW_DAYS,
   META_ADS_HOURLY_BREAKDOWN,
@@ -14187,6 +14189,143 @@ export async function syncMetaAdsCampaignHourly(
     }
     await tx.query(
       `insert into meta_ads_campaign_hourly_coverage (
+         workspace_id, source_id, ad_account_id, occurred_on, closed_at, row_count, settled, observed_local_hour,
+         timezone_name, sync_run_id
+       )
+       select $1, $2, $3, d.day, now(), d.row_count, d.settled, d.observed_local_hour, $4, $5
+         from jsonb_to_recordset($6::jsonb) as d(day date, row_count integer, settled boolean, observed_local_hour smallint)
+       on conflict (workspace_id, source_id, ad_account_id, occurred_on) do update set
+         closed_at = excluded.closed_at, row_count = excluded.row_count, settled = excluded.settled,
+         observed_local_hour = excluded.observed_local_hour, timezone_name = excluded.timezone_name,
+         sync_run_id = excluded.sync_run_id`,
+      [
+        input.workspaceId, input.sourceId, adAccountId, timeZone, input.syncRunId ?? null,
+        JSON.stringify(days.map((day) => ({
+          day,
+          row_count: rowsByDay[day],
+          settled: day < today,
+          observed_local_hour: day < today ? null : observedLocalHour,
+        }))),
+      ],
+    );
+  });
+  return {
+    adAccountId,
+    window: { since: input.since, until: input.until },
+    timeZone,
+    rowCount: rows.length,
+    rowsByDay,
+    observedLocalHour,
+    apiVersion,
+    telemetry: telemetry.snapshot(),
+  };
+}
+
+export type MetaAdsAdHourlyInput = MetaAdsCampaignHourlyInput;
+export type MetaAdsAdHourlyResult = MetaAdsCampaignHourlyResult;
+
+/**
+ * AD hourly delivery WITH results (engine 0086): level=ad, time_increment=1,
+ * breakdowns=hourly_stats_aggregated_by_advertiser_time_zone over [since, until] (today allowed), with the daily read's
+ * attribution windows. Spend, impressions, clicks, link clicks and Meta's actions[] / action_values[] per ad per
+ * account-local hour; ad set and campaign hours are sums of these rows. No action_report_time is sent: Meta disregards
+ * it since 2025-06-10 and reports off-Meta conversions in the hour they happened (see the migration).
+ * Supersedes syncMetaAdsCampaignHourly as the scheduled read (that one stays for its stored table).
+ */
+export async function syncMetaAdsAdHourly(
+  db: InfiniteOsDb,
+  credential: MetaAdsCredential,
+  input: MetaAdsAdHourlyInput,
+): Promise<MetaAdsAdHourlyResult> {
+  const span = metaAdsWindowDays(input.since, input.until);
+  if (span === null || span > META_ADS_HOURLY_MAX_WINDOW_DAYS) {
+    throw new ConnectorError("provider_api_error", `Meta Ads hourly window must be 1..${META_ADS_HOURLY_MAX_WINDOW_DAYS} whole days`, false);
+  }
+  if (input.lane !== undefined && !isMetaRequestLane(input.lane)) {
+    throw new ConnectorError("provider_api_error", "Meta Ads request lane is invalid", false);
+  }
+  const accessToken = metaAdsDirectGraphOnly(credential, "Meta Ads ad hourly read");
+  const { adAccountId, timeZone } = await metaAdsBoundAccountTimezone(db, credential, input, "Meta Ads ad hourly read");
+  const now = input.now ?? new Date();
+  const today = metaAdsProviderDay(now.toISOString(), timeZone);
+  if (input.until > today) {
+    throw new ConnectorError("provider_api_error", "Meta Ads hourly window must not end after today in the account timezone", false);
+  }
+  const reachesToday = input.until === today;
+  const observedLocalHour = reachesToday ? metaAdsLocalHour(now, timeZone) : null;
+  const telemetry = new MetaAdsRequestTelemetry(
+    input.requestBudget, undefined, undefined, undefined, "history_sync",
+    input.lane ?? (reachesToday ? "hot_insights" : "settled_history"),
+  );
+  const apiVersion = metaAdsApiVersion(credential);
+  const url = metaAdsInsightsUrl(credential, {
+    adAccountId,
+    fields: META_ADS_AD_HOURLY_FIELDS,
+    level: "ad",
+    limit: "500",
+    timeIncrement: "1",
+    timeRange: { since: input.since, until: input.until },
+    attributionWindows: META_ADS_ATTRIBUTION_WINDOWS,
+    filtering: metaAdsAllStatusFiltering("ad"),
+    breakdowns: META_ADS_HOURLY_BREAKDOWN,
+  });
+  const what = "Meta Ads ad hourly read";
+  const byKey = new Map<string, Record<string, unknown>>();
+  // Every page is followed (metaAdsFetchInsightsPages) within the hard request ceiling; a ceiling hit fails the read
+  // and writes nothing, so a day is never stored part-paged.
+  await metaAdsFetchInsightsPages(accessToken, url, (row) => {
+    const record = row as MetaAdsInsightsRow & Record<string, unknown>;
+    const adId = stringOrNull(record.ad_id);
+    const hour = metaAdsHourFromBucket(record[META_ADS_HOURLY_BREAKDOWN]);
+    if (!adId || hour === null) {
+      throw new ConnectorError("provider_api_error", `${what} row is missing its ad or a whole-hour bucket`, true);
+    }
+    const day = metaAdsRowDay(record, input.since, input.until, what);
+    const key = [day, adId, hour].join("\u0000");
+    if (byKey.has(key)) {
+      throw new ConnectorError("provider_api_error", `${what} returned the same ad, day and hour twice`, true);
+    }
+    byKey.set(key, {
+      occurred_on: day,
+      ad_id: adId,
+      adset_id: stringOrNull(record.adset_id),
+      campaign_id: stringOrNull(record.campaign_id),
+      hour,
+      spend: numberOrNull(record.spend),
+      impressions: integerOrNull(record.impressions),
+      clicks: integerOrNull(record.clicks),
+      inline_link_clicks: integerOrNull(record.inline_link_clicks),
+      actions_raw: { actions: metaInsightsActions(record) ?? [], action_values: metaInsightsActionValues(record) ?? [] },
+      currency: stringOrNull(record.account_currency)?.toLowerCase() ?? null,
+    });
+  }, telemetry, "ad_insights");
+  const rows = [...byKey.values()];
+  const days = metaAdsWindowDayList(input.since, input.until);
+  const rowsByDay = Object.fromEntries(days.map((day) => [day, rows.filter((row) => row.occurred_on === day).length]));
+  await db.withTransaction(async (tx) => {
+    await tx.query(
+      `delete from meta_ads_ad_hourly
+        where workspace_id = $1 and source_id = $2 and ad_account_id = $3
+          and occurred_on between $4::date and $5::date`,
+      [input.workspaceId, input.sourceId, adAccountId, input.since, input.until],
+    );
+    if (rows.length > 0) {
+      await tx.query(
+        `insert into meta_ads_ad_hourly (
+           workspace_id, source_id, ad_account_id, ad_id, adset_id, campaign_id, occurred_on, hour,
+           spend, impressions, clicks, inline_link_clicks, actions_raw, currency, api_version, sync_run_id
+         )
+         select $1, $2, $3, r.ad_id, r.adset_id, r.campaign_id, r.occurred_on, r.hour,
+                r.spend, r.impressions, r.clicks, r.inline_link_clicks, r.actions_raw, r.currency, $4, $5
+           from jsonb_to_recordset($6::jsonb) as r(
+             ad_id text, adset_id text, campaign_id text, occurred_on date, hour smallint, spend numeric,
+             impressions bigint, clicks bigint, inline_link_clicks bigint, actions_raw jsonb, currency text
+           )`,
+        [input.workspaceId, input.sourceId, adAccountId, apiVersion, input.syncRunId ?? null, JSON.stringify(rows)],
+      );
+    }
+    await tx.query(
+      `insert into meta_ads_ad_hourly_coverage (
          workspace_id, source_id, ad_account_id, occurred_on, closed_at, row_count, settled, observed_local_hour,
          timezone_name, sync_run_id
        )

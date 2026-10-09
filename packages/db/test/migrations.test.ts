@@ -99,7 +99,8 @@ describe("Infinite OS migration stack", () => {
       "0082_stripe_checkout_sessions.sql",
       "0083_remove_dead_x_metrics.sql",
       "0084_meta_local_publishing.sql",
-      "0085_meta_ads_daily_breakdowns_and_hourly.sql"
+      "0085_meta_ads_daily_breakdowns_and_hourly.sql",
+      "0086_meta_ads_ad_hourly.sql"
     ]);
   });
 
@@ -1112,7 +1113,8 @@ describe("Infinite OS migration stack", () => {
       "0082_stripe_checkout_sessions.sql",
       "0083_remove_dead_x_metrics.sql",
       "0084_meta_local_publishing.sql",
-      "0085_meta_ads_daily_breakdowns_and_hourly.sql"
+      "0085_meta_ads_daily_breakdowns_and_hourly.sql",
+      "0086_meta_ads_ad_hourly.sql"
     ]);
   });
 
@@ -1283,6 +1285,23 @@ describe("Infinite OS migration stack", () => {
     expect(sql.match(/row_count integer not null check \(row_count >= 0\)/g)).toHaveLength(2);
     // New tables only: the weekly window tables of 0080/0081 are untouched and nothing is dropped or rewritten.
     expect(sql).not.toContain("meta_ads_adset_breakdown_windows");
+    expect(sql).not.toContain("drop ");
+    expect(sql).not.toContain("alter ");
+    expect(sql).not.toContain("delete from");
+  });
+
+  it("adds ad hourly delivery with actions and a per-day receipt, idempotently, touching nothing else (0086)", () => {
+    const migration = loadMigrations().find((candidate) => candidate.id === "0086_meta_ads_ad_hourly.sql");
+    const sql = (migration?.sql ?? "").toLowerCase().replace(/--[^\n]*/g, "").replace(/\s+/g, " ").trim();
+    expect(sql).toContain("create table if not exists meta_ads_ad_hourly (");
+    expect(sql).toContain("create table if not exists meta_ads_ad_hourly_coverage (");
+    expect(sql).toContain("actions_raw jsonb");
+    expect(sql).toContain("hour smallint not null check (hour between 0 and 23)");
+    expect(sql).toContain("primary key (workspace_id, source_id, ad_account_id, occurred_on, ad_id, hour)");
+    expect(sql).toContain("check (settled = (observed_local_hour is null))");
+    expect(sql).toContain("row_count integer not null check (row_count >= 0)");
+    // New tables only: 0085's campaign hours are untouched and nothing is dropped or rewritten.
+    expect(sql).not.toContain("meta_ads_campaign_hourly");
     expect(sql).not.toContain("drop ");
     expect(sql).not.toContain("alter ");
     expect(sql).not.toContain("delete from");
