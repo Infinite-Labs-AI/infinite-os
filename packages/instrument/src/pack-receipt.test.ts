@@ -58,14 +58,14 @@ function validReceipt(overrides: Partial<PackReceipt> = {}): PackReceipt[] {
   files[0]!.size = 257_751 - (files.length - 1)
   return [
     {
-      id: "infinite-tag@0.13.0",
+      id: "infinite-tag@0.13.1",
       name: "infinite-tag",
-      version: "0.13.0",
+      version: "0.13.1",
       size: 63_166,
       unpackedSize: 257_751,
       shasum: "47c19e69c6161cc327540d3cc83ed218085cdaf6",
       integrity: "sha512-test",
-      filename: "infinite-tag-0.13.0.tgz",
+      filename: "infinite-tag-0.13.1.tgz",
       files,
       ...overrides
     }
@@ -88,7 +88,7 @@ describe("npm 11 pack receipt validator", () => {
     const result = runValidator(validReceipt())
 
     expect(result.status).toBe(0)
-    expect(result.stdout.trim()).toBe("infinite-tag-0.13.0.tgz")
+    expect(result.stdout.trim()).toBe("infinite-tag-0.13.1.tgz")
     expect(result.stderr).toContain("87 files")
   })
 

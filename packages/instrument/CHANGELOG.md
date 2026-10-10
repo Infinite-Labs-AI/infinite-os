@@ -3,6 +3,21 @@
 All notable changes to the `infinite-tag` npm package (`packages/instrument`). Versions before
 0.5.0 are recorded in git history only (`git log -- packages/instrument`).
 
+## 0.13.1 — 2026-10-10
+
+### A later install never takes an installed tool off the page
+
+- A later install merges into `.infinite/install.json` instead of replacing it. Adding the server lane after the
+  browser tag keeps the tag's files, hashes, edits and ids on record, and `uninstall` reverses both installs byte
+  for byte (#15).
+- `install --server-lane` with no browser input of its own installs the lane only and leaves the browser tag as it
+  is. The saved artifacts file only configures the lane. On a repo with no tag yet, run `install` to add the tag.
+- A browser re-run that would drop a tool the receipt records (for example a saved file holding only Infinite
+  over a wizard install with GA4, PostHog and Meta) is refused before anything is written, naming the tools and how
+  to keep them. `uninstall` is the only way to remove a tool (#16).
+- The wizard's plan screen and preflight refuse what its apply would refuse, including an X pixel it cannot keep.
+- A lane-only run over an existing tag says "Browser tag left as it is (…)" instead of "Browser pixel NOT installed."
+
 ## 0.13.0 — 2026-10-09
 
 ### One outcome helper on every host, with Stripe and lead reports built in
