@@ -223,6 +223,11 @@ export function renderApplied(input: {
   plan: InstallPlan
   apply: ApplyResult
   verify: VerifyResult
+  /**
+   * The browser tools `.infinite/install.json` records after this apply. A server-lane-only run over an
+   * existing browser tag leaves that tag as it is, and the summary says so instead of "NOT installed".
+   */
+  recordedProviders?: readonly ProviderId[]
 }): string {
   const { plan, apply, verify } = input
   const requiresManual = apply.requiresManual ?? []
@@ -298,7 +303,7 @@ export function renderApplied(input: {
         ...steps,
         "",
         doneLine,
-        ...(!hasPixel && hasServerLane ? ["   Browser pixel NOT installed."] : []),
+        ...(!hasPixel && hasServerLane ? [browserTagLine(input.recordedProviders ?? [])] : []),
         ...adoptedLines(plan),
         "",
         "Next steps:",
@@ -329,6 +334,13 @@ export function renderApplied(input: {
 
 const HELPERS_LINE =
   "Your own code sends browser conversions to GA4, PostHog, Infinite and safe browser-only Meta events through the managed helpers (infiniteTrack, infiniteTrackThenNavigate, infiniteIdentify); they follow the visitor's consent at every call."
+
+/** A server-lane-only run: the browser tag it left alone, or that there is none. */
+function browserTagLine(recorded: readonly ProviderId[]): string {
+  if (recorded.length === 0) return "   Browser pixel NOT installed."
+  const labels = recorded.map((providerId) => providerLabels[providerId])
+  return `   Browser tag left as it is (${joinWithAnd(labels)}, as installed).`
+}
 
 function consentGuidance(artifacts: WorkspaceInstallArtifacts): string[] {
   if (artifacts.infinite?.consentMode === "required") {

@@ -9,6 +9,7 @@ import { HARNESS_HELP_LINES } from "./harness/args.js"
 import { runHarnessCommand } from "./harness/command.js"
 import { isSupportedFramework } from "./frameworks/index.js"
 import { inspectWorkspace } from "./inspect.js"
+import { readInstallManifest } from "./manifest.js"
 import { buildPackageManagerCommands, INSTRUMENT_VERSION } from "./package-manager.js"
 import { planInstallation } from "./plan.js"
 import {
@@ -495,7 +496,15 @@ function applyAndRenderHuman(ctx: ApplyContext): number {
     allowDirty: ctx.allowDirty
   })
   const verifyResult = verifyInstallation({ root: ctx.root, files: managedFilesOfRun(ctx.plan, applyResult.requiresManual) })
-  console.log(renderApplied({ inspect: ctx.inspect, plan: ctx.plan, apply: applyResult, verify: verifyResult }))
+  console.log(
+    renderApplied({
+      inspect: ctx.inspect,
+      plan: ctx.plan,
+      apply: applyResult,
+      verify: verifyResult,
+      recordedProviders: readInstallManifest(ctx.root)?.providers ?? []
+    })
+  )
   printAppliedServerLaneBrief(ctx.plan, applyResult)
   return completionExitCode(applyResult.requiresManual, verifyResult, ctx.allowManual)
 }

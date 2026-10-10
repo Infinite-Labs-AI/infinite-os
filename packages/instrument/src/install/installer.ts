@@ -446,8 +446,9 @@ export class WizardInstaller implements Installer {
       const resolvedKeys: ResolvedKeys = { artifacts, sources: {} }
       for (const tool of ["infinite", "ga4", "posthog", "meta"] as const) if (artifacts[tool]) resolvedKeys.sources[tool] = "infinite-connection"
       const classifications = classifyPhase({ manifest: phase.manifest, detected: phase.detected, keys: resolvedKeys, adoptExisting: true, serverLane, improve: {} })
-      // A dry plan of the connected / approved tools only: apply adds back the tools the receipt records.
-      const result = planPhase({ root: scan.root, inspect: phase.inspect, classifications, keys: resolvedKeys, workspaceId: wizardInstallWorkspaceId(this.options.repoFingerprint), serverLane, deferUnmanagedNextConfig: true, receiptToolsKeptAtApply: true })
+      // A dry plan of the connected / approved tools only: apply adds back the WIZARD_KEPT_TOOLS the receipt
+      // records, so only a recorded tool it cannot keep (X) is refused here, before anything is approved.
+      const result = planPhase({ root: scan.root, inspect: phase.inspect, classifications, keys: resolvedKeys, workspaceId: wizardInstallWorkspaceId(this.options.repoFingerprint), serverLane, deferUnmanagedNextConfig: true, receiptToolsKeptAtApply: WIZARD_KEPT_TOOLS })
       scan.ownerWiring = previewOwnerWiring({ root: scan.root, appRoot: scan.appRoot, framework: scan.framework, plan: result.plan })
       return result.failure && !result.nothingToInstall ? result.failure.message : null
     } catch (error) {
@@ -480,7 +481,7 @@ export class WizardInstaller implements Installer {
       plan.lines.find((entry) => entry.kind === "install_provider" && (entry.id === `install_provider:${tool}` || entry.id.startsWith(`install_provider:${tool}:`)))
     const previous = scan.manifest
     let artifacts: WizardInstallArtifacts = { ...(all.productionHosts ? { productionHosts: all.productionHosts } : {}) }
-    for (const tool of ["infinite", "ga4", "posthog", "meta"] as const) {
+    for (const tool of WIZARD_KEPT_TOOLS) {
       const lineForTool = installLine(tool)
       if (lineForTool && approved.has(lineForTool.id) && all[tool]) {
         ;(artifacts as Record<string, unknown>)[tool] = all[tool]
@@ -1019,6 +1020,12 @@ export function siteServing(
         : null
   }
 }
+
+/**
+ * The tools the wizard manages: its apply keeps each one the receipt records (`keptArtifact`) when its
+ * update is not approved. Its dry plans skip the "never removes a recorded tool" check for these only.
+ */
+const WIZARD_KEPT_TOOLS = ["infinite", "ga4", "posthog", "meta"] as const
 
 /**
  * The artifact an already-managed tool keeps when its update was not approved: exactly the public ids

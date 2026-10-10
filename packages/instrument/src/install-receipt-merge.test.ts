@@ -490,6 +490,10 @@ describe("install receipt merge: a re-run never silently removes an installed to
 
     const code = await runCli(["install", "--root", root, "--server-lane", "--workspace", WORKSPACE, "--yes"])
     expect(code).toBe(0)
+    // The summary names the tag it left alone; it never says the pixel is "NOT installed".
+    const out = logSpy.mock.calls.map((call) => String(call[0])).join("\n")
+    expect(out).toContain("Browser tag left as it is (Google Analytics, PostHog, Meta Pixel, and Infinite, as installed).")
+    expect(out).not.toContain("Browser pixel NOT installed.")
 
     for (const [file, contents] of tagBefore) expect(readFileSync(join(root, file), "utf8")).toBe(contents)
     const merged = readInstallManifest(root)!

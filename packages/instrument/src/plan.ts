@@ -51,11 +51,13 @@ export interface PlanInstallationOptions {
   laneOnly?: boolean
   /**
    * The wizard's DRY plans only (the plan screen's blocker check and the install preflight): they plan the
-   * connected / approved tools alone, and the wizard's apply then adds back every tool the receipt records
-   * (`keptArtifact`), or fails naming it. The "never removes a recorded tool" check belongs to that real
-   * plan, so a dry plan skips it instead of reporting a removal the apply never makes.
+   * connected / approved tools alone, and the wizard's apply then adds back these tools when the receipt
+   * records them (`keptArtifact`), or fails naming one. A dry plan skips the "never removes a recorded tool"
+   * check for THESE tools only, instead of reporting a removal the apply never makes. A recorded tool the
+   * apply cannot keep (X: the wizard never manages it) is still refused here, on the plan screen, before
+   * anything is approved, never first at apply.
    */
-  receiptToolsKeptAtApply?: boolean
+  receiptToolsKeptAtApply?: readonly ProviderId[]
 }
 
 function selectedProviders(artifacts: WorkspaceInstallArtifacts): ProviderId[] {
@@ -197,12 +199,14 @@ export function planInstallation(options: PlanInstallationOptions): InstallPlan 
   // tool instead: they hold no consent mode, proxy, hosts or X tags, so the page would change silently.
   if (
     pixelWanted &&
-    !options.receiptToolsKeptAtApply &&
     previousManifest &&
     previousManifest.appRoot === inspectResult.appRoot &&
     previousManifest.framework === inspectResult.framework
   ) {
-    const dropped = previousManifest.providers.filter((providerId) => !requestedProviders.includes(providerId))
+    const keptAtApply = options.receiptToolsKeptAtApply ?? []
+    const dropped = previousManifest.providers.filter(
+      (providerId) => !requestedProviders.includes(providerId) && !keptAtApply.includes(providerId)
+    )
     if (dropped.length > 0) blockers.push(droppedProvidersBlocker(dropped))
   }
   const configOwnership = appRelativeConfigOwnership(
@@ -336,7 +340,7 @@ export function planInstallation(options: PlanInstallationOptions): InstallPlan 
 const keepFlags: Record<ProviderId, string> = {
   ga4: "--ga4-measurement-id",
   posthog: "--posthog-project-key with --posthog-api-host",
-  x: "--x-pixel-id",
+  x: "--x-pixel-id with its --x-event-tag-id values",
   meta: "--meta-pixel-id",
   infinite: "--infinite-site-source-key with its hosts and consent mode"
 }
@@ -347,7 +351,10 @@ function droppedProvidersBlocker(dropped: readonly ProviderId[]): string {
   const it = dropped.length === 1 ? "it" : "them"
   return (
     `This install would remove ${names} from your site: .infinite/install.json records ${it} as installed, and this run does not carry ${dropped.length === 1 ? "its" : "their"} public ${dropped.length === 1 ? "id" : "ids"}. ` +
-    `Nothing was changed. To keep ${it}, give this run ${dropped.length === 1 ? "its id" : "their ids"} too (${dropped.map((providerId) => keepFlags[providerId]).join("; ")}, or an --artifact-file that carries ${it}), or re-run the setup wizard (npx infinite-tag). ` +
+    `Nothing was changed. To keep ${it}, run npx infinite-tag install with ${dropped.length === 1 ? "its id" : "their ids"} too (${dropped.map((providerId) => keepFlags[providerId]).join("; ")}, or an --artifact-file that carries ${it})${
+      // The setup wizard keeps every tool it manages; it never manages X, so it cannot keep an X pixel.
+      dropped.includes("x") ? "" : ", or re-run the setup wizard (npx infinite-tag)"
+    }. ` +
     `To remove ${it}, run npx infinite-tag uninstall, then install again without ${it}.`
   )
 }
