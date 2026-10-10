@@ -4,7 +4,7 @@ import { createInterface } from "node:readline"
 import { resolve } from "node:path"
 import { fileURLToPath } from "node:url"
 
-import { applyInstallation } from "./apply.js"
+import { applyInstallation, managedFilesOfRun } from "./apply.js"
 import { HARNESS_HELP_LINES } from "./harness/args.js"
 import { runHarnessCommand } from "./harness/command.js"
 import { isSupportedFramework } from "./frameworks/index.js"
@@ -490,7 +490,7 @@ function applyAndRenderHuman(ctx: ApplyContext): number {
     plan: ctx.plan,
     allowDirty: ctx.allowDirty
   })
-  const verifyResult = verifyInstallation({ root: ctx.root })
+  const verifyResult = verifyInstallation({ root: ctx.root, files: managedFilesOfRun(ctx.plan, applyResult.requiresManual) })
   console.log(renderApplied({ inspect: ctx.inspect, plan: ctx.plan, apply: applyResult, verify: verifyResult }))
   printAppliedServerLaneBrief(ctx.plan, applyResult)
   return completionExitCode(applyResult.requiresManual, verifyResult, ctx.allowManual)
@@ -880,7 +880,7 @@ export async function runCli(argv = process.argv.slice(2)): Promise<number> {
             plan,
             allowDirty: parsed.allowDirty
           })
-          const verifyResult = verifyInstallation({ root })
+          const verifyResult = verifyInstallation({ root, files: managedFilesOfRun(plan, applyResult.requiresManual) })
           printResult(parsed, {
             inspect,
             plan,

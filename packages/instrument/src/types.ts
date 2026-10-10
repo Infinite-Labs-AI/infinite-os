@@ -414,6 +414,12 @@ export interface InstallManifest {
   runId?: string
   appRoot: string
   framework: SupportedFramework
+  /**
+   * Set once the framework adapter wrote the browser tag (its managed block / module), so uninstall runs the
+   * adapter's reversal even when `providers` is empty (helpers beside an ADOPTED tag) and a lane or edits
+   * share the receipt. Absent on receipts written before 0.13.1: uninstall then infers it as it always did.
+   */
+  browserTag?: true
   providers: ProviderId[]
   files: string[]
   envKeys: string[]

@@ -150,7 +150,13 @@ export function uninstallInstallation(options: UninstallInstallationOptions): Un
   // A server-lane-only manifest (no providers) never ran the pixel adapter, so it has nothing
   // to reverse there; the lane's own reversal below is hash-gated per file.
   // An edits-only receipt (the wizard improved adopted tags and installed nothing) has no pixel wiring either.
-  const runAdapter = manifest.providers.length > 0 || (!manifest.serverLane && (manifest.edits ?? []).length === 0)
+  // `browserTag` is the positive record that the adapter wrote the tag (the conversion helpers beside an
+  // ADOPTED tag leave `providers` empty, and their managed files may also be edit or lane files); receipts
+  // written before it existed fall back to the inference above.
+  const runAdapter =
+    manifest.browserTag === true ||
+    manifest.providers.length > 0 ||
+    (!manifest.serverLane && (manifest.edits ?? []).length === 0)
   const adapter = getFrameworkAdapter(manifest.framework)
   if (runAdapter && !adapter?.uninstall) {
     throw new Error(`No uninstall implementation is registered for ${manifest.framework}.`)

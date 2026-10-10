@@ -9,6 +9,7 @@ import {
 } from "./frameworks/shared.js"
 import { isEditRecordShape } from "./install/edits.js"
 import { providerInstallEvidence } from "./provider-evidence.js"
+import { SERVER_LANE_SECRET_ENV, SERVER_LANE_SOURCE_KEY_ENV } from "./server-lane/helpers.js"
 import type { InstallManifest, ProviderId, SupportedFramework } from "./types.js"
 
 export const installManifestRelativePath = ".infinite/install.json"
@@ -95,7 +96,8 @@ function isInstallManifestShape(value: unknown): value is InstallManifest {
     (candidate.configOwnership === undefined || isConfigOwnershipShape(candidate.configOwnership)) &&
     (candidate.serverLane === undefined || isServerLaneManifestShape(candidate.serverLane)) &&
     (candidate.edits === undefined || (Array.isArray(candidate.edits) && candidate.edits.every(isEditRecordShape))) &&
-    (candidate.ids === undefined || isManifestIdsShape(candidate.ids))
+    (candidate.ids === undefined || isManifestIdsShape(candidate.ids)) &&
+    (candidate.browserTag === undefined || candidate.browserTag === true)
   )
 }
 
@@ -210,6 +212,126 @@ export function writeInstallManifestIfChanged(
     changed: true,
     manifestPath
   }
+}
+
+/** One receipt describes one app: a run for another app root or framework is refused before it writes anything. */
+export function assertReceiptDescribesApp(
+  previous: InstallManifest | null,
+  run: Pick<InstallManifest, "appRoot" | "framework">
+): void {
+  if (!previous || (previous.appRoot === run.appRoot && previous.framework === run.framework)) return
+  throw new Error(
+    `Refusing to record this install: ${installManifestRelativePath} records a ${previous.framework} install at "${previous.appRoot}"; this run installs ${run.framework} at "${run.appRoot}". One receipt describes one app: uninstall the earlier install first (npx infinite-tag uninstall).`
+  )
+}
+
+/** Which halves of the install THIS run planned, and so owns in the receipt it writes. */
+export interface InstallReceiptScope {
+  /** The browser tag (providers, its managed files, manual wiring) was planned and rendered. */
+  browser: boolean
+  /** The server lane was planned and written. */
+  serverLane: boolean
+  /**
+   * Lane files this run's plan leaves to the customer (`manual`: their own file now sits there). An
+   * earlier record of them is dropped, so uninstall never touches the customer's file.
+   */
+  laneDisowned?: readonly string[]
+}
+
+const SERVER_LANE_ENV_KEY_SET = new Set<string>([SERVER_LANE_SOURCE_KEY_ENV, SERVER_LANE_SECRET_ENV])
+
+/**
+ * ONE receipt per repo: a run merges what it did into the receipt already there, never replaces it.
+ * (`install --server-lane` after the wizard's browser tag once replaced the tag's record, so uninstall
+ * would have left the tag behind and doctor would have seen no tag.) The rules, the same ones the
+ * wizard's re-runs follow (`WizardInstaller.writeReceipt` builds on the current receipt, its edits are
+ * kept oldest first, its ids stand unless this run emits new ones):
+ *
+ *  - files, contentHashes, configOwnership: the union; this run's entry wins for every path it wrote.
+ *    Earlier entries come first (stable, so an identical re-run writes nothing). The post-install check
+ *    hash-verifies only this run's files (`managedFilesOfRun`): earlier entries are carried, not re-verified.
+ *  - envKeys: each half's keys from the run that last planned that half (a dropped provider's keys go).
+ *  - edits: kept in order, this run's new records appended (by id), so uninstall still walks them newest first.
+ *  - providers, requiresManual: this run's when it planned the browser tag (what the page now carries),
+ *    else the earlier receipt's.
+ *  - ids: this run's, whole, when it rendered the browser tag (a dropped tool's id goes); else the earlier receipt's.
+ *  - workspaceId: the earlier receipt's (the install that created the receipt).
+ *  - runId, managedCapture: only the wizard writes them; kept unless this run carries its own.
+ *  - browserTag: once the browser adapter wrote the tag, it stays recorded (uninstall runs its reversal); a
+ *    pre-marker receipt gets it from the old inference before a lane is merged in.
+ *  - serverLane: this run's when it planned the lane (its `created` files unioned with the earlier
+ *    record's, minus any the plan now leaves to the customer), else the earlier receipt's.
+ *
+ * One receipt describes one app: a different app root or framework is refused, never silently merged.
+ */
+export function mergeInstallManifest(
+  previous: InstallManifest | null,
+  run: InstallManifest,
+  scope: InstallReceiptScope
+): InstallManifest {
+  if (!previous) return run
+  assertReceiptDescribesApp(previous, run)
+  const browser = scope.browser ? run : previous
+  const disowned = new Set(scope.laneDisowned ?? [])
+  const kept = (path: string): boolean => !disowned.has(path)
+  // This run's lane record, keeping every whole file an earlier run's lane record lists as created (the
+  // wizard's server-events handoff is one): uninstall removes exactly what `created` lists.
+  const laneCreated = [...new Set([...(previous.serverLane?.created ?? []), ...(run.serverLane?.created ?? [])])].filter(kept)
+  const lane =
+    scope.serverLane && run.serverLane
+      ? { ...run.serverLane, ...(laneCreated.length > 0 ? { created: laneCreated } : {}) }
+      : previous.serverLane
+  const configOwnership = Object.fromEntries(
+    Object.entries({ ...previous.configOwnership, ...run.configOwnership }).filter(([path]) => kept(path))
+  )
+  const contentHashes = Object.fromEntries(
+    Object.entries({ ...previous.contentHashes, ...run.contentHashes }).filter(([path]) => kept(path))
+  )
+  const laneKeys = (manifest: InstallManifest) => manifest.envKeys.filter((key) => SERVER_LANE_ENV_KEY_SET.has(key))
+  const browserKeys = (manifest: InstallManifest) => manifest.envKeys.filter((key) => !SERVER_LANE_ENV_KEY_SET.has(key))
+  const envKeys = [
+    ...new Set([
+      ...browserKeys(scope.browser ? run : previous),
+      ...laneKeys(scope.serverLane ? run : previous)
+    ])
+  ]
+  const known = new Set((previous.edits ?? []).map((edit) => edit.id))
+  const edits = [...(previous.edits ?? []), ...(run.edits ?? []).filter((edit) => !known.has(edit.id))]
+  // A run that rendered the browser tag says exactly which ids the page carries now (a dropped tool's id
+  // goes); a lane-only run leaves the earlier ids whole.
+  const ids = scope.browser ? (run.ids ?? previous.ids) : (previous.ids ?? run.ids)
+  const managedCapture = run.managedCapture ?? previous.managedCapture
+  const runId = run.runId ?? previous.runId
+  const browserTag = previous.browserTag === true || legacyBrowserTag(previous) || run.browserTag === true
+  return {
+    ...(managedCapture ? { managedCapture } : {}),
+    workspaceId: previous.workspaceId,
+    ...(runId ? { runId } : {}),
+    appRoot: run.appRoot,
+    framework: run.framework,
+    ...(browserTag ? { browserTag: true as const } : {}),
+    providers: browser.providers,
+    files: [...new Set([...previous.files, ...run.files])].filter(kept),
+    envKeys,
+    contentHashes,
+    ...(Object.keys(configOwnership).length > 0 ? { configOwnership } : {}),
+    ...(lane ? { serverLane: lane } : {}),
+    ...(browser.requiresManual && browser.requiresManual.length > 0 ? { requiresManual: browser.requiresManual } : {}),
+    ...(edits.length > 0 ? { edits } : {}),
+    ...(ids ? { ids } : {}),
+    wiringVersion: run.wiringVersion,
+    verifiedAt: run.verifiedAt
+  }
+}
+
+/**
+ * A receipt written before `browserTag` existed (0.13.0 and earlier): the adapter ran exactly when the old
+ * uninstall inference held on it. Stamped while merging, BEFORE a lane joins the receipt: with a lane in
+ * it the inference would conclude the adapter never ran and uninstall would leave the tag behind.
+ */
+function legacyBrowserTag(previous: InstallManifest): boolean {
+  if (previous.browserTag !== undefined) return false
+  return previous.providers.length > 0 || (!previous.serverLane && (previous.edits ?? []).length === 0)
 }
 
 export function computeContentHashes(root: string, files: string[]): Record<string, string> {

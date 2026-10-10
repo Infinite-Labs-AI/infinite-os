@@ -686,9 +686,10 @@ export class WizardInstaller implements Installer {
         warnings.push("No local build check is available; the pull request's own checks will be the judge.")
       }
 
-      // 5. the receipt: the earlier runs' edits carried over, this run's edits, and the public ids the
-      // page now carries (this run's approvals plus every kept tool)
-      this.writeReceipt(root, scan, workspaceId, edits, manifestIdsFor(artifacts), carriedEdits)
+      // 5. the receipt: this run's edits and the public ids the page now carries (this run's approvals plus
+      // every kept tool). The earlier runs' edits are already in it: the managed apply merges into the
+      // receipt it finds (`mergeInstallManifest`), never replaces it.
+      this.writeReceipt(root, scan, workspaceId, edits, manifestIdsFor(artifacts))
       if (managedCapture) {
         const receipt = readInstallManifest(root)
         if (!receipt) throw new Error("The managed capture has no install receipt")
@@ -901,9 +902,7 @@ export class WizardInstaller implements Installer {
     scan: WizardScanResult,
     workspaceId: string,
     edits: WizardEditRecord[],
-    ids: InstallManifest["ids"] | null,
-    /** An earlier run's records the managed apply's fresh manifest does not carry (kept, oldest first). */
-    carried: readonly WizardEditRecord[] = []
+    ids: InstallManifest["ids"] | null
   ): void {
     const current = readInstallManifest(root)
     const base: InstallManifest =
@@ -920,11 +919,10 @@ export class WizardInstaller implements Installer {
         verifiedAt: null
       } satisfies InstallManifest)
     const prior = [...(base.edits ?? [])]
-    for (const edit of carried) if (!prior.some((entry) => entry.id === edit.id)) prior.push(edit)
     const known = new Set(prior.map((edit) => edit.id))
     const fresh = edits.filter((edit) => !known.has(edit.id))
     // Nothing installed and nothing edited: no receipt is created for an install that changed nothing.
-    if (!current && fresh.length === 0 && carried.length === 0) return
+    if (!current && fresh.length === 0) return
     cacheEditBefores(root, fresh)
     const merged = [...prior, ...fresh]
     if (merged.length === 0 && ids === null && current) return
