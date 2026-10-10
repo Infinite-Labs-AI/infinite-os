@@ -250,7 +250,13 @@ npx infinite-tag@latest install \
 `~/.infinite/artifacts/<workspace-id>.json`. A bare install discovers a single
 saved file, or `--workspace` selects one when several exist. A workspace ID is
 manifest ownership only: it never fabricates a source key or enables Infinite
-collection.
+collection. With `--server-lane` and no browser flag, a saved file configures
+the server lane only and the browser tag is left exactly as it is.
+
+A later install never removes a tool that `.infinite/install.json` records as
+installed. A run that would re-render the browser tag without an installed
+tool's id (a saved file that holds only the Infinite source, say) is refused
+and names the tool; pass its id too, or run `uninstall` first to remove it.
 
 Infinite first-party collection has no implicit consent mode. Every new install
 must explicitly choose `required` or `not-required`. A bare interactive install
