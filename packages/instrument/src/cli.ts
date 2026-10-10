@@ -356,7 +356,11 @@ function printHelp(): void {
       "When no artifact flags and no --artifact-file are given, plan/apply/install",
       "auto-discover the file `infinite setup` saved under ~/.infinite/artifacts/",
       "(<workspace>.json with --workspace; a single saved file otherwise, adopting",
-      "its workspace id). Explicit flags always win.",
+      "its workspace id). Explicit flags always win. With --server-lane and no browser",
+      "flag, the saved file configures the server lane only: the browser tag is left as it is.",
+      "",
+      "A re-run never removes a tool .infinite/install.json records as installed: a run that",
+      "does not carry an installed tool's id is refused. To remove a tool, uninstall first.",
       "",
       ...HARNESS_HELP_LINES
     ].join("\n")
@@ -716,6 +720,18 @@ export async function runCli(argv = process.argv.slice(2)): Promise<number> {
       parsed.infiniteConsentMode !== undefined
     const commandUsesArtifacts =
       parsed.command === "plan" || parsed.command === "apply" || parsed.command === "install"
+    // `--server-lane` with no browser input of its own (no artifact flag, no --artifact-file, no flag that
+    // changes the browser tag) is a lane-only run: a discovered saved file configures the lane and never
+    // re-renders the browser tag. The README's `install --server-lane --workspace <id> --yes` once rebuilt
+    // the tag from a saved file holding only the Infinite source and stripped the tools the wizard installed.
+    const changesBrowserTag =
+      parsed.posthogProxy ||
+      parsed.posthogUiHost !== undefined ||
+      parsed.infiniteDownloadDestinationPath !== undefined ||
+      parsed.infiniteAutocapture !== undefined ||
+      parsed.metaAdvancedMatching !== undefined ||
+      parsed.infiniteAllowAutomation
+    const laneOnly = parsed.serverLane && !hasExplicitArtifacts && !changesBrowserTag
     if (commandUsesArtifacts && !hasExplicitArtifacts) {
       const discovered = discoverWorkspaceArtifacts({
         workspaceId: parsed.workspaceId,
@@ -731,7 +747,7 @@ export async function runCli(argv = process.argv.slice(2)): Promise<number> {
         console.error(
           `Discovered saved public artifacts: ${discovered.filePath} (providers: ${discovered.providers.join(", ")}${
             adoptedWorkspaceId !== undefined ? `; workspace: ${adoptedWorkspaceId}` : ""
-          })`
+          })${laneOnly ? ". --server-lane alone: they configure the server lane only; the browser tag is left as it is." : ""}`
         )
       }
     }
@@ -786,7 +802,8 @@ export async function runCli(argv = process.argv.slice(2)): Promise<number> {
           workspaceId: parsed.workspaceId,
           packageManager: parsed.packageManager,
           artifacts,
-          serverLane: parsed.serverLane
+          serverLane: parsed.serverLane,
+          laneOnly
         })
         if (parsed.json) {
           printResult(parsed, plan)
@@ -820,7 +837,8 @@ export async function runCli(argv = process.argv.slice(2)): Promise<number> {
           workspaceId: parsed.workspaceId,
           packageManager: parsed.packageManager,
           artifacts,
-          serverLane: parsed.serverLane
+          serverLane: parsed.serverLane,
+          laneOnly
         })
         if (parsed.json) {
           const result = applyInstallation({
@@ -860,7 +878,8 @@ export async function runCli(argv = process.argv.slice(2)): Promise<number> {
           workspaceId: parsed.workspaceId,
           packageManager: parsed.packageManager,
           artifacts,
-          serverLane: parsed.serverLane
+          serverLane: parsed.serverLane,
+          laneOnly
         })
 
         // Machine mode: preserve the exact legacy JSON contract.

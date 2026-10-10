@@ -42,6 +42,20 @@ export interface PlanInstallationOptions {
   improve?: Partial<Record<ProviderId, readonly ImproveLine[]>>
   /** The wizard: an unmanaged Next config without the rewrites becomes an agent job, not a blocker (review I1 P1-2). */
   deferUnmanagedNextConfig?: boolean
+  /**
+   * With `serverLane`: plan the lane ONLY. The artifacts then configure the lane (its source key, hosts,
+   * API origin) and nothing else: no provider is requested, so the browser tag is not re-planned. The CLI
+   * sets it for `--server-lane` with no browser artifact input, where the artifacts were only DISCOVERED
+   * (the file `infinite setup` saved), so that file can never re-render a tag another run installed.
+   */
+  laneOnly?: boolean
+  /**
+   * The wizard's DRY plans only (the plan screen's blocker check and the install preflight): they plan the
+   * connected / approved tools alone, and the wizard's apply then adds back every tool the receipt records
+   * (`keptArtifact`), or fails naming it. The "never removes a recorded tool" check belongs to that real
+   * plan, so a dry plan skips it instead of reporting a removal the apply never makes.
+   */
+  receiptToolsKeptAtApply?: boolean
 }
 
 function selectedProviders(artifacts: WorkspaceInstallArtifacts): ProviderId[] {
@@ -64,7 +78,7 @@ export function planInstallation(options: PlanInstallationOptions): InstallPlan 
     inspectWorkspace(options.root, {
       packageManager: options.packageManager
     })
-  const requestedProviders = selectedProviders(options.artifacts)
+  const requestedProviders = options.laneOnly ? [] : selectedProviders(options.artifacts)
   const assumptions = [...inspectResult.assumptions]
   const blockers = [...inspectResult.blockers]
 
@@ -167,7 +181,7 @@ export function planInstallation(options: PlanInstallationOptions): InstallPlan 
   // empty managed block.
   // The managed conversion helpers (decisions 9 and 13) are their own reason to write the managed
   // block: they serve ADOPTED tools too, so an all-adopted plan that asked for them still writes it.
-  const helpersWanted = conversionHelpersWanted(options.artifacts)
+  const helpersWanted = !options.laneOnly && conversionHelpersWanted(options.artifacts)
   const pixelWanted =
     providers.length > 0 ||
     helpersWanted ||
@@ -176,6 +190,21 @@ export function planInstallation(options: PlanInstallationOptions): InstallPlan 
   const frameworkAdapter = getFrameworkAdapter(inspectResult.framework)
   const infiniteProxy = infiniteProxySpec(options.artifacts.infinite)
   const previousManifest = readInstallManifest(options.root)
+  // The browser tag is rendered from THIS run's artifacts alone, so a tool the receipt records as installed
+  // that this run does not carry would be taken off the page. That is never done implicitly (a saved
+  // artifacts file holding only the Infinite source once stripped a site's GA4, PostHog and Meta): the run
+  // is refused, and removing a tool stays the explicit `uninstall`. The receipt's ids cannot rebuild the
+  // tool instead: they hold no consent mode, proxy, hosts or X tags, so the page would change silently.
+  if (
+    pixelWanted &&
+    !options.receiptToolsKeptAtApply &&
+    previousManifest &&
+    previousManifest.appRoot === inspectResult.appRoot &&
+    previousManifest.framework === inspectResult.framework
+  ) {
+    const dropped = previousManifest.providers.filter((providerId) => !requestedProviders.includes(providerId))
+    if (dropped.length > 0) blockers.push(droppedProvidersBlocker(dropped))
+  }
   const configOwnership = appRelativeConfigOwnership(
     previousManifest?.configOwnership,
     inspectResult.appRoot
@@ -302,6 +331,25 @@ export function planInstallation(options: PlanInstallationOptions): InstallPlan 
         }
       : {})
   }
+}
+
+const keepFlags: Record<ProviderId, string> = {
+  ga4: "--ga4-measurement-id",
+  posthog: "--posthog-project-key with --posthog-api-host",
+  x: "--x-pixel-id",
+  meta: "--meta-pixel-id",
+  infinite: "--infinite-site-source-key with its hosts and consent mode"
+}
+
+function droppedProvidersBlocker(dropped: readonly ProviderId[]): string {
+  const labels = dropped.map((providerId) => providerLabels[providerId])
+  const names = labels.length === 1 ? labels[0] : `${labels.slice(0, -1).join(", ")} and ${labels[labels.length - 1]}`
+  const it = dropped.length === 1 ? "it" : "them"
+  return (
+    `This install would remove ${names} from your site: .infinite/install.json records ${it} as installed, and this run does not carry ${dropped.length === 1 ? "its" : "their"} public ${dropped.length === 1 ? "id" : "ids"}. ` +
+    `Nothing was changed. To keep ${it}, give this run ${dropped.length === 1 ? "its id" : "their ids"} too (${dropped.map((providerId) => keepFlags[providerId]).join("; ")}, or an --artifact-file that carries ${it}), or re-run the setup wizard (npx infinite-tag). ` +
+    `To remove ${it}, run npx infinite-tag uninstall, then install again without ${it}.`
+  )
 }
 
 /** The plan carries the lane's shape; its blockers were merged into plan.blockers above. */

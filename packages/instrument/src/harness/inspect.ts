@@ -457,6 +457,8 @@ export interface BuildHarnessPlanInput {
   serverLane: boolean
   /** The wizard: an unmanaged Next config without the rewrites becomes an agent job (review I1 P1-2). */
   deferUnmanagedNextConfig?: boolean
+  /** The wizard's dry plans: the receipt's tools are added back at apply (see `PlanInstallationOptions`). */
+  receiptToolsKeptAtApply?: boolean
 }
 
 /** The improve lines carried by `improve` classifications, keyed by provider (for the plan's adopted list). */
@@ -510,7 +512,8 @@ export function buildHarnessPlan(input: BuildHarnessPlanInput): HarnessPlanResul
     artifacts,
     serverLane: input.serverLane,
     improve: improveLinesByProvider(input.classifications),
-    ...(input.deferUnmanagedNextConfig ? { deferUnmanagedNextConfig: true } : {})
+    ...(input.deferUnmanagedNextConfig ? { deferUnmanagedNextConfig: true } : {}),
+    ...(input.receiptToolsKeptAtApply ? { receiptToolsKeptAtApply: true } : {})
   })
   const nothingToInstall = plan.providers.length === 0 && !input.serverLane
   const blockers = plan.blockers.filter((blocker) => !(nothingToInstall && blocker === NO_ARTIFACTS_BLOCKER))

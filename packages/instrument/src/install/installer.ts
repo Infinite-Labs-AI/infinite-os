@@ -446,7 +446,8 @@ export class WizardInstaller implements Installer {
       const resolvedKeys: ResolvedKeys = { artifacts, sources: {} }
       for (const tool of ["infinite", "ga4", "posthog", "meta"] as const) if (artifacts[tool]) resolvedKeys.sources[tool] = "infinite-connection"
       const classifications = classifyPhase({ manifest: phase.manifest, detected: phase.detected, keys: resolvedKeys, adoptExisting: true, serverLane, improve: {} })
-      const result = planPhase({ root: scan.root, inspect: phase.inspect, classifications, keys: resolvedKeys, workspaceId: wizardInstallWorkspaceId(this.options.repoFingerprint), serverLane, deferUnmanagedNextConfig: true })
+      // A dry plan of the connected / approved tools only: apply adds back the tools the receipt records.
+      const result = planPhase({ root: scan.root, inspect: phase.inspect, classifications, keys: resolvedKeys, workspaceId: wizardInstallWorkspaceId(this.options.repoFingerprint), serverLane, deferUnmanagedNextConfig: true, receiptToolsKeptAtApply: true })
       scan.ownerWiring = previewOwnerWiring({ root: scan.root, appRoot: scan.appRoot, framework: scan.framework, plan: result.plan })
       return result.failure && !result.nothingToInstall ? result.failure.message : null
     } catch (error) {

@@ -7,9 +7,10 @@ import { cpSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writ
 import { tmpdir } from "node:os"
 import { dirname, join, relative } from "node:path"
 import { fileURLToPath } from "node:url"
-import { afterEach, describe, expect, it } from "vitest"
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import { applyInstallation } from "./apply.js"
+import { runCli } from "./cli.js"
 import { inspectWorkspace } from "./inspect.js"
 import { makeEditRecord } from "./install/edits.js"
 import { GENERATED_API_RECORD } from "./jobs/generated-api.js"
@@ -398,16 +399,18 @@ describe("install receipt merge: review round 1", () => {
     expect(readFileSync(join(root, entry), "utf8")).toBe(customer)
   })
 
-  it("b: a browser re-run without a provider drops that provider's env keys; the lane's stay", () => {
+  it("b: a browser re-run takes its own env keys whole; the lane's stay", () => {
+    // (A re-run can no longer drop a tool implicitly, see "a re-run never silently removes an installed
+    // tool" below; this run ADDS one, and the browser half's keys are still this run's, whole.)
     const root = copyFixture("next-app-router-basic")
-    apply(root, BROWSER_WORKSPACE, { infinite, ga4: { measurementId: "G-TEST123" } }, false)
-    const withGa4 = readInstallManifest(root)!.envKeys
+    apply(root, BROWSER_WORKSPACE, { infinite }, false)
+    const infiniteOnly = readInstallManifest(root)!.envKeys
     apply(root, LANE_WORKSPACE, {}, true)
-    const infiniteOnly = plan(root, BROWSER_WORKSPACE, { infinite }, false)
-    applyInstallation({ root, workspaceId: BROWSER_WORKSPACE, plan: infiniteOnly })
+    const withGa4 = plan(root, BROWSER_WORKSPACE, { infinite, ga4: { measurementId: "G-TEST123" } }, false)
+    applyInstallation({ root, workspaceId: BROWSER_WORKSPACE, plan: withGa4 })
     const envKeys = readInstallManifest(root)!.envKeys
-    expect(withGa4.length).toBeGreaterThan(0)
-    expect([...envKeys].sort()).toEqual([...new Set([...infiniteOnly.envKeys, "INFINITE_SITE_SOURCE_KEY", "INFINITE_SERVER_EVENT_SECRET"])].sort())
+    expect(withGa4.envKeys.length).toBeGreaterThan(infiniteOnly.length)
+    expect([...envKeys].sort()).toEqual([...new Set([...withGa4.envKeys, "INFINITE_SITE_SOURCE_KEY", "INFINITE_SERVER_EVENT_SECRET"])].sort())
   })
 })
 
@@ -431,15 +434,111 @@ describe("install receipt merge: review round 2", () => {
     expectTreeEquals(root, original)
   })
 
-  it("K: a browser re-run that drops a tool drops its id too (the run's ids are taken whole)", () => {
+  it("K: a browser re-run that changes a tool's id records the new id (the run's ids are taken whole)", () => {
     const root = copyFixture("next-app-router-basic")
     const posthog = { projectKey: "phc_test", apiHost: "/ingest", proxy: { path: "/ingest", assetsHost: "https://us-assets.i.posthog.com", ingestHost: "https://us.i.posthog.com" } }
     apply(root, BROWSER_WORKSPACE, { infinite, posthog }, false)
     expect(readInstallManifest(root)!.ids?.posthog).toEqual({ projectKey: "phc_test", apiHost: "/ingest" })
-    apply(root, BROWSER_WORKSPACE, { infinite }, false)
+    apply(root, BROWSER_WORKSPACE, { infinite, posthog: { ...posthog, projectKey: "phc_other" } }, false)
     const merged = readInstallManifest(root)!
-    expect(merged.providers).toEqual(["infinite"])
+    expect(merged.providers).toEqual(["posthog", "infinite"])
     expect(readFileSync(join(root, "lib/infinite-analytics.ts"), "utf8")).not.toContain("phc_test")
-    expect(merged.ids).toEqual({ ga4: [], posthog: null, meta: [], infinite: { siteSourceKey: infinite.siteSourceKey } })
+    expect(merged.ids).toEqual({ ga4: [], posthog: { projectKey: "phc_other", apiHost: "/ingest" }, meta: [], infinite: { siteSourceKey: infinite.siteSourceKey } })
+  })
+})
+
+// PR #15 follow-up (i): a later run must never SILENTLY take a tool off the page that the receipt records
+// as installed. The README's `install --server-lane --workspace <id> --yes` picks up the file `infinite
+// setup` saved (often the Infinite source alone) and used to re-render the browser tag from it, dropping
+// the GA4 / PostHog / Meta the wizard installed. Removing a tool is only ever `uninstall`.
+describe("install receipt merge: a re-run never silently removes an installed tool", () => {
+  const WORKSPACE = "ws_rerun_keeps_tools_test"
+  const ga4 = { measurementId: "G-TEST123" }
+  const posthog = { projectKey: "phc_test", apiHost: "https://us.i.posthog.com" }
+  const meta = { pixelId: "1234567890123456" }
+  let artifactsDir: string
+  let logSpy: ReturnType<typeof vi.spyOn>
+  let errorSpy: ReturnType<typeof vi.spyOn>
+
+  beforeEach(() => {
+    artifactsDir = mkdtempSync(join(tmpdir(), "instrument-receipt-merge-artifacts-"))
+    tempRoots.push(artifactsDir)
+    process.env.INFINITE_ARTIFACTS_DIR = artifactsDir
+    logSpy = vi.spyOn(console, "log").mockImplementation(() => {})
+    errorSpy = vi.spyOn(console, "error").mockImplementation(() => {})
+  })
+
+  afterEach(() => {
+    delete process.env.INFINITE_ARTIFACTS_DIR
+    logSpy.mockRestore()
+    errorSpy.mockRestore()
+  })
+
+  /** The browser tag with four tools, then the file `infinite setup` saved: the Infinite source alone. */
+  function wizardTagThenSavedInfiniteOnly(root: string): InstallManifest {
+    apply(root, WORKSPACE, { infinite, ga4, posthog, meta }, false)
+    const receipt = readInstallManifest(root)!
+    expect(receipt.providers).toEqual(["ga4", "posthog", "meta", "infinite"])
+    writeFileSync(join(artifactsDir, `${WORKSPACE}.json`), JSON.stringify({ workspaceId: WORKSPACE, infinite }))
+    return receipt
+  }
+
+  it("the README's install --server-lane --workspace <id> --yes adds the lane and leaves the browser tag and its record whole", async () => {
+    const root = copyFixture("next-app-router-basic")
+    const browser = wizardTagThenSavedInfiniteOnly(root)
+    const tagBefore = new Map(browser.files.map((file) => [file, readFileSync(join(root, file), "utf8")]))
+
+    const code = await runCli(["install", "--root", root, "--server-lane", "--workspace", WORKSPACE, "--yes"])
+    expect(code).toBe(0)
+
+    for (const [file, contents] of tagBefore) expect(readFileSync(join(root, file), "utf8")).toBe(contents)
+    const merged = readInstallManifest(root)!
+    expect(merged.providers).toEqual(browser.providers)
+    expect(merged.ids).toEqual(browser.ids)
+    for (const file of browser.files) expect(merged.contentHashes[file]).toBe(browser.contentHashes[file])
+    // The saved Infinite source still configures the lane.
+    expect(merged.serverLane?.mode).toBe("next-middleware")
+    expect(readFileSync(join(root, "lib/infinite-server-lane.ts"), "utf8")).toContain(infinite.siteSourceKey)
+  })
+
+  it("a plain browser install from a saved file that lacks installed tools is refused, naming them, and writes nothing", async () => {
+    const root = copyFixture("next-app-router-basic")
+    wizardTagThenSavedInfiniteOnly(root)
+    const before = snapshotTree(root)
+
+    const code = await runCli(["install", "--root", root, "--workspace", WORKSPACE, "--yes"])
+    expect(code).toBe(1)
+    const out = logSpy.mock.calls.map((call) => String(call[0])).join("\n")
+    expect(out).toMatch(/Google Analytics, PostHog and Meta Pixel/)
+    expect(out).toContain("npx infinite-tag uninstall")
+    expectTreeEquals(root, before)
+  })
+
+  it("a browser re-run that omits a recorded tool is a plan blocker, and apply refuses it before writing", () => {
+    const root = copyFixture("next-app-router-basic")
+    apply(root, BROWSER_WORKSPACE, { infinite, posthog }, false)
+    const before = snapshotTree(root)
+
+    const rerun = planInstallation({ root, inspect: inspectWorkspace(root), workspaceId: BROWSER_WORKSPACE, artifacts: { infinite }, serverLane: false })
+    expect(rerun.blockers.join(" ")).toMatch(/would remove PostHog[\s\S]*\.infinite\/install\.json records it as installed/)
+    expect(() => applyInstallation({ root, workspaceId: BROWSER_WORKSPACE, plan: rerun })).toThrow(/would remove PostHog/)
+    expectTreeEquals(root, before)
+  })
+
+  it("the same refusal holds with --server-lane when the run carries browser artifacts of its own", () => {
+    const root = copyFixture("next-app-router-basic")
+    apply(root, BROWSER_WORKSPACE, { infinite, ga4 }, false)
+    const rerun = planInstallation({ root, inspect: inspectWorkspace(root), workspaceId: BROWSER_WORKSPACE, artifacts: { infinite }, serverLane: true })
+    expect(rerun.blockers.join(" ")).toMatch(/would remove Google Analytics/)
+  })
+
+  it("a lane-only plan carries the lane's inputs but plans no browser tag", () => {
+    const root = copyFixture("next-app-router-basic")
+    apply(root, BROWSER_WORKSPACE, { infinite, ga4 }, false)
+    const lanePlan = planInstallation({ root, inspect: inspectWorkspace(root), workspaceId: BROWSER_WORKSPACE, artifacts: { infinite }, serverLane: true, laneOnly: true })
+    expect(lanePlan.blockers).toEqual([])
+    expect(lanePlan.providers).toEqual([])
+    expect(lanePlan.files).not.toContain("app/layout.tsx")
+    expect(lanePlan.serverLane?.mode).toBe("next-middleware")
   })
 })

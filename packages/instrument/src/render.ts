@@ -9,10 +9,12 @@ import type {
   InspectResult,
   InstallPlan,
   PosthogConfigSummary,
+  ProviderId,
   UninstallResult,
   VerifyResult,
   WorkspaceInstallArtifacts
 } from "./types.js"
+import { providerLabels } from "./types.js"
 
 const HEADER = "Infinite OS · analytics installer"
 const MANIFEST_REL = ".infinite/install.json"
@@ -85,11 +87,14 @@ function joinWithAnd(items: string[]): string {
   return `${items.slice(0, -1).join(", ")}, and ${items[items.length - 1]}`
 }
 
-/** The artifacts the plan will actually WRITE — adopted (already-present) providers removed. */
+/**
+ * The artifacts the plan will actually WRITE: the providers it installs. Adopted (already-present) providers
+ * are not among them, and neither is anything a lane-only plan carries only to configure the lane.
+ */
 function installedArtifacts(plan: InstallPlan): WorkspaceInstallArtifacts {
   const artifacts: WorkspaceInstallArtifacts = { ...plan.artifacts }
-  for (const entry of plan.adopted) {
-    delete artifacts[entry.provider]
+  for (const providerId of Object.keys(providerLabels) as ProviderId[]) {
+    if (!plan.providers.includes(providerId)) delete artifacts[providerId]
   }
   return artifacts
 }

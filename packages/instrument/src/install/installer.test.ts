@@ -320,3 +320,42 @@ describe("review fixes (O7 fix round)", () => {
   })
 })
 
+
+// PR #15 follow-up (i): the plan refuses a run that would take a recorded tool off the page. The wizard's
+// apply adds back every tool the receipt records (`keptArtifact`), so its DRY plans (the plan screen's
+// blocker check, the install preflight) must not report a removal that apply never makes.
+describe("a wizard re-run keeps the receipt's tools, and its dry plans say no removal", () => {
+  async function installAll(root: string): Promise<void> {
+    const subject = installer()
+    const scan = await subject.scan({ root, hosting: fakeHosting() })
+    const plan = subject.buildPlan(scan, fakeKeys(), fakeBefore(), [])
+    expect(((await subject.apply(plan, approveAll(plan))) as WizardApplyResult).ok).toBe(true)
+  }
+
+  it("GA4 no longer connected: no install-blocked line, no preflight refusal, and GA4 stays on the page", async () => {
+    const root = makeSite({ "index.html": STATIC_HTML })
+    await installAll(root)
+    const subject = installer()
+    const scan = await subject.scan({ root, hosting: fakeHosting() })
+    const plan = subject.buildPlan(scan, fakeKeys({ ga4: { status: "not_connected", propertyLabel: null, streams: [] } }), fakeBefore(), [])
+    expect(plan.lines.map((line) => line.id)).not.toContain("user_action:install_blocked")
+    expect(subject.preflight(plan, approveAll(plan))).toBeNull()
+    expect(((await subject.apply(plan, approveAll(plan))) as WizardApplyResult).ok).toBe(true)
+    expect(read(root, "index.html")).toContain(IDS.ga4)
+    expect(readInstallManifest(root)!.providers).toContain("ga4")
+  })
+
+  it("'Update GA4' declined: no preflight refusal, and GA4 stays on the page", async () => {
+    const root = makeSite({ "index.html": STATIC_HTML })
+    await installAll(root)
+    const subject = installer()
+    const scan = await subject.scan({ root, hosting: fakeHosting() })
+    const plan = subject.buildPlan(scan, fakeKeys(), fakeBefore(), [])
+    const answer = approveAll(plan)
+    const ga4Line = `install_provider:ga4:${IDS.ga4}`
+    const declined = { ...answer, approved: answer.approved.filter((id) => id !== ga4Line), declined: [ga4Line] }
+    expect(subject.preflight(plan, declined)).toBeNull()
+    expect(((await subject.apply(plan, declined)) as WizardApplyResult).ok).toBe(true)
+    expect(read(root, "index.html")).toContain(IDS.ga4)
+  })
+})
