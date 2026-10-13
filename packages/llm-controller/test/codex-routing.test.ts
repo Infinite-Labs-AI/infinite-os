@@ -701,7 +701,7 @@ describe("union turn: the native live Meta Graph reads, whatever app tools the t
     list_meta_assets: "list_meta_entities"
   };
   // The desktop's general-profile discovery tools (1bu-1 capability-discovery.ts GENERAL_PROFILE_REQUIRED_TOOL_NAMES).
-  const DISCOVERY = ["capability_search", "capability_describe", "capability_call", "skill_search", "skill_load"];
+  const DISCOVERY = ["capability_search", "capability_describe", "capability_call", "skill_load"];
   const CAPABILITY_CALL = app("capability_call");
   // The app tools a union turn can carry, and the sentence each live read's refusal then adds.
   const TURNS: Array<{ label: string; appTools: string[]; refusal: (id: string) => string }> = [
