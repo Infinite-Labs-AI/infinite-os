@@ -5,7 +5,7 @@
  * Key rule: no key may end in "token", contain "credential", or equal a host-private key.
  */
 // ---- contract body (vendored verbatim into 1bu-1; edit only in infinite-os) ----
-export const ANSWER_VIEW_CONTRACT_REVISION = 5 as const;   // rev 5: NumbersRowV1.creativeRef; rev 4: ImagesBodyV1.drawRunIds; rev 3: ChangeBodyV1.target.creativeRef + .path; ListBodyV1.nameLabel; RecordBodyV1.status; LeaderV1.detail; AnswerViewEnvelopeV1.scope.account; StateReasonV1.step
+export const ANSWER_VIEW_CONTRACT_REVISION = 5 as const;   // rev 5: NumbersRowV1.creativeRef; NumbersBodyV1.face; rev 4: ImagesBodyV1.drawRunIds; rev 3: ChangeBodyV1.target.creativeRef + .path; ListBodyV1.nameLabel; RecordBodyV1.status; LeaderV1.detail; AnswerViewEnvelopeV1.scope.account; StateReasonV1.step
 export const RESULT_VIEW_CAPABILITY = "result.view.v1" as const;
 export const CONFIRM_FIELDS_CAPABILITY = "confirm.fields.v1" as const;
 export const CONFIRM_STREAM_CAPABILITY = "confirm.stream.v1" as const;
@@ -134,6 +134,7 @@ export interface NumbersBodyV1 {
   layout: "kpis" | "table" | "series" | "steps" | "composite";
   currency: string | null; columns: ColumnV1[];
   rowLabel?: string;                                      // the row-label column's header ("Campaign"); rev 2
+  face?: string[];                                        // the row face: column keys a compact row shows, in order (the question's ask); the rest stay on the row's hover; Cmd+L draws it, the terminal ignores it; rev 5
   legs?: { settled: NumbersLegV1; today?: TodayLegV1 };   // required unless layout === "composite"; legs are NEVER summed
   leaders?: LeaderV1[];                                   // leaders per measure; never one winner without revenue
   sections?: SectionV1[]; verdictSource?: string; truncated?: TruncationV1;   // sections nest ONE level only

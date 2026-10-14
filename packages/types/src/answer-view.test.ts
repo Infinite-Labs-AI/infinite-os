@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import {
   ANSWER_VIEW_CONTRACT_REVISION, ANSWER_VIEW_KINDS, ANSWER_VIEW_LIMITS, ANSWER_VIEW_STATES, ARCHIVE_ASSET_ID_PATTERN,
-  type AnswerViewEnvelopeV1, type AnswerViewV1, type ChangeBodyV1, type ImagesBodyV1, type LeaderV1, type ListBodyV1, type NumbersRowV1, type RecordBodyV1,
+  type AnswerViewEnvelopeV1, type AnswerViewV1, type ChangeBodyV1, type ImagesBodyV1, type LeaderV1, type ListBodyV1, type NumbersBodyV1, type NumbersRowV1, type RecordBodyV1,
   type StateReasonV1, type TodayLegV1
 } from "./answer-view.js";
 const stripped = (k: string) => { const n = k.toLowerCase().replace(/[^a-z0-9]/g, "");
@@ -16,15 +16,31 @@ describe("answer view contract v1", () => {
     const bare: NumbersRowV1 = { id: "ad_2", label: "Demo C", cells: {} };
     expect("creativeRef" in bare).toBe(false);
     const src = readFileSync(new URL("./answer-view.ts", import.meta.url), "utf8");
-    expect(src).toMatch(/ANSWER_VIEW_CONTRACT_REVISION = 5 as const;\s+\/\/ rev 5: NumbersRowV1\.creativeRef; rev 4: /);
+    expect(src).toMatch(/ANSWER_VIEW_CONTRACT_REVISION = 5 as const;\s+\/\/ rev 5: NumbersRowV1\.creativeRef; NumbersBodyV1\.face; rev 4: /);
     expect(src).toMatch(/creativeRef\?: CreativeRefV1;.*the terminal ignores it; rev 5$/m);
+  });
+  it("revision 5: a numbers body may name its row face, the column keys a compact row shows (optional; the terminal ignores it)", () => {
+    expect(ANSWER_VIEW_CONTRACT_REVISION).toBe(5);
+    const body: NumbersBodyV1 = {
+      layout: "table", currency: "USD", face: ["clicks", "ctr", "spend"],
+      columns: [
+        { key: "spend", label: "Spent", unit: "money", factGroup: "a" },
+        { key: "clicks", label: "Clicks", unit: "count", factGroup: "a" },
+        { key: "ctr", label: "CTR", unit: "percent", factGroup: "a" },
+      ],
+      legs: { settled: { window: { from: "2026-10-12", to: "2026-10-13", tz: "UTC", label: "Oct 12–13" }, final: true, asOf: null, rows: [] } },
+    };
+    expect(body.face).toEqual(["clicks", "ctr", "spend"]);
+    expect(body.face!.every((key) => body.columns.some((column) => column.key === key))).toBe(true);
+    const src = readFileSync(new URL("./answer-view.ts", import.meta.url), "utf8");
+    expect(src).toMatch(/face\?: string\[\];.*the terminal ignores it; rev 5$/m);
   });
   it("revision 4: an images run made of other runs may name their run ids (optional; host-only)", () => {
     expect(ANSWER_VIEW_CONTRACT_REVISION).toBe(5);
     const body: ImagesBodyV1 = { runId: "clone-1", requested: 2, ready: 2, failed: 0, items: [], format: "png", aspectRatio: "4:5", model: "m", madeWith: "your_codex", drawRunIds: ["draw-1", "draw-2"] };
     expect(body.drawRunIds).toEqual(["draw-1", "draw-2"]);
     const src = readFileSync(new URL("./answer-view.ts", import.meta.url), "utf8");
-    expect(src).toMatch(/ANSWER_VIEW_CONTRACT_REVISION = 5 as const;\s+\/\/ rev 5: NumbersRowV1\.creativeRef; rev 4: ImagesBodyV1\.drawRunIds; rev 3: /);
+    expect(src).toMatch(/ANSWER_VIEW_CONTRACT_REVISION = 5 as const;\s+\/\/ rev 5: NumbersRowV1\.creativeRef; NumbersBodyV1\.face; rev 4: ImagesBodyV1\.drawRunIds; rev 3: /);
     expect(src).toMatch(/drawRunIds\?: string\[\];.*host-only; the terminal ignores it; rev 4$/m);
   });
   it("has 12 kinds and 24 states", () => {
