@@ -782,10 +782,18 @@ function genericOpenEndedRefinementSections(
         ] : [])
       ];
     }
+    // Name only the metric lookups the turn has (a round-2 union turn withholds describe_metric), as the prompt does.
+    // An empty list (open-core callers and tests that pass none) keeps both names.
+    const metricLookups = availableActionIds.length === 0
+      ? ["list_metrics", "describe_metric"]
+      : ["list_metrics", "describe_metric"].filter((name) =>
+          availableActionIds.some((id) => id === name || id.endsWith(`__${name}`))
+        );
+    const lookupHint = metricLookups.length > 0 ? `, or ${metricLookups.join("/")} if unsure` : "";
     return [
       "Metric-question refinement guidance:",
       "- The user asked for a specific metric or number, but you only have a source list so far.",
-      "- Do not stop to ask for a time range. Identify the metric (use the metric-aliases hint, or list_metrics/describe_metric if unsure) and run run_metric_query or run_breakdown_query over all available data, then state the assumed scope as a caveat and offer to narrow.",
+      `- Do not stop to ask for a time range. Identify the metric (use the metric-aliases hint${lookupHint}) and run run_metric_query or run_breakdown_query over all available data, then state the assumed scope as a caveat and offer to narrow.`,
       "- Only report a metric as unavailable after confirming it is not reachable under any alias."
     ];
   }

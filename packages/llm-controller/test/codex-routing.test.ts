@@ -1780,6 +1780,9 @@ describe("advisor rescue after a source list alone follows the app routing", () 
     "- Do not stop to ask for a time range. Identify the metric (use the metric-aliases hint, or list_metrics/describe_metric if unsure) and run run_metric_query or run_breakdown_query over all available data, then state the assumed scope as a caveat and offer to narrow.",
     "- Only report a metric as unavailable after confirming it is not reachable under any alias."
   ];
+  // A turn that carries neither metric lookup (the daemon retires both; a desktop before round 2 sends no twin):
+  // the rescue names only the aliases hint, as the prompt does.
+  const METRIC_RESCUE_NO_LOOKUP = METRIC_RESCUE.map((line) => line.replace(", or list_metrics/describe_metric if unsure", ""));
   const META_RESCUE = [
     "Metric-question refinement guidance:",
     "- The user asked for a Meta Ads number, but you only have a source list so far.",
@@ -1832,8 +1835,21 @@ describe("advisor rescue after a source list alone follows the app routing", () 
 
   it("keeps the metric rescue for a number no app read answers", () => {
     for (const message of ["what was my revenue last month?", "how many orders"]) {
-      expect(buildQueryRefinementSections(message, sourcesOnly, desktopIds(...DESKTOP)), message).toEqual(METRIC_RESCUE);
+      expect(buildQueryRefinementSections(message, sourcesOnly, desktopIds(...DESKTOP)), message).toEqual(METRIC_RESCUE_NO_LOOKUP);
     }
+  });
+
+  it("names only the metric lookups the turn has, as the prompt does", () => {
+    // A round-2 union turn: the app's list_metrics twin, no describe_metric anywhere.
+    const unionIds = ["list_sources", "get_ads_performance", "list_metrics", "run_metric_query", "run_breakdown_query"].map(app);
+    const lookupLine = (available: readonly string[]) =>
+      buildQueryRefinementSections("what was my revenue last month?", sourcesOnly, available)[2];
+    expect(lookupLine(unionIds)).toBe(METRIC_RESCUE[2].replace("list_metrics/describe_metric", "list_metrics"));
+    expect(lookupLine(unionIds)).not.toContain("describe_metric");
+    // Neither lookup in the turn: the aliases hint alone.
+    expect(lookupLine([app("list_sources"), app("run_metric_query")])).toBe(
+      METRIC_RESCUE[2].replace(", or list_metrics/describe_metric if unsure", "")
+    );
   });
 
   it("sends leads to list_audit_leads on a turn with it and no list_contacts, as the prompt does", () => {
@@ -1848,14 +1864,19 @@ describe("advisor rescue after a source list alone follows the app routing", () 
       .toEqual(appRescue(CONTACTS_LINE));
   });
 
-  it("is byte-identical to 33ead6d without the app's reads", () => {
+  it("keeps 33ead6d's rescue without the app's reads, naming only the lookups the turn has", () => {
     const natives = createDaemonActionRegistry().list().map((action) => action.id as string);
-    for (const available of [[], natives, [...native().map((action) => action.id as string)]]) {
+    // The daemon registry retires list_metrics and describe_metric, so its rescue names neither lookup.
+    for (const [available, expected] of [
+      [[], METRIC_RESCUE],
+      [natives, METRIC_RESCUE_NO_LOOKUP],
+      [[...native().map((action) => action.id as string)], METRIC_RESCUE]
+    ] as Array<[string[], string[]]>) {
       for (const message of [
         "how many new leads this week?", "how many leads did we get this week?", "how many signups did we get",
         "how many leads did the spring campaign get?", "what was my revenue last month?", "what's my cpl"
       ]) {
-        expect(buildQueryRefinementSections(message, sourcesOnly, available), message).toEqual(METRIC_RESCUE);
+        expect(buildQueryRefinementSections(message, sourcesOnly, available), message).toEqual(expected);
       }
       // Metric-shaped ("how many"), but no metric term names registrations or a form fill: no rescue then, none now.
       expect(buildQueryRefinementSections("how many registrations last week?", sourcesOnly, available)).toEqual([]);
@@ -2079,7 +2100,7 @@ describe("advisor rescue: lead, audit, trial and form sign-up words go where the
       expect(rescue(message, desktopIds(...MAIN_UNION)), message).toEqual([]);
     }
     // GA4 by name keeps the metric rescue; SEO traffic is not a site-visits total; Meta's visitors stay Meta's.
-    expect(rescue("how many visitors did GA4 record this week?", desktopIds(...MAIN_UNION))).toEqual(METRIC_RESCUE);
+    expect(rescue("how many visitors did GA4 record this week?", desktopIds(...MAIN_UNION))).toEqual(METRIC_RESCUE.map((line) => line.replace(", or list_metrics/describe_metric if unsure", "")));
     expect(rescue("how much SEO traffic did we get this month?", desktopIds(...MAIN_UNION)).join("\n")).not.toContain("run_site_metrics");
     expect(rescue("how many visitors did our facebook ads send?", desktopIds(...MAIN_UNION)).join("\n")).toContain(META_RESCUE_LINE);
     // An open-core turn keeps the metric rescue.
