@@ -599,24 +599,33 @@ function claudeTool(tool: InfiniteOsToolSchema): Record<string, unknown> {
   };
 }
 
+// A turn's tool results are one user message. When a scoped app tool returned pictures, that message's content is the
+// same text as an input_text part followed by one input_image part per picture, in call order: the shape the Codex CLI
+// sends the same Responses backend for an MCP tool's image blocks (openai/codex codex-rs/protocol/src/models.rs
+// convert_mcp_content_to_items: image_url = `data:${mimeType};base64,${data}`, detail = DEFAULT_IMAGE_DETAIL, High).
+// Without pictures the message is the plain string, byte for byte as before.
 function codexInput(request: ModelRequest): Array<Record<string, unknown>> {
-  const input = [
+  const input: Array<Record<string, unknown>> = [
     {
       role: "user",
       content: request.userMessage
     }
   ];
   if (request.toolResults.length) {
-    const digest = toolResultDigest(request.toolResults);
+    const text = toolResultsText(request.toolResults);
+    const images = request.toolResults.flatMap((result) => result.images ?? []);
     input.push({
       role: "user",
-      content: [
-        "Infinite OS result digest:",
-        digest,
-        "",
-        "Infinite OS typed action results:",
-        JSON.stringify(request.toolResults)
-      ].join("\n")
+      content: images.length === 0
+        ? text
+        : [
+            { type: "input_text", text },
+            ...images.map((image) => ({
+              type: "input_image",
+              image_url: `data:${image.mimeType};base64,${image.data}`,
+              detail: "high"
+            }))
+          ]
     });
   }
   return input;
@@ -626,15 +635,17 @@ function claudeUserContent(request: ModelRequest): string {
   if (!request.toolResults.length) {
     return request.userMessage;
   }
-  const digest = toolResultDigest(request.toolResults);
+  return [request.userMessage, "", toolResultsText(request.toolResults)].join("\n");
+}
+
+// The digest and the typed results. A result's pictures are never part of this text (they are sent as image parts).
+function toolResultsText(toolResults: ModelRequest["toolResults"]): string {
   return [
-    request.userMessage,
-    "",
     "Infinite OS result digest:",
-    digest,
+    toolResultDigest(toolResults),
     "",
     "Infinite OS typed action results:",
-    JSON.stringify(request.toolResults)
+    JSON.stringify(toolResults.map(({ images: _images, ...result }) => result))
   ].join("\n");
 }
 
