@@ -23,7 +23,7 @@ export const ANSWER_VIEW_LIMITS = {
   // character rule and is at most maxHostHandleChars; a part that is bad or missing withholds the whole slot, never half.
   maxHostHandleChars: 128,
   // rev 6: short words (maxShortTextChars) = verdict words, head source/window/chip, quiet line, lane label, rankBy, step note,
-  // drop words, action label, pictureWord. Lines (maxCardLineChars, cut with "…") = foot, row note, definition, verdict why,
+  // drop words, action label, pictureWord, group words. Lines (maxCardLineChars, cut with "…") = foot, row note, definition, verdict why,
   // benchmark label/basis, delta anchorLabel. A ruleId follows ARCHIVE_ASSET_ID_PATTERN's character rule.
   // maxCardRows bounds list/table rows only; series legs and funnel steps are exempt (the host cuts and sets TruncationV1).
   maxCardLineChars: 160, maxCardActions: 2, maxGroupPictures: 3, maxCardLogos: 4, maxCardRows: 10,
@@ -158,7 +158,7 @@ export interface RowCardExtrasV1 {
   logo?: ChannelLogoV1;        // the row's picture when it is a channel, not an object
   note?: string;               // one sentence on expand
   pictureWord?: string;        // the word an empty picture box shows ("Video", "Ad group")
-  group?: { count: number; pictures?: CreativeRefV1[] };   // the host folded `count` things into this row
+  group?: { count: number; words: string; pictures?: CreativeRefV1[] };   // the host folded `count` things into this row; words = the host's words for them ("15 ads", "4 videos")
   emphasis?: true;             // the host's marked row (the day the title names); at most one per body
   labelled?: true;             // a series row whose day label is drawn (host's choice, T4); the renderer never decides it
   action?: CardActionV1;       // one secondary action inside the expand ("Clone this ad", "Open on the desktop")
@@ -287,7 +287,7 @@ export interface ChangeBodyV1 {
     creativeRef?: CreativeRefV1;   // the target's picture, by archive reference (never a URL); the terminal ignores it; rev 3
     path?: string[];               // the target's parents, outermost first (["Campaign", "Ad set"]); bounds in ANSWER_VIEW_LIMITS; rev 3
     rawName?: string; age?: AgeV1; verdict?: VerdictV1; pictureWord?: string;
-    group?: { count: number; pictures?: CreativeRefV1[] };   // rev 6 extras; group = a parent's children (≤ maxGroupPictures)
+    group?: { count: number; words: string; pictures?: CreativeRefV1[] };   // rev 6 extras; group = a parent's children (≤ maxGroupPictures); words as on a row ("15 ads")
   };
   rows: { label: string; before?: string | null; after: string | null; reason?: ReasonV1 }[]; // no `before` = "set to"
   effect?: string; warnings: string[];

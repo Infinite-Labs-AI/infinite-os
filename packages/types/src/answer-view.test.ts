@@ -69,7 +69,7 @@ describe("answer view contract v1", () => {
   it("revision 6: rows, cells, columns, steps and sections carry the card extras", () => {
     const extras = { rawName: "inf_r3_webinar_us", rank: 1, rankChange: { dir: "new" }, age: { days: 9, since: "2026-10-05", tooYoung: false },
       verdict: { words: "Converting", tone: "good", ruleId: "outcome.converting" }, logo: "meta", note: "First spent Oct 5.",
-      pictureWord: "Video", group: { count: 15, pictures: [{ archiveAssetId: "asset_1", reader: "reddit_ads", ratio: "16:9" }] },
+      pictureWord: "Video", group: { count: 15, words: "15 ads", pictures: [{ archiveAssetId: "asset_1", reader: "reddit_ads", ratio: "16:9" }] },
       emphasis: true, labelled: true, action: { role: "secondary", do: "open", label: "Open Ads", appLink: { place: "ads", label: "Ads" } },
     } satisfies RowCardExtrasV1;
     const row = { id: "ad_1", label: "Webinar · US", cells: { spend: { value: 11.3, benchmark: { value: 4.62, kind: "usual", label: "usual", basis: "3 weeks", tone: "flat" },
@@ -101,9 +101,12 @@ describe("answer view contract v1", () => {
       context: [{ title: "Inspired by @fin465", kind: "record", body: { fields: [] } }] } satisfies DocumentBodyV1;
     const change = { target: { kind: "adgroup", label: "All devices · US", rawName: "inf_r3_webinar_us", age: { days: 1, since: "2026-10-13", tooYoung: true },
       verdict: { words: "Too new to call · 1 day", tone: "neutral", ruleId: "gate.too_new", mark: "age" }, pictureWord: "Ad group",
-      group: { count: 15, pictures: [{ archiveAssetId: "a1" }, { archiveAssetId: "a2" }, { archiveAssetId: "a3" }] } },
+      group: { count: 15, words: "15 ads", pictures: [{ archiveAssetId: "a1" }, { archiveAssetId: "a2" }, { archiveAssetId: "a3" }] } },
       rows: [], warnings: [], context: [{ title: "This ad group", kind: "record", body: { fields: [] } }] } satisfies ChangeBodyV1;
     expect(change.target.group.pictures.length).toBeLessThanOrEqual(ANSWER_VIEW_LIMITS.maxGroupPictures);
+    // @ts-expect-error a group carries the host's words for what it folds (the renderer names no noun)
+    const wordless: ChangeBodyV1["target"]["group"] = { count: 4 };
+    expect(wordless?.count).toBe(4);
     expect([numbers.endToEnd.value, list.sections[0].kind, doc.post.overflowAt, change.context.length]).toEqual([0.2, "list", 281, 1]);
   });
   it("revision 6: a view may carry the verdict-first card face", () => {
