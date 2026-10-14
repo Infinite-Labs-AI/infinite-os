@@ -59,7 +59,9 @@ describe("gateway turns: interactive profile and turn origin", () => {
       } });
       expect(result.statusCode).toBe(200);
       expect(requests[0]?.systemPrompt.startsWith("You are Infinite's primary interactive marketing assistant")).toBe(true);
-      expect(requests[0]?.systemPrompt).toContain("capability_search, then capability_describe");
+      // The turn carries capability_search alone, so the general prompt names no capability_describe.
+      expect(requests[0]?.systemPrompt).toContain("capability_search, then capability_call");
+      expect(requests[0]?.systemPrompt).not.toContain("capability_describe");
     } finally { await app.close(); }
   });
 

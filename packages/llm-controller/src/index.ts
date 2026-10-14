@@ -6,6 +6,7 @@ import {
   type RuntimeSurface,
   createSessionContext
 } from "@infinite-os/runtime";
+import { APP_META_READS, appMetaRead } from "./app-meta-read.js";
 import { createConfiguredModelClient } from "./model-client.js";
 import { HOST_OUTCOME_PREFIX, assembleInfiniteOsPrompt } from "./prompt-assembler.js";
 import type { InfiniteOsMemoryManager } from "./memory-manager.js";
@@ -1244,9 +1245,10 @@ function unionActionSet(
 //
 // Then, in every union turn, the native live Meta reads, each engine write (authority "operator") and the local-only
 // reads below. The live Meta reads call the Graph API on this laptop's Meta credential and the account's throttled
-// budget, and write nothing. The desktop reaches Meta through the app's stored reads: get_meta_performance (stored
-// history, settled account-zone days) in place of run_meta_live_insights, list_meta_entities (stored entities and
-// status history) in place of the native entity and asset reads. Those reads come by name or behind capability_call
+// budget, and write nothing. The desktop reaches Meta through the app's stored reads: its Meta read (stored history,
+// settled account-zone days; get_ads_performance since desktop Cmd+L round 2, get_meta_performance before) in place
+// of run_meta_live_insights, list_meta_entities (stored entities and status history) in place of the native entity
+// and asset reads. Those reads come by name or behind capability_call
 // (the general profile's bridge, the Codex core+search deferral), so a live read is left out whether or not its twin
 // is named: a refusal names the twin, else capability_call with the app read's name, else nothing. Only the
 // desktop sends a union turn: the engine accepts mode "union" only with a loopback-HTTP app-tool proxy
@@ -1271,12 +1273,23 @@ function withheldNativeActionIds(registry: ActionRegistry, scoped: NormalizedSco
       for (const id of nativeIds) withheld.set(id, `This turn offers ${modelName} in its place.`);
     }
   };
-  for (const [nativeId, appRead] of UNION_LIVE_META_READS) replaceWith(appRead, [nativeId]);
+  for (const [nativeId, appReads] of UNION_LIVE_META_READS) {
+    const named = appReads.named.find((name) => twins.has(name));
+    if (named) replaceWith(named, [nativeId]);
+  }
   replaceWith("list_sources", ["list_sources"]);
   for (const name of SAME_NAME_ANALYTICS_TWINS) replaceWith(name, [name]);
-  // The app's copies refuse Meta metrics and views and point at get_meta_performance, so they replace the
-  // natives only when that read is in the turn too.
-  if (twins.has("get_meta_performance")) {
+  // Since desktop Cmd+L round 2 the app's list_metrics takes a metricId or a viewId and runs describe_metric or
+  // describe_queryable_view itself, and the app sends no twin of either name. A list_metrics twin with no
+  // describe_metric twin beside it is that list_metrics (an earlier desktop always sends the two together).
+  if (!twins.has("describe_metric")) {
+    for (const name of LIST_METRICS_FOLDED_READS) {
+      if (!withheld.has(name)) replaceWith("list_metrics", [name]);
+    }
+  }
+  // The app's copies refuse Meta metrics and views and point at the app's Meta read (get_ads_performance, or
+  // get_meta_performance on earlier desktops), so they replace the natives only when that read is in the turn too.
+  if (appMetaRead((name) => twins.has(name))) {
     for (const name of META_GATED_ANALYTICS_TWINS) replaceWith(name, [name]);
   }
   for (const action of registry.list()) {
@@ -1289,13 +1302,17 @@ function withheldNativeActionIds(registry: ActionRegistry, scoped: NormalizedSco
   return withheld;
 }
 
-// The native live Meta Graph reads, each to the app read that answers in its place.
-const UNION_LIVE_META_READS: ReadonlyMap<string, string> = new Map<InfiniteOsActionId, string>([
-  ["run_meta_live_insights", "get_meta_performance"],
-  ["list_meta_entities", "list_meta_entities"],
-  ["get_meta_entity", "list_meta_entities"],
-  ["list_meta_assets", "list_meta_entities"]
-]);
+// The native live Meta Graph reads, each to the app read that answers in its place: `named` is each name that read
+// has by desktop version (the first one the turn carries is named), `behindCapabilityCall` is the one a refusal names
+// with capability_call when the turn carries none by name. A desktop with get_ads_performance always carries it by
+// name (eager on every profile), so a turn that names neither is an earlier desktop's: get_meta_performance.
+const UNION_LIVE_META_READS: ReadonlyMap<string, { named: readonly string[]; behindCapabilityCall: string }> =
+  new Map<InfiniteOsActionId, { named: readonly string[]; behindCapabilityCall: string }>([
+    ["run_meta_live_insights", { named: APP_META_READS, behindCapabilityCall: "get_meta_performance" }],
+    ["list_meta_entities", { named: ["list_meta_entities"], behindCapabilityCall: "list_meta_entities" }],
+    ["get_meta_entity", { named: ["list_meta_entities"], behindCapabilityCall: "list_meta_entities" }],
+    ["list_meta_assets", { named: ["list_meta_entities"], behindCapabilityCall: "list_meta_entities" }]
+  ]);
 
 const UNION_LOCAL_ONLY_READS: ReadonlySet<string> = new Set<InfiniteOsActionId>([
   "sync_source_now",
@@ -1327,7 +1344,7 @@ function unionWithheldRefusal(actionId: string, twins: ReadonlyMap<string, strin
   const appRead = UNION_LIVE_META_READS.get(actionId);
   if (appRead) {
     const capabilityCall = twins.get("capability_call");
-    return capabilityCall ? `Use ${capabilityCall} with ${appRead} in its place.` : "This chat turn does not offer it.";
+    return capabilityCall ? `Use ${capabilityCall} with ${appRead.behindCapabilityCall} in its place.` : "This chat turn does not offer it.";
   }
   if (actionId === "delete_meta_entity") {
     const pause = twins.get("propose_pause_meta_entity");
@@ -1346,6 +1363,8 @@ const SAME_NAME_ANALYTICS_TWINS = [
   "describe_queryable_view",
   "run_funnel_query"
 ] as const;
+// The native reads the app's list_metrics runs itself since desktop Cmd+L round 2 (its metricId and viewId).
+const LIST_METRICS_FOLDED_READS = ["describe_metric", "describe_queryable_view"] as const;
 const META_GATED_ANALYTICS_TWINS = ["run_metric_query", "run_breakdown_query"] as const;
 
 function normalizeScopedAppTools(scoped: ScopedAppTools | undefined): NormalizedScopedAppTools | undefined {

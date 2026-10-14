@@ -199,6 +199,54 @@ describe("engine prompt: Meta", () => {
     expect(text).toContain("cost_per_result with result_type=lead");
     expect(injectedAliases(text).cost_per_result).toContain("cpl");
     expect(text).not.toContain("-> get_meta_performance");
+    expect(text).not.toContain("get_ads_performance");
+  });
+
+  // Desktop Cmd+L round 2 replaced get_meta_performance with get_ads_performance (one read for every ad channel).
+  const adsTurn = () => [...native(), twin("get_ads_performance"), twin("list_meta_entities")];
+
+  it("treats get_ads_performance as the app's Meta read and names it, never get_meta_performance", () => {
+    const text = prompt([...adsTurn(), twin("run_app_outcomes"), twin("read_subscription_metrics"), twin("list_contacts")]);
+    const aliases = injectedAliases(text);
+    for (const id of ["results", "cost_per_result", "roas", "ctr", "cpc", "meta_ads_spend", "link_clicks"]) {
+      expect(aliases).not.toHaveProperty(id);
+      expect(injectedMetrics(text)).not.toContain(id);
+    }
+    expect(text).not.toContain("partition");
+    expect(text).not.toContain("-> run_meta_live_insights");
+    // get_ads_performance's period is a word (today, last_7d, ...), not get_meta_performance's structured object.
+    expect(text).toContain("-> get_ads_performance with a `period`. run_metric_query and run_breakdown_query refuse Meta metrics and views");
+    expect(text).toContain("- Registrations or trials credited to Meta ads → get_ads_performance (Meta's claim).");
+    expect(text).toContain("Meta's 'leads' result is Meta's claim; read it with get_ads_performance only when the person asks about Meta ads.");
+    expect(text).not.toContain("get_meta_performance");
+  });
+
+  it("keeps the get_meta_performance turn's lines byte for byte beside a get_ads_performance turn's", () => {
+    const metaText = prompt(metaTurn());
+    const adsText = prompt(adsTurn());
+    expect(adsText.replaceAll("get_ads_performance with a `period`", "get_meta_performance with a structured `period`")
+      .replaceAll("get_ads_performance", "get_meta_performance")
+      .replaceAll(`mcp__${APP_SERVER}__get_meta_performance`, "x"))
+      .toBe(metaText.replaceAll(`mcp__${APP_SERVER}__get_meta_performance`, "x"));
+  });
+});
+
+describe("engine prompt: metric lookups", () => {
+  it("names only the lookups the turn has: a desktop since Cmd+L round 2 sends list_metrics alone", () => {
+    const withoutDescribe = native().filter((action) => action.id !== "describe_metric");
+    const text = prompt(withoutDescribe);
+    expect(text).toContain("Metric aliases (common phrasings -> metric id; the live list_metrics action is authoritative):");
+    expect(text).toContain("if still unsure, call list_metrics to confirm");
+    // The action manifest is the registry's own data (a union turn drops a withheld id from its next-step hints).
+    const lines = text.split("\n");
+    const prose = lines.filter((_, index) => lines[index - 1] !== "Typed Infinite OS action manifest:");
+    expect(prose.join("\n")).not.toContain("describe_metric");
+  });
+
+  it("keeps both names when the turn has both", () => {
+    const text = prompt(native());
+    expect(text).toContain("Metric aliases (common phrasings -> metric id; the live list_metrics/describe_metric actions are authoritative):");
+    expect(text).toContain("if still unsure, call list_metrics or describe_metric to confirm");
   });
 });
 
@@ -435,6 +483,24 @@ describe("advisor refinement: Meta metric questions", () => {
     }
   });
 
+  it("sends a Meta number to get_ads_performance on a desktop that has it (Cmd+L round 2)", () => {
+    const ids = [`mcp__${APP_SERVER}__get_ads_performance`];
+    for (const question of ["what's my cpl", "what is our roas", "how much did we spend on meta ads"]) {
+      const text = buildQueryRefinementSections(question, sourcesOnly, ids).join("\n");
+      expect(text, question).toContain("- Call get_ads_performance with a `period`. run_metric_query and run_breakdown_query refuse Meta metrics.");
+      expect(text, question).not.toContain("get_meta_performance");
+      expect(text, question).not.toContain("run run_metric_query or run_breakdown_query");
+    }
+    const signups = buildQueryRefinementSections("how many signups did facebook ads bring?", sourcesOnly, ids).join("\n");
+    expect(signups).toContain("- Registrations, signups or trials from get_ads_performance are Meta's claim.");
+    const campaign = buildQueryRefinementSections("how many leads did the spring campaign get?",
+      sourcesOnly, [...ids, `mcp__${APP_SERVER}__list_contacts`]).join("\n");
+    expect(campaign).toContain("- Meta's claim: the campaign may be a Meta Ads campaign -> also call get_ads_performance with a `period`;");
+    expect(campaign).not.toContain("get_meta_performance");
+    const leads = buildQueryRefinementSections("how many new leads this week?", sourcesOnly, [...ids, `mcp__${APP_SERVER}__list_contacts`]).join("\n");
+    expect(leads).toContain("read it with get_ads_performance only when the person asks about Meta ads.");
+  });
+
   it("keeps the metric-alias rescue on an open-core turn", () => {
     const text = buildQueryRefinementSections("what's my cpl", sourcesOnly).join("\n");
     expect(text).toContain("run run_metric_query or run_breakdown_query");
@@ -595,6 +661,19 @@ describe("union turn: native live Meta read", () => {
     expect(tools).toContain(`mcp__${APP_SERVER}__get_meta_performance`);
     expect(tools).not.toContain("run_meta_live_insights");
     expect(call).toMatchObject({ status: "error", error: { code: "unknown_action" } });
+  });
+
+  it("drops run_meta_live_insights, and refuses a call naming get_ads_performance, when the desktop sends that read", async () => {
+    const { tools, call } = await toolsFor(["get_ads_performance"]);
+    expect(tools).toContain(`mcp__${APP_SERVER}__get_ads_performance`);
+    expect(tools).not.toContain("run_meta_live_insights");
+    expect(call).toMatchObject({
+      status: "error",
+      error: {
+        code: "unknown_action",
+        message: `Unknown Infinite OS action: run_meta_live_insights. This turn offers mcp__${APP_SERVER}__get_ads_performance in its place.`
+      }
+    });
   });
 
   it("drops run_meta_live_insights, and refuses a call to it, in a union turn without the app twin too", async () => {
@@ -975,8 +1054,51 @@ describe("union turn: engine analytics twins", () => {
   it("withholds each native analytics read when its same-name app twin is in the turn", async () => {
     const registry = createInfiniteOsRegistry({});
     for (const name of ANALYTICS_TWINS) {
+      // A list_metrics twin with no describe_metric twin beside it also withholds the reads it folds in (below).
+      const folded = name === "list_metrics" ? LIST_METRICS_FOLDED : [];
       const { tools } = await firstRequest(registry, [name]);
-      expect(tools, name).toEqual([...unionNatives(registry).filter((id) => id !== name), app(name)]);
+      expect(tools, name).toEqual([...unionNatives(registry).filter((id) => id !== name && !folded.includes(id)), app(name)]);
+    }
+  });
+
+  // Desktop Cmd+L round 2: list_metrics takes a metricId or viewId, and the app sends no describe_metric or
+  // describe_queryable_view twin. An earlier desktop always sends list_metrics and describe_metric together.
+  const LIST_METRICS_FOLDED = ["describe_metric", "describe_queryable_view"];
+
+  it("withholds the native describe_metric and describe_queryable_view beside a list_metrics twin that has no describe_metric twin", async () => {
+    const registry = createInfiniteOsRegistry({});
+    const { tools } = await firstRequest(registry, ["list_metrics", "get_ads_performance"]);
+    for (const id of LIST_METRICS_FOLDED) expect(tools).not.toContain(id);
+    expect(tools).toContain("list_queryable_views");
+    for (const id of LIST_METRICS_FOLDED) {
+      const { call, appCalls } = await firstRequest(registry, ["list_metrics", "get_ads_performance"], { call: id });
+      expect(call, id).toMatchObject({
+        status: "error",
+        error: { code: "unknown_action", message: `Unknown Infinite OS action: ${id}. This turn offers ${app("list_metrics")} in its place.` }
+      });
+      expect(appCalls, id).toEqual([]);
+    }
+  });
+
+  it("keeps an earlier desktop's turn as it was: list_metrics beside describe_metric leaves the native describe_queryable_view", async () => {
+    const registry = createInfiniteOsRegistry({});
+    const { tools } = await firstRequest(registry, ["list_metrics", "describe_metric"]);
+    expect(tools).toEqual([
+      ...unionNatives(registry).filter((id) => id !== "list_metrics" && id !== "describe_metric"),
+      app("list_metrics"),
+      app("describe_metric")
+    ]);
+  });
+
+  it("withholds run_metric_query and run_breakdown_query beside get_ads_performance as beside get_meta_performance", async () => {
+    const registry = createInfiniteOsRegistry({});
+    for (const name of META_GATED_TWINS) {
+      const withAds = await firstRequest(registry, [name, "get_ads_performance"]);
+      expect(withAds.tools, name).toEqual([
+        ...unionNatives(registry).filter((id) => id !== name && id !== "run_meta_live_insights"),
+        app(name),
+        app("get_ads_performance")
+      ]);
     }
   });
 
@@ -1658,6 +1780,9 @@ describe("advisor rescue after a source list alone follows the app routing", () 
     "- Do not stop to ask for a time range. Identify the metric (use the metric-aliases hint, or list_metrics/describe_metric if unsure) and run run_metric_query or run_breakdown_query over all available data, then state the assumed scope as a caveat and offer to narrow.",
     "- Only report a metric as unavailable after confirming it is not reachable under any alias."
   ];
+  // A turn that carries neither metric lookup (the daemon retires both; a desktop before round 2 sends no twin):
+  // the rescue names only the aliases hint, as the prompt does.
+  const METRIC_RESCUE_NO_LOOKUP = METRIC_RESCUE.map((line) => line.replace(", or list_metrics/describe_metric if unsure", ""));
   const META_RESCUE = [
     "Metric-question refinement guidance:",
     "- The user asked for a Meta Ads number, but you only have a source list so far.",
@@ -1710,8 +1835,21 @@ describe("advisor rescue after a source list alone follows the app routing", () 
 
   it("keeps the metric rescue for a number no app read answers", () => {
     for (const message of ["what was my revenue last month?", "how many orders"]) {
-      expect(buildQueryRefinementSections(message, sourcesOnly, desktopIds(...DESKTOP)), message).toEqual(METRIC_RESCUE);
+      expect(buildQueryRefinementSections(message, sourcesOnly, desktopIds(...DESKTOP)), message).toEqual(METRIC_RESCUE_NO_LOOKUP);
     }
+  });
+
+  it("names only the metric lookups the turn has, as the prompt does", () => {
+    // A round-2 union turn: the app's list_metrics twin, no describe_metric anywhere.
+    const unionIds = ["list_sources", "get_ads_performance", "list_metrics", "run_metric_query", "run_breakdown_query"].map(app);
+    const lookupLine = (available: readonly string[]) =>
+      buildQueryRefinementSections("what was my revenue last month?", sourcesOnly, available)[2];
+    expect(lookupLine(unionIds)).toBe(METRIC_RESCUE[2].replace("list_metrics/describe_metric", "list_metrics"));
+    expect(lookupLine(unionIds)).not.toContain("describe_metric");
+    // Neither lookup in the turn: the aliases hint alone.
+    expect(lookupLine([app("list_sources"), app("run_metric_query")])).toBe(
+      METRIC_RESCUE[2].replace(", or list_metrics/describe_metric if unsure", "")
+    );
   });
 
   it("sends leads to list_audit_leads on a turn with it and no list_contacts, as the prompt does", () => {
@@ -1726,14 +1864,19 @@ describe("advisor rescue after a source list alone follows the app routing", () 
       .toEqual(appRescue(CONTACTS_LINE));
   });
 
-  it("is byte-identical to 33ead6d without the app's reads", () => {
+  it("keeps 33ead6d's rescue without the app's reads, naming only the lookups the turn has", () => {
     const natives = createDaemonActionRegistry().list().map((action) => action.id as string);
-    for (const available of [[], natives, [...native().map((action) => action.id as string)]]) {
+    // The daemon registry retires list_metrics and describe_metric, so its rescue names neither lookup.
+    for (const [available, expected] of [
+      [[], METRIC_RESCUE],
+      [natives, METRIC_RESCUE_NO_LOOKUP],
+      [[...native().map((action) => action.id as string)], METRIC_RESCUE]
+    ] as Array<[string[], string[]]>) {
       for (const message of [
         "how many new leads this week?", "how many leads did we get this week?", "how many signups did we get",
         "how many leads did the spring campaign get?", "what was my revenue last month?", "what's my cpl"
       ]) {
-        expect(buildQueryRefinementSections(message, sourcesOnly, available), message).toEqual(METRIC_RESCUE);
+        expect(buildQueryRefinementSections(message, sourcesOnly, available), message).toEqual(expected);
       }
       // Metric-shaped ("how many"), but no metric term names registrations or a form fill: no rescue then, none now.
       expect(buildQueryRefinementSections("how many registrations last week?", sourcesOnly, available)).toEqual([]);
@@ -1957,7 +2100,7 @@ describe("advisor rescue: lead, audit, trial and form sign-up words go where the
       expect(rescue(message, desktopIds(...MAIN_UNION)), message).toEqual([]);
     }
     // GA4 by name keeps the metric rescue; SEO traffic is not a site-visits total; Meta's visitors stay Meta's.
-    expect(rescue("how many visitors did GA4 record this week?", desktopIds(...MAIN_UNION))).toEqual(METRIC_RESCUE);
+    expect(rescue("how many visitors did GA4 record this week?", desktopIds(...MAIN_UNION))).toEqual(METRIC_RESCUE.map((line) => line.replace(", or list_metrics/describe_metric if unsure", "")));
     expect(rescue("how much SEO traffic did we get this month?", desktopIds(...MAIN_UNION)).join("\n")).not.toContain("run_site_metrics");
     expect(rescue("how many visitors did our facebook ads send?", desktopIds(...MAIN_UNION)).join("\n")).toContain(META_RESCUE_LINE);
     // An open-core turn keeps the metric rescue.

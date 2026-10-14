@@ -47,9 +47,22 @@ describe("engine prompt: interactive profile", () => {
     // The shared data contract stays: typed actions, their manifest and the answer rules.
     expect(general).toContain("Typed Infinite OS action manifest:");
     expect(general).toContain("Answer requirements:");
-    expect(general).toContain("capability_search, then capability_describe and capability_call");
+    // capability_describe is named only when the turn has it (base carries no discovery tools).
+    expect(general).toContain("Use capability_search, then capability_call, only when");
+    expect(general).not.toContain("capability_describe");
     expect(general).toContain("do not invent another approval step");
     expect(general).toContain("a host-authored outcome may resume this session");
+  });
+
+  it("names capability_describe only when the turn carries it (a desktop since Cmd+L round 2 sends none)", () => {
+    const discovery = (name: string) => ({ ...base.actions[0]!, id: `mcp__infinite_app__${name}` as (typeof base.actions)[number]["id"] });
+    const withDescribe = assembleInfiniteOsPrompt({ ...base, agentProfile: "general-marketing-v1", interactiveFeatures: [...ALL_FEATURES],
+      actions: [...base.actions, discovery("capability_search"), discovery("capability_describe"), discovery("capability_call")] });
+    expect(withDescribe).toContain("Use capability_search, then capability_describe and capability_call, only when");
+    const withoutDescribe = assembleInfiniteOsPrompt({ ...base, agentProfile: "general-marketing-v1", interactiveFeatures: [...ALL_FEATURES],
+      actions: [...base.actions, discovery("capability_search"), discovery("capability_call")] });
+    expect(withoutDescribe).toContain("Use capability_search, then capability_call, only when");
+    expect(withoutDescribe).not.toContain("capability_describe and");
   });
 
   it("describes only the features the turn really has", () => {
