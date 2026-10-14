@@ -5,7 +5,7 @@
  * Key rule: no key may end in "token", contain "credential", or equal a host-private key.
  */
 // ---- contract body (vendored verbatim into 1bu-1; edit only in infinite-os) ----
-export const ANSWER_VIEW_CONTRACT_REVISION = 3 as const;   // rev 3: ChangeBodyV1.target.creativeRef + .path; ListBodyV1.nameLabel; RecordBodyV1.status; LeaderV1.detail; AnswerViewEnvelopeV1.scope.account; StateReasonV1.step
+export const ANSWER_VIEW_CONTRACT_REVISION = 4 as const;   // rev 4: ImagesBodyV1.drawRunIds; rev 3: ChangeBodyV1.target.creativeRef + .path; ListBodyV1.nameLabel; RecordBodyV1.status; LeaderV1.detail; AnswerViewEnvelopeV1.scope.account; StateReasonV1.step
 export const RESULT_VIEW_CAPABILITY = "result.view.v1" as const;
 export const CONFIRM_FIELDS_CAPABILITY = "confirm.fields.v1" as const;
 export const CONFIRM_STREAM_CAPABILITY = "confirm.stream.v1" as const;
@@ -172,6 +172,7 @@ export interface ImagesBodyV1 {
   items: { id: string; label: string; status: "queued" | "drawing" | "done" | "failed"; failureWords?: string; width?: number; height?: number }[];
   format: string; aspectRatio: string; model: string; madeWith: "infinite" | "your_codex";
   eta?: { startedAtMs: number; etaMs: number | null };
+  drawRunIds?: string[];           // a run made of other runs (a clone: one draw per source): their ids, which the chat gallery's frames carry; host-only; the terminal ignores it; rev 4
 }
 export interface ChangeBodyV1 {
   target: {
