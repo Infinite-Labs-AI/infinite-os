@@ -5,7 +5,7 @@
  * Key rule: no key may end in "token", contain "credential", or equal a host-private key.
  */
 // ---- contract body (vendored verbatim into 1bu-1; edit only in infinite-os) ----
-export const ANSWER_VIEW_CONTRACT_REVISION = 4 as const;   // rev 4: ImagesBodyV1.drawRunIds; rev 3: ChangeBodyV1.target.creativeRef + .path; ListBodyV1.nameLabel; RecordBodyV1.status; LeaderV1.detail; AnswerViewEnvelopeV1.scope.account; StateReasonV1.step
+export const ANSWER_VIEW_CONTRACT_REVISION = 5 as const;   // rev 5: NumbersRowV1.creativeRef; rev 4: ImagesBodyV1.drawRunIds; rev 3: ChangeBodyV1.target.creativeRef + .path; ListBodyV1.nameLabel; RecordBodyV1.status; LeaderV1.detail; AnswerViewEnvelopeV1.scope.account; StateReasonV1.step
 export const RESULT_VIEW_CAPABILITY = "result.view.v1" as const;
 export const CONFIRM_FIELDS_CAPABILITY = "confirm.fields.v1" as const;
 export const CONFIRM_STREAM_CAPABILITY = "confirm.stream.v1" as const;
@@ -108,7 +108,10 @@ export interface ColumnV1 { key: string; label: string; unit: UnitV1; factGroup:
 export type CoverageStatusV1 = "measured" | "partial" | "zero" | "not_measured" | "not_synced"
   | "not_broken_down" | "not_verified" | "unknown_at_this_level";
 export interface CoverageV1 { requestedDays: number; measuredDays: number; days: { date: string; status: CoverageStatusV1 }[] }
-export interface NumbersRowV1 { id: string; label: string; untrusted?: true; status?: StatusWordV1; cells: Record<string, CellV1 | TextCellV1> }
+export interface NumbersRowV1 {
+  id: string; label: string; untrusted?: true; status?: StatusWordV1; cells: Record<string, CellV1 | TextCellV1>;
+  creativeRef?: CreativeRefV1;   // the row's picture (an ad's creative, a video's still), by archive reference (never a URL); Cmd+L draws it before the row's name; the terminal ignores it; rev 5
+}
 /** ofPrevious: renderer may print "127 of 176" (both measured); never a %. */
 export interface StepV1 { key: string; label: string; count: number | null; reason?: ReasonV1; countingSince?: string; ofPrevious?: true }
 /** settled = the leg that excludes today when a today leg exists; `final` false if its window still holds unsettled days. */
