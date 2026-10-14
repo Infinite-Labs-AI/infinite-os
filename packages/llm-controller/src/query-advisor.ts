@@ -1,3 +1,5 @@
+import { appMetaRead, appMetaReadWithPeriod, type AppMetaRead } from "./app-meta-read.js";
+
 export interface QueryAdvisorInput {
   message: string;
   workspaceId: string;
@@ -332,9 +334,10 @@ function missingBusinessMetricClarificationMessage(
   if (!isAmbiguousBusinessChannelQuestion(message)) {
     return undefined;
   }
-  // A turn that has the app's Meta read answers a Meta-named question itself (spend, results and cost per
-  // result per campaign); asking "traffic, registrations, ...?" there offers none of the Meta numbers.
-  if (availableLike("get_meta_performance") && isMetaNamedQuestion(message)) {
+  // A turn that has the app's Meta read (get_ads_performance, or get_meta_performance on earlier desktops) answers a
+  // Meta-named question itself (spend, results and cost per result per campaign); asking "traffic, registrations,
+  // ...?" there offers none of the Meta numbers.
+  if (appMetaRead(availableLike) !== undefined && isMetaNamedQuestion(message)) {
     return undefined;
   }
   return "Do you mean best channel for traffic, registrations, conversion rate, or revenue?";
@@ -626,7 +629,7 @@ const APP_CONTEXT_TOOLS = new Set(["list_sources", "get_current_workspace", "lis
 
 /**
  * Whether an app read beyond the workspace context and the source list ran this turn, its result or its error in.
- * The advisor counts the native reads by name; the app's reads (get_meta_performance, list_contacts,
+ * The advisor counts the native reads by name; the app's reads (get_ads_performance or get_meta_performance, list_contacts,
  * run_app_outcomes, and the same-name twins of the native analytics reads) arrive under their model names, so a
  * turn that already has its answer read is never told it only has a source list.
  */
@@ -728,7 +731,7 @@ function genericOpenEndedRefinementSections(
   const hasMetricResult = toolResults.some((result) => result.name === "run_metric_query" && isRecord(result.result));
   const hasBreakdownResult = toolResults.some((result) => result.name === "run_breakdown_query" && isRecord(result.result));
   const hasMetricDetail = toolResults.some((result) => result.name === "describe_metric" && isRecord(result.result));
-  // The app's reads count as reads too: after get_meta_performance or list_contacts ran, the turn has more than a
+  // The app's reads count as reads too: after the app's Meta read or list_contacts ran, the turn has more than a
   // source list.
   const hasAppAnswer = hasAppAnswerRead(toolResults);
 
@@ -739,8 +742,9 @@ function genericOpenEndedRefinementSections(
   // (or even located) any metric, nor any app read beyond the workspace context. This is conservative: it
   // cannot fire once a metric query/breakdown result or an app answer read exists, and it never relaxes the
   // result_type partition or any write confirmation.
+  const metaRead = appMetaRead((name) => availableActionIds.some((id) => id === name || id.endsWith(`__${name}`)));
   const metaQuestion =
-    availableActionIds.some((id) => id === "get_meta_performance" || id.endsWith("__get_meta_performance")) &&
+    metaRead !== undefined &&
     isMetricShapedQuestion(message) &&
     isMetaMetricQuestion(message);
   // The app's own reads for leads and signups, when this turn has them (the prompt's app routing).
@@ -765,13 +769,16 @@ function genericOpenEndedRefinementSections(
       ];
     }
     // A turn with the app's stored Meta read refuses Meta metrics on run_metric_query/run_breakdown_query.
-    if (metaQuestion) {
+    if (metaQuestion && metaRead) {
       return [
         "Metric-question refinement guidance:",
         "- The user asked for a Meta Ads number, but you only have a source list so far.",
-        "- Call get_meta_performance with a structured `period` (all available data when no period was named, stated as the assumed scope). run_metric_query and run_breakdown_query refuse Meta metrics.",
+        // get_ads_performance has no all-data period (its null period is each channel's default).
+        metaRead === "get_meta_performance"
+          ? "- Call get_meta_performance with a structured `period` (all available data when no period was named, stated as the assumed scope). run_metric_query and run_breakdown_query refuse Meta metrics."
+          : `- Call ${appMetaReadWithPeriod(metaRead)}. run_metric_query and run_breakdown_query refuse Meta metrics.`,
         ...(META_CREDIT_OUTCOME_RE.test(message) ? [
-          "- Registrations, signups or trials from get_meta_performance are Meta's claim. Our own counts stay run_app_outcomes (registrations) and read_subscription_metrics (trial starts); never present one as the other, and when asked to compare, show both, labelled."
+          `- Registrations, signups or trials from ${metaRead} are Meta's claim. Our own counts stay run_app_outcomes (registrations) and read_subscription_metrics (trial starts); never present one as the other, and when asked to compare, show both, labelled.`
         ] : [])
       ];
     }
@@ -924,13 +931,14 @@ const FORM_SIGNUP_RE = new RegExp(String.raw`\b${FORM_TOPIC}[- ](?:sign[- ]?ups?
 // Named only on a question the metric rescue already answers, in place of its run_metric_query line.
 const SITE_VISIT_ASK_RE = /\b(?:visits?|visitors?|traffic)\b/i;
 const NOT_SITE_METRICS_RE = /\b(?:ga ?4|google analytics|seo|search console|organic search|instagram|profile visits?|shopify|store visits?)\b/i;
-const META_LEADS_CLAIM = " Meta's 'leads' result is Meta's claim; read it with get_meta_performance only when the person asks about Meta ads.";
-// A campaign's number on a turn with get_meta_performance: the prompt sends a campaign's contacts to list_contacts (and,
+const metaLeadsClaim = (read: AppMetaRead) => ` Meta's 'leads' result is Meta's claim; read it with ${read} only when the person asks about Meta ads.`;
+// A campaign's number on a turn with the app's Meta read (get_ads_performance, or get_meta_performance on earlier
+// desktops): the prompt sends a campaign's contacts to list_contacts (and,
 // without it, 'leads' to list_audit_leads), while its Meta bullet counts leads, results, registrations and trials as
 // Meta Ads numbers that "are Meta's claim, not our records", and its compare rule is "show both, labelled". A campaign
 // may be either, so the rescue names our read and Meta's, each labelled.
 const OUR_RECORDS_LABEL = "- Our records: ";
-const META_CAMPAIGN_CLAIM_LINE = "- Meta's claim: the campaign may be a Meta Ads campaign -> also call get_meta_performance with a structured `period`; its leads, results, registrations and trials are Meta's claim, not our records. Answer with both, labelled \"our records\" and \"Meta's claim\", never one presented as the other, and say so when Meta has no campaign by that name.";
+const metaCampaignClaimLine = (read: AppMetaRead) => `- Meta's claim: the campaign may be a Meta Ads campaign -> also call ${appMetaReadWithPeriod(read)}; its leads, results, registrations and trials are Meta's claim, not our records. Answer with both, labelled "our records" and "Meta's claim", never one presented as the other, and say so when Meta has no campaign by that name.`;
 
 /** The message with every match of each pattern blanked, so a phrase one read owns is not read again as another's. */
 function without(message: string, ...patterns: RegExp[]): string {
@@ -943,24 +951,24 @@ function without(message: string, ...patterns: RegExp[]): string {
  * (a newsletter, webinar or waitlist sign-up too) -> list_contacts, and without it only the lead words ('leads',
  * 'new leads') -> list_audit_leads; signups and registrations that are none of those -> run_app_outcomes; trials ->
  * read_subscription_metrics; site visitors -> run_site_metrics. None when the person asks about Meta ads
- * and the turn has get_meta_performance (the Meta rescue answers that), for a Meta-only metric such as cost per lead,
+ * and the turn has the app's Meta read (the Meta rescue answers that), for a Meta-only metric such as cost per lead,
  * or when the turn has none of these reads: the rescue then stays as it was. A campaign's number on a turn with
- * get_meta_performance (a campaign that is not email, a newsletter or another platform's) names our reads labelled
- * "our records" and get_meta_performance labelled "Meta's claim".
+ * the app's Meta read (a campaign that is not email, a newsletter or another platform's) names our reads labelled
+ * "our records" and that read (get_ads_performance or get_meta_performance) labelled "Meta's claim".
  */
 function appRescueReads(message: string, availableActionIds: readonly string[]): string[] {
   const availableLike = (name: string) => availableActionIds.some((id) => id === name || id.endsWith(`__${name}`));
   if (!isMetricShapedQuestion(message)) {
     return [];
   }
-  const meta = availableLike("get_meta_performance");
+  const meta = appMetaRead(availableLike);
   if (meta && !OTHER_PLATFORM_RE.test(message) && (META_ONLY_TERM_RE.test(message) || META_ADS_ASK_RE.test(message))) {
     return [];
   }
   // What is left of a Meta Ads number once the platform, "ads", ad sets and Meta-only metrics are out: a campaign's.
   const campaign = meta && isMetaMetricQuestion(message);
   const lines: string[] = [];
-  const metaClaim = meta && !campaign ? META_LEADS_CLAIM : "";
+  const metaClaim = meta && !campaign ? metaLeadsClaim(meta) : "";
   const audit = AUDIT_ASK_RE.test(message) && availableLike("list_audit_leads");
   // What is left once the audit phrases are read as audit leads.
   const rest = audit ? without(message, AUDIT_ASK_RE) : message;
@@ -992,8 +1000,8 @@ function appRescueReads(message: string, availableActionIds: readonly string[]):
       : "- Site visits, visitors or traffic totals -> call run_site_metrics (server Visits read high and are never people). GA4 site_visitors or sessions only when the person asks for GA4.");
   }
   // With none of our reads for it, the Meta rescue answers a campaign's number alone, as before.
-  if (campaign && lines.length > 0) {
-    return [...lines.map((line) => OUR_RECORDS_LABEL + line.slice(2)), META_CAMPAIGN_CLAIM_LINE];
+  if (meta && campaign && lines.length > 0) {
+    return [...lines.map((line) => OUR_RECORDS_LABEL + line.slice(2)), metaCampaignClaimLine(meta)];
   }
   return lines;
 }
