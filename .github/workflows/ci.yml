@@ -118,6 +118,7 @@ jobs:
           packages/llm-controller/test/codex-tool-wire.test.ts
           packages/llm-controller/test/prompt-manifest.test.ts
           packages/llm-controller/test/codex-routing.test.ts
+          packages/llm-controller/test/scoped-app-tool-images.test.ts
           packages/metadata
           packages/runtime
           packages/setup

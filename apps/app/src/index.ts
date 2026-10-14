@@ -44,7 +44,9 @@ import {
   createSourceAwareQueryAdvisor,
   createSessionStore,
   filterCuratedMemoryCandidates,
+  ScopedAppToolResultWithImages,
   type InfiniteOsModelClient,
+  type ModelToolImage,
   type ScopedAppTools,
   type ChatInput,
   type ChatSessionStore,
@@ -178,7 +180,12 @@ export const APP_CAPABILITIES = [
   // Both turn routes accept `turnOrigin: "continuation"`: the message is the host's report of an
   // approved action's outcome, stored as a host outcome (never as the user's words), with no query
   // advisor and no curated-memory harvest. Desktop fails CLOSED on it for continuation turns.
-  "interactive_turn_origin"
+  "interactive_turn_origin",
+  // A scoped app tool may answer one text block followed by image blocks: the text parses as before and the pictures
+  // reach the model as input_image parts beside the tool results (model-client.ts codexInput), never in the recorded
+  // envelope. The desktop asks its bridge for image blocks only from a daemon that publishes this; an older one would
+  // hand the model the raw content object, base64 and all.
+  "scoped_app_tools_images"
 ] as const;
 
 type ScopedAppToolsParseResult =
@@ -416,23 +423,48 @@ async function callScopedAppToolProxy(input: {
   return parseScopedAppToolResult(json.result);
 }
 
-function parseScopedAppToolResult(result: unknown): unknown {
+// An MCP result of one text block parses to that text's JSON (or the text). One text block followed only by image
+// blocks parses the same way, with the pictures beside it (ScopedAppToolResultWithImages); the controller keeps them
+// out of the recorded envelope. Any other shape is returned as it came.
+export function parseScopedAppToolResult(result: unknown): unknown {
   if (!isPlainRecord(result)) {
     return result;
   }
   const content = result.content;
-  if (!Array.isArray(content) || content.length !== 1 || !isPlainRecord(content[0])) {
+  if (!Array.isArray(content) || content.length === 0 || !isPlainRecord(content[0])) {
     return result;
   }
   const text = content[0].text;
   if (content[0].type !== "text" || typeof text !== "string") {
     return result;
   }
-  try {
-    return JSON.parse(text) as unknown;
-  } catch {
-    return text;
+  const images: ModelToolImage[] = [];
+  for (const block of content.slice(1)) {
+    const image = mcpImageBlock(block);
+    if (!image) {
+      return result;
+    }
+    images.push(image);
   }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text) as unknown;
+  } catch {
+    parsed = text;
+  }
+  return images.length > 0 ? new ScopedAppToolResultWithImages(parsed, images) : parsed;
+}
+
+function mcpImageBlock(block: unknown): ModelToolImage | null {
+  if (!isPlainRecord(block) || block.type !== "image") {
+    return null;
+  }
+  const data = stringField(block, "data");
+  const mimeType = stringField(block, "mimeType");
+  if (!data || !mimeType || !/^image\/[a-z0-9.+-]{1,40}$/.test(mimeType)) {
+    return null;
+  }
+  return { mimeType, data };
 }
 
 function stringField(value: Record<string, unknown>, key: string): string | undefined {

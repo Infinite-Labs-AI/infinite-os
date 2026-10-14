@@ -279,11 +279,30 @@ export interface ScopedAppTools {
   //     desktop's app tools together. Native wins on any (structurally impossible)
   //     name collision — see unionActionSet.
   mode?: "exclusive" | "union";
+  // Resolves to the tool's result, or to a ScopedAppToolResultWithImages when the tool also returned pictures.
   callTool: (
     toolName: string,
     input: unknown,
     context?: { toolCallId: string; modelName: string }
   ) => Promise<unknown>;
+}
+
+/** A picture a tool returned for the model to see (an MCP image content block): base64 `data` of type `mimeType`. */
+export interface ModelToolImage {
+  mimeType: string;
+  data: string;
+}
+
+/**
+ * A scoped app tool's result with the pictures it returned beside it (apps/app parseScopedAppToolResult builds it from
+ * an MCP result of one text block followed by image blocks). The pictures reach the model on the call's
+ * ModelToolResult; the action call's envelope, which is recorded and returned, carries the result alone.
+ */
+export class ScopedAppToolResultWithImages {
+  constructor(
+    readonly result: unknown,
+    readonly images: readonly ModelToolImage[]
+  ) {}
 }
 
 interface NormalizedScopedAppTool {
@@ -328,6 +347,9 @@ export interface ModelToolResult {
         confirmationId?: string;
         inputHash?: string;
       };
+  // Pictures a scoped app tool returned with an ok result. Sent to the model as image parts beside the results' text
+  // (model-client.ts codexInput), never inside that text.
+  images?: ModelToolImage[];
 }
 
 export interface TurnModel {
@@ -774,9 +796,11 @@ export function createLlmController(options: {
             name: actionId
           });
         }
+        const toolImages = new Map<string, ModelToolImage[]>();
         const nextCalls = await executeToolCalls(options.registry, calls, scopedInput, {
           scopedAppTools,
           withheldActionIds,
+          toolImages,
           progressLabels,
           nowMs: () => now().getTime(),
           emitToolStart: async (event) => emitInfinite(event),
@@ -802,7 +826,7 @@ export function createLlmController(options: {
             });
           }
           actionCalls.push(call);
-          const toolResult = modelToolResult(call);
+          const toolResult = modelToolResult(call, toolImages.get(call.id));
           toolResults.push(toolResult);
           advisorResults.push({ name: toolResult.name, result: toolResult.result, input: call.input });
         }
@@ -816,7 +840,7 @@ export function createLlmController(options: {
         if (nativeToolCount > maxToolIterations * 8) throw new Error("The tool call limit was reached.");
         const executed = await executeAndRecordToolCalls(calls);
         nativeConfirmationPending = executed.some(call => call.requiresConfirmation);
-        return executed.map(modelToolResult);
+        return executed.map(call => modelToolResult(call));
       };
       let usage: ModelResponse["usage"];
       try {
@@ -993,9 +1017,9 @@ export function createLlmController(options: {
   };
 }
 
-function modelToolResult(call: ChatActionCall): ModelToolResult {
+function modelToolResult(call: ChatActionCall, images?: ModelToolImage[]): ModelToolResult {
   if (call.envelope) {
-    return { id: call.id, name: call.actionId, result: call.envelope };
+    return { id: call.id, name: call.actionId, result: call.envelope, ...(images?.length ? { images } : {}) };
   }
   if (call.error) {
     return {
@@ -1394,6 +1418,8 @@ async function executeToolCalls(
      * when the turn has one); a call to one fails like an unknown action.
      */
     withheldActionIds?: ReadonlyMap<string, string>;
+    /** Receives, by tool call id, the pictures a scoped app tool returned with an ok result. */
+    toolImages?: Map<string, ModelToolImage[]>;
     progressLabels?: Map<string, string>;
     nowMs: () => number;
     emitToolStart: (event: ToolStartProgressEvent) => Promise<void>;
@@ -1428,7 +1454,7 @@ async function executeToolCalls(
     const scopedAppTools = progress?.scopedAppTools;
     const appTool = scopedAppTools?.toolsByModelName.get(normalizedName);
     if (appTool && scopedAppTools) {
-      const call = await executeScopedAppToolCall(appTool, toolCall, scopedAppTools).catch((error: unknown) => ({
+      const call = await executeScopedAppToolCall(appTool, toolCall, scopedAppTools, progress?.toolImages).catch((error: unknown) => ({
         id: toolCall.id,
         actionId: appTool.modelName,
         input: toolCall.input,
@@ -1591,12 +1617,16 @@ async function executeToolCalls(
 async function executeScopedAppToolCall(
   appTool: NormalizedScopedAppTool,
   toolCall: ModelToolCall,
-  scoped: NormalizedScopedAppTools
+  scoped: NormalizedScopedAppTools,
+  toolImages?: Map<string, ModelToolImage[]>
 ): Promise<ChatActionCall> {
-  const result = await scoped.callTool(appTool.rawName, toolCall.input, {
+  const output = await scoped.callTool(appTool.rawName, toolCall.input, {
     toolCallId: toolCall.id,
     modelName: appTool.modelName
   });
+  // The envelope below is recorded (sessionStore.recordActionCall) and returned with the turn, so it holds the result
+  // alone; the pictures go to the model only.
+  const result = output instanceof ScopedAppToolResultWithImages ? output.result : output;
   const confirmation = scopedAppToolConfirmation(result);
   if (confirmation) {
     return {
@@ -1619,6 +1649,9 @@ async function executeScopedAppToolCall(
       requiresConfirmation: false,
       error: failure
     };
+  }
+  if (output instanceof ScopedAppToolResultWithImages && output.images.length > 0) {
+    toolImages?.set(toolCall.id, [...output.images]);
   }
   return {
     id: toolCall.id,
