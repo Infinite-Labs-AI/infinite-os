@@ -425,7 +425,7 @@ describe("Ink in-session write confirmation (Plan 2) — live PTY flow (skipped 
 
       await waitFor(() => output.text().includes("Ask Infinite"));
       await sendKeys(input, "pause it\r");
-      await waitFor(() => stripAnsi(output.text()).includes(" p  pause    n  dismiss    tab  switch side"), 4_000, output.text);
+      await waitFor(() => stripAnsi(output.text()).includes(" p  pause    n  dismiss    tab  to card"), 4_000, output.text);
       expect(output.text()).not.toContain("Stops spend on Ad 01");
 
       await sendKeys(input, "y");
@@ -682,8 +682,8 @@ describe("receipts on the turn (r4 receipts; fake TTY, skipped on CI)", () => {
 
   // Live re-check run 3, N20: after `n` the bar kept `? what it does` (the
   // list view's, above the card) where r4's dismissed frame offers only
-  // `tab switch side  / commands`: the keys stay on the newest view, the
-  // dismissed card, which has none.
+  // `tab switch side  / commands` (`tab to card` in one column): the keys stay
+  // on the newest view, the dismissed card, which has none.
   it.skipIf(process.env.CI === "true")(
     "after n the key bar is r4's dismissed bar: no ? what it does, while in flight and after the app's answer",
     { timeout: 30_000 },
@@ -723,7 +723,7 @@ describe("receipts on the turn (r4 receipts; fake TTY, skipped on CI)", () => {
       await sendKeys(input, "n");
       await waitFor(() => lastFrame().includes("Sending to the app…"), 4_000, lastFrame);
       expect(lastFrame()).not.toContain("what it does");
-      expect(lastFrame()).toMatch(/tab\s+switch side\s+\/\s+commands/u);
+      expect(lastFrame()).toMatch(/tab\s+to card\s+\/\s+commands/u);
       confirm.resolve({ ok: true, declined: true, view: dismissed });
       await waitFor(() => lastFrame().includes("Dismissed — nothing was executed."), 4_000, lastFrame);
       expect(lastFrame()).not.toContain("what it does");

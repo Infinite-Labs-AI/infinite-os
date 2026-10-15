@@ -251,8 +251,8 @@ describe("the session wires the live cap (CI-run)", () => {
       title: "Infinite TUI"
     })).split("\n");
     expect(rendered[0]).toContain("∞ Infinite");
-    // From 80 columns the turn sits side by side; with no Steps its details pane is empty.
-    expect(rendered[2]).toMatch(/^❯ how did it go\? +│$/u);
+    // One column at every width: the question with nothing beside it.
+    expect(rendered[2]).toBe("❯ how did it go?");
     expect(rendered.some((line) => /more lines|lines above/.test(line))).toBe(false);
   });
 
@@ -267,8 +267,8 @@ describe("the session wires the live cap (CI-run)", () => {
     expect(rule).toContain("const compactTurn = finished && renderTurnAt !== null && pagedAtRest(false) && wholeCompactAtRest();");
     expect(rule).toContain("drawTurnWith(restingReservedRows, compact)");
     expect(rule).toContain("const keepCard = pendingConfirmActions.length > 0;");
-    // The Steps strip stays live only when it is whole in the resting frame (a finished turn never pages, lane review MUST).
-    expect(rule).toContain('commitLiveTurn("overflow", keepCard, !keepCard && keptStripFitsAtRest())');
+    // The calls go up with the turn, in place (one column); only a waiting card keeps them live.
+    expect(rule).toContain('commitLiveTurn("overflow", keepCard)');
     expect(rule).toContain("const liveLatestShown = finishedOverflow ? null : liveLatest;");
   });
 
@@ -377,14 +377,15 @@ describe("scrollback in a running session (fake TTY; skipped on CI like the othe
       title: "Infinite TUI"
     });
     await waitFor(() => output.text().includes("Ask Infinite"), 4_000, output.text);
+    // One column (80 columns, no view): while it streams the live region follows the newest lines.
     await sendKeys(input, "first\r");
-    // While it streams the turn keeps the split (80 columns): the answer pane follows the newest lines.
     await waitFor(() => output.text().includes("alpha line 119"), 4_000, output.text);
     expect(stripAnsi(output.text())).not.toContain("alpha line 50");
-    expect(stripAnsi(output.text())).toMatch(/alpha line 119 +│/u);
+    expect(stripAnsi(output.text())).not.toMatch(/alpha line 119 +│/u);
     finish();
-    // Finished, from 80 the turn keeps the split, its answer held to the window from the top (live L8).
-    await waitFor(() => /↓ \d+ more · tab, then ↓/u.test(stripAnsi(output.text()).split(`${ESC}[?2026h`).at(-1) ?? ""), 4_000, output.text);
+    const lastFrame = () => stripAnsi(output.text().split(`${ESC}[?2026h`).at(-1) ?? "");
+    // Finished, taller than the window: the whole turn goes to scrollback from its first line.
+    await waitFor(() => /^∞ alpha line 0$/mu.test(lastFrame()), 4_000, lastFrame);
     await sendKeys(input, "/exit\r");
     await session;
     // Leaving commits it: the tail's rows were erased and the whole turn printed once, in order, with no hint left.
@@ -527,9 +528,11 @@ describe("scrollback in a running session (fake TTY; skipped on CI like the othe
 // the failed call's row is printed under the answer. Synthetic names only.
 describe("a failed step survives the commit to scrollback (fake TTY; skipped on CI like the other PTY tests)", () => {
   const RAW = "mcp__sample_app__get_sample_rows";
-  const FAILED_ROW = "  reading today ✗ not synced yet";
+  // One column (the default): every call is one line in the turn, kept in place in scrollback.
+  const CLEAN_ROW = "  ✓ reading the last 200 days · 200 days";
+  const FAILED_ROW = "  ✗ reading today · not synced yet";
   const text = Array.from({ length: 200 }, (_, i) => `alpha line ${i}`).join("\n");
-  // One fenced block, for the turn with a card: the caption gate (round 4) never cuts a block.
+  // One fenced block, for the turn with a card.
   const block = `\`\`\`\n${text}\n\`\`\``;
   /** Two calls of one tool, in the app's words: the first ends clean, the second fails. */
   const twoCalls = (onProgress: ((frame: never) => void) | undefined) => {
@@ -541,7 +544,7 @@ describe("a failed step survives the commit to scrollback (fake TTY; skipped on 
     frame("tool.complete", "call-2", { status: "error", words: { label: "reading today", result: "not synced yet" } });
   };
 
-  it.skipIf(process.env.CI === "true")("two calls, the second fails, then a 200-line answer: the answer goes up whole, its Steps strip stays live (live run-4 N12); the next line prints the failed row under the answer, the clean one never", { timeout: 30_000 }, async () => {
+  it.skipIf(process.env.CI === "true")("two calls, the second fails, then a 200-line answer: the turn goes up whole with both call lines in place, each once; no Steps strip stays live", { timeout: 30_000 }, async () => {
     resetTurnState();
     const input = ttyInput();
     const output = ttyOutput(ONE_COLUMN);
@@ -564,8 +567,8 @@ describe("a failed step survives the commit to scrollback (fake TTY; skipped on 
     });
     await waitFor(() => output.text().includes("Ask Infinite"), 4_000, output.text);
     await sendKeys(input, "first\r");
-    // While it streams, the Steps strip shows both calls, the failed one with its reason.
-    await waitFor(() => /reading today\s+━+\s+✗ not synced yet/u.test(stripAnsi(output.text())), 4_000, output.text);
+    // While it streams, both calls are lines of the turn, the failed one with its reason.
+    await waitFor(() => stripAnsi(output.text()).includes(FAILED_ROW), 4_000, output.text);
     finish();
     await waitFor(() => output.text().includes("alpha line 50"), 4_000, output.text);
     await waitFor(() => {
@@ -574,29 +577,24 @@ describe("a failed step survives the commit to scrollback (fake TTY; skipped on 
     }, 4_000, output.text);
     await new Promise((resolve) => setTimeout(resolve, 200));
     const rows = scrollbackRows(output.text()).map((row) => row.trimEnd());
+    const first = rows.findIndex((row) => /alpha line 0$/u.test(row));
     const last = rows.findIndex((row) => /alpha line 199$/u.test(row));
-    // The answer went up whole; right under it the turn's rule, then the frame,
-    // which keeps the finished turn's Steps strip (r4 keeps it under the turn
-    // on screen) until the next line: both calls, bars and all.
+    // The calls went up with the turn, above its answer; the frame under it keeps no Steps strip.
+    expect(rows.filter((row) => row === CLEAN_ROW)).toHaveLength(1);
+    expect(rows.filter((row) => row === FAILED_ROW)).toHaveLength(1);
+    expect(rows.indexOf(FAILED_ROW)).toBeLessThan(first);
     const after = rows.slice(last + 1).filter(Boolean);
-    expect(after.slice(0, 4)).toEqual(["─".repeat(ONE_COLUMN), " ∞ Infinite", "─".repeat(ONE_COLUMN), `─ Steps ${"─".repeat(ONE_COLUMN - 8)}`]);
-    // One column draws the label whole (from 80 r4 cuts it to the label column: `reading the last …`).
-    expect(after[4]).toMatch(/^ {2}reading the last (?:…|200 days)\s+━+\s+✓ 200 days$/u);
-    expect(after[5]).toMatch(/^ {2}reading today\s+━+\s+✗ not synced yet$/u);
-    expect(after.slice(6)).toEqual(["─".repeat(ONE_COLUMN), "❯ Ask Infinite…", " /  commands"]);
-    expect(rows).not.toContain(FAILED_ROW);
-    expect(rows.some((row) => /more lines|lines above/u.test(row))).toBe(false);
+    expect(after).toEqual(["─".repeat(ONE_COLUMN), " ∞ Infinite", "─".repeat(ONE_COLUMN), "❯ Ask Infinite…", " /  commands"]);
+    expect(rows.some((row) => /more lines|lines above|─ Steps/u.test(row))).toBe(false);
     await sendKeys(input, "/exit\r");
     await session;
-    // The next line (here: leaving) commits the strip: the failed call's row,
-    // once, under the answer; the clean call and the strip itself go with the live turn.
+    // Leaving prints nothing more of the turn: each call is in scrollback once.
     const final = scrollbackRows(output.text()).map((row) => row.trimEnd());
     expect(final.filter((row) => row === FAILED_ROW)).toHaveLength(1);
-    expect(final.findIndex((row) => row === FAILED_ROW)).toBeGreaterThan(final.findIndex((row) => /alpha line 199$/u.test(row)));
-    expect(final.slice(final.findIndex((row) => row === FAILED_ROW) + 1).some((row) => row.includes("─ Steps"))).toBe(false);
+    expect(final.filter((row) => row === CLEAN_ROW)).toHaveLength(1);
   });
 
-  it.skipIf(process.env.CI === "true")("a turn that fits keeps its Steps live; the next line commits it with the failed row only", { timeout: 30_000 }, async () => {
+  it.skipIf(process.env.CI === "true")("a turn that fits shows its call lines live; the next line commits them in place, each once", { timeout: 30_000 }, async () => {
     resetTurnState();
     const input = ttyInput();
     const output = ttyOutput();
@@ -615,23 +613,24 @@ describe("a failed step survives the commit to scrollback (fake TTY; skipped on 
     await waitFor(() => output.text().includes("Ask Infinite"), 4_000, output.text);
     await sendKeys(input, "first\r");
     await waitFor(() => stripAnsi(output.text()).includes("∞ Up 12% on the week."), 4_000, output.text);
-    // Live: the whole strip, bars and all.
+    // Live: one line per call, no bars.
     const live = scrollbackRows(output.text()).map((row) => row.trimEnd());
-    expect(live.some((row) => /reading the last.*━+\s+✓ 200 days/u.test(row))).toBe(true);
-    expect(live.some((row) => /reading today\s+━+\s+✗ not synced yet/u.test(row))).toBe(true);
-    expect(live).not.toContain(FAILED_ROW);
+    expect(live).toContain(CLEAN_ROW);
+    expect(live).toContain(FAILED_ROW);
+    expect(live.some((row) => /━/u.test(row))).toBe(false);
     await sendKeys(input, "second\r");
     await waitFor(() => stripAnsi(output.text()).includes("answer-second"), 4_000, output.text);
     await sendKeys(input, "/exit\r");
     await session;
     const rows = scrollbackRows(output.text()).map((row) => row.trimEnd());
+    const question = rows.findIndex((row) => row === "❯ first");
     const answer = rows.findIndex((row) => row.includes("∞ Up 12% on the week."));
-    expect(rows.slice(answer + 1, answer + 4)).toEqual(["", FAILED_ROW, "─".repeat(80)]);
+    expect(rows.slice(question, answer + 1)).toEqual(["❯ first", "", CLEAN_ROW, FAILED_ROW, "", "∞ Up 12% on the week."]);
     expect(rows.filter((row) => row === FAILED_ROW)).toHaveLength(1);
-    expect(rows.some((row) => row.includes("reading the last 200 days"))).toBe(false);
+    expect(rows.filter((row) => row === CLEAN_ROW)).toHaveLength(1);
   });
 
-  it.skipIf(process.env.CI === "true")("with a card still waiting the calls stay live under it; the failed row is printed once, when the card's turn is committed", { timeout: 30_000 }, async () => {
+  it.skipIf(process.env.CI === "true")("with a card still waiting the calls stay live with it; each is printed once, when the card's turn is committed", { timeout: 30_000 }, async () => {
     resetTurnState();
     const pending: InSessionConfirmationAction = {
       turnId: "t1",
@@ -659,10 +658,10 @@ describe("a failed step survives the commit to scrollback (fake TTY; skipped on 
     await new Promise((resolve) => setTimeout(resolve, 200));
     const waiting = scrollbackRows(output.text()).map((row) => row.trimEnd());
     const answerEnd = waiting.findIndex((row) => /alpha line 199$/u.test(row));
-    // The answer went up alone: right under it the turn's rule, then the frame with the card and its Steps.
+    // The answer went up alone: right under it the turn's rule, then the frame with the card and its calls.
     expect(waiting.slice(answerEnd + 1, answerEnd + 4)).toEqual(["─".repeat(80), " ∞ Infinite", "─".repeat(80)]);
-    expect(waiting).not.toContain(FAILED_ROW);
-    expect(waiting.slice(answerEnd).some((row) => /reading today\s+━+\s+✗ not synced yet/u.test(row))).toBe(true);
+    expect(waiting.slice(0, answerEnd)).not.toContain(FAILED_ROW);
+    expect(waiting.slice(answerEnd)).toContain(FAILED_ROW);
     // The card is answered, the session ends: what was live is committed, the failed call with it, once.
     await sendKeys(input, "n");
     await waitFor(() => stripAnsi(output.text()).includes("Dismissed"), 4_000, output.text);
@@ -671,6 +670,7 @@ describe("a failed step survives the commit to scrollback (fake TTY; skipped on 
     await session;
     const rows = scrollbackRows(output.text()).map((row) => row.trimEnd());
     expect(rows.filter((row) => row === FAILED_ROW)).toHaveLength(1);
+    expect(rows.filter((row) => row === CLEAN_ROW)).toHaveLength(1);
     expect(rows.findIndex((row) => row === FAILED_ROW)).toBeGreaterThan(rows.findIndex((row) => /alpha line 199$/u.test(row)));
     expect(countLine(stripAnsi(output.text()), "alpha line 100")).toBe(1);
   });

@@ -1,9 +1,11 @@
 // The caption gate (round 4; the same rule in both renderers): an answer that
 // comes with a view (a card) shows at most two sentences above it. The rest
-// is FOLDED, never dropped, rewritten or summarised: the terminal draws a dim
-// `… more (?)` line under the two sentences, `?` opens the rest in the live
-// turn, and scrollback prints the folded rest under the view as a dim
-// paragraph. A turn with no view is never touched.
+// is FOLDED, never dropped, rewritten or summarised. In the terminal it
+// applies only to a turn drawn side by side (since the one-column default,
+// 2026-10-15, a turn that asks for two columns): a dim `… more (?)` line under
+// the two sentences in the answer pane, and `?` opens the rest. One column
+// shows the words whole, live and in scrollback. A turn with no view is never
+// touched.
 //
 // A sentence ends at `.`, `!`, `?` or `…` (and any closing markdown or quote
 // right after it) followed by whitespace and then an uppercase letter, a

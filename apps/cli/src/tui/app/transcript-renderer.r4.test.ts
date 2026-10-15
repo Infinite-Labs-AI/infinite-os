@@ -204,7 +204,7 @@ describe("a running turn with views is drawn in the r4 layout while it works", (
     tools: [{ id: "c2", name: "pause_entity", startedAt: 400, latestPreview: "waiting for Meta" } as TurnState["tools"][number]]
   });
 
-  it("puts the arriving answer left of the view at 160, held open, with the running call's progress in the Steps", () => {
+  it("puts the arriving answer above the view, held open, with the running call's progress on its line", () => {
     const state = working();
     const history: Msg[] = [{ role: "user", text: "pause the demo item ad" }];
     const messages = workingTurnMessages(history, state);
@@ -212,10 +212,25 @@ describe("a running turn with views is drawn in the r4 layout while it works", (
       messages, views: [listView()], focus: null, width: 160, color: false, theme,
       steps: workingTurnSteps(messages, state, 900), nowMs: 900
     }).lines;
-    // The view head at the plain tier is R3's bracketed title chip.
-    expect(lines[0]).toMatch(/^❯ pause the demo item ad +│ \[Ads running\] ✓ Ready/u);
-    expect(lines.join("\n")).toContain("∞ Two are on; pausing Demo");
+    expect(lines[0]).toBe("❯ pause the demo item ad");
+    expect(lines.some((line) => /^ {2}[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] pausing entity · waiting for Meta$/u.test(line))).toBe(true);
+    const answer = lines.findIndex((line) => line.includes("∞ Two are on; pausing Demo"));
+    // The view head at the plain tier is R3's bracketed title chip, under the answer.
+    expect(lines.findIndex((line) => line.startsWith("[Ads running] ✓ Ready"))).toBeGreaterThan(answer);
     expect(lines.join("\n")).not.toContain("**");
+    expect(lines.some((line) => line.startsWith("─ Steps "))).toBe(false);
+  });
+
+  it("asked side by side, puts the arriving answer left of the view at 160, with the running call's progress in the Steps", () => {
+    const state = working();
+    const history: Msg[] = [{ role: "user", text: "pause the ad, side by side" }];
+    const messages = workingTurnMessages(history, state);
+    const lines = renderLiveTurn({
+      messages, views: [listView()], focus: null, width: 160, color: false, theme,
+      steps: workingTurnSteps(messages, state, 900), nowMs: 900
+    }).lines;
+    expect(lines[0]).toMatch(/^❯ pause the ad, side by side +│ \[Ads running\] ✓ Ready/u);
+    expect(lines.join("\n")).toContain("∞ Two are on; pausing Demo");
     expect(lines.some((line) => /^ {2}pausing entity +━*╍╍ [⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] waiting for Meta$/u.test(line))).toBe(true);
     expect(lines.filter((line) => line.startsWith("─ Steps ")).length).toBe(1);
   });

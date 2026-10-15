@@ -1,10 +1,12 @@
-// The caption gate in a running session (round 4): an answer that comes with
-// a view shows two sentences above it and a dim `… more (?)` line. `?` (the
-// keys not on the view) opens the rest in the live turn; after tab the keys
-// are on the view and `?` is its explanation, as before. The next question
-// commits the turn: two sentences above the view, the folded rest under it,
-// dim, every word once. Fake TTY, real Ink, read back through a small
-// terminal emulator. Synthetic data only (shared vector V1).
+// The caption gate in a running session (round 4), on a turn drawn side by
+// side (since the one-column default, 2026-10-15, a turn that asks for two
+// columns): an answer that comes with a view shows two sentences and a dim
+// `… more (?)` line in the answer pane. `?` (the keys not on the view) opens
+// the rest in the live turn; after tab the keys are on the view and `?` is
+// its explanation, as before. The next question commits the turn in one
+// column: the answer whole above the view, every word once. A turn that does
+// not ask is one column and never folds. Fake TTY, real Ink, read back
+// through a small terminal emulator. Synthetic data only (shared vector V1).
 import { readFileSync } from "node:fs";
 import { PassThrough } from "node:stream";
 import { fileURLToPath } from "node:url";
@@ -42,7 +44,7 @@ async function start(cols: number, rows: number) {
     title: "Infinite TUI",
     async onSubmitLine(line, _onProgress, _signal, onView) {
       if (line === "/exit") return { exit: true, messages: [] };
-      if (line === "how is spend?") {
+      if (line === ASKED || line === "how is spend?") {
         onView?.(metaFrame());
         return { messages: [{ role: "assistant", text: V1 }] };
       }
@@ -53,6 +55,8 @@ async function start(cols: number, rows: number) {
   return { input, vt, output, session };
 }
 
+/** A question that asks for two columns (`chat-layout.ts`). */
+const ASKED = "spend, side by side?";
 const keyBar = (vt: VtBuffer) => vt.screenText().filter((row) => row.trim()).at(-1) ?? "";
 /** The answer's words on screen: the left pane's when split. */
 const answerWords = (vt: VtBuffer, cols: number) => {
@@ -62,9 +66,9 @@ const answerWords = (vt: VtBuffer, cols: number) => {
 
 describe("the caption gate in a running session (fake TTY, skipped on CI)", () => {
   for (const [cols, rows] of [[100, 40], [140, 44]] as const) {
-    it.skipIf(process.env.CI === "true")(`${cols}x${rows}: ? opens the folded rest; the next question commits it under the view`, { timeout: 30_000 }, async () => {
+    it.skipIf(process.env.CI === "true")(`${cols}x${rows}: ? opens the folded rest; the next question commits the answer whole above the view`, { timeout: 30_000 }, async () => {
       const { input, vt, session } = await start(cols, rows);
-      await sendKeys(input, "how is spend?\r");
+      await sendKeys(input, `${ASKED}\r`);
       await waitFor(() => vt.screenText().some((row) => row.includes("… more (?)")), 4_000, () => vt.screenText().join("\n"));
       expect(answerWords(vt, cols)).toContain("trials are not confirmed.");
       expect(answerWords(vt, cols)).not.toContain(FOLDED);
@@ -79,19 +83,35 @@ describe("the caption gate in a running session (fake TTY, skipped on CI)", () =
       await waitFor(() => vt.allText().some((row) => row.startsWith("∞ Done.")), 4_000, () => vt.allText().join("\n"));
       const all = vt.allText();
       const head = all.findIndex((row) => row.includes("Ads by campaign"));
-      const rest = all.findIndex((row) => row.includes(FOLDED));
       expect(head, all.join("\n")).toBeGreaterThan(0);
-      expect(rest, all.join("\n")).toBeGreaterThan(head);
-      expect(all.filter((row) => row.includes(FOLDED))).toHaveLength(1);
-      expect(all.slice(0, head).join(" ")).toContain("trials are not confirmed.");
+      // The words may wrap: read them as one text. Every word once, all of it above the view.
+      const words = (rows: readonly string[]) => rows.join(" ").replace(/\s+/gu, " ");
+      expect(words(all.slice(0, head))).toContain(V1);
+      expect(words(all).split(FOLDED).length - 1).toBe(1);
       await sendKeys(input, "/exit\r");
       await session;
     });
   }
 
-  it.skipIf(process.env.CI === "true")("100x40: after tab, ? is the view's explanation; the fold stays closed", { timeout: 30_000 }, async () => {
+  it.skipIf(process.env.CI === "true")("100x40: a question that does not ask is one column: the words whole above the view, no fold and no `? more`", { timeout: 30_000 }, async () => {
     const { input, vt, session } = await start(100, 40);
     await sendKeys(input, "how is spend?\r");
+    // Taller than the window, the finished turn goes whole into scrollback.
+    await waitFor(() => vt.allText().some((row) => row.includes("Ads by campaign")), 4_000, () => vt.allText().join("\n"));
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    const all = vt.allText();
+    const head = all.findIndex((row) => row.includes("Ads by campaign"));
+    expect(all.some((row) => row.includes("more (?)"))).toBe(false);
+    expect(all.slice(0, head).join(" ").replace(/\s+/gu, " ")).toContain(V1);
+    expect(all.some((row) => /│ +Ads by campaign/u.test(row))).toBe(false);
+    expect(keyBar(vt)).not.toMatch(/\?\s+more/u);
+    await sendKeys(input, "/exit\r");
+    await session;
+  });
+
+  it.skipIf(process.env.CI === "true")("100x40: after tab, ? is the view's explanation; the fold stays closed", { timeout: 30_000 }, async () => {
+    const { input, vt, session } = await start(100, 40);
+    await sendKeys(input, `${ASKED}\r`);
     await waitFor(() => vt.screenText().some((row) => row.includes("… more (?)")), 4_000, () => vt.screenText().join("\n"));
     await sendKeys(input, "\t");
     await waitFor(() => /\?\s+what it does/u.test(keyBar(vt)), 4_000, () => keyBar(vt));

@@ -1,8 +1,10 @@
-// Every r4 screen at 80 columns, drawn through the REAL session: the turn sits
-// side by side from 80 columns (r4 `frame()`: wide=W>=80), so the details pane
-// is 51 columns wide, its narrowest. Every view kind and every card must stay
-// legible there: no row wider than the window, every box closed on both sides,
-// the Steps strip and the key bar inside the window. Synthetic data only.
+// Every r4 screen at 80 columns, drawn through the REAL session with its
+// question asking for two columns (since the one-column default, 2026-10-15, a
+// turn is side by side only when it asks): the turn sits side by side from 80
+// columns (r4 `frame()`: wide=W>=80), so the details pane is 51 columns wide,
+// its narrowest. Every view kind and every card must stay legible there: no
+// row wider than the window, every box closed on both sides, the Steps strip
+// and the key bar inside the window. Synthetic data only.
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
 const pinnedEnv = vi.hoisted(() => {
@@ -23,6 +25,7 @@ import { homeInventoryData } from "../../../index.js";
 import { displayWidth } from "../../lib/display-width.js";
 import { paneWidths } from "../../views/layout.js";
 import { ansiToSegmentLines } from "./ansi-to-segments.js";
+import { askingSideBySide } from "./evaluate.js";
 import { ENTRY_SESSION_PROPS } from "./feed-chrome.js";
 import { loadR4Fixture, r4FixtureIds } from "./fixtures.js";
 import { textOf } from "./normalize.js";
@@ -31,10 +34,11 @@ import { renderR4Screen } from "./screen.js";
 const FIXED_CLOCK = Date.parse("2026-10-01T10:44:00Z");
 const COLS = 80;
 const { left, right } = paneWidths(COLS);
-const SCREENS = r4FixtureIds();
+/** Every r4 screen with a turn (the boot screen has none to split). */
+const SCREENS = r4FixtureIds().filter((screen) => loadR4Fixture(screen).turn !== null);
 
 function rows(screen: string): string[] {
-  const ansi = renderR4Screen(loadR4Fixture(screen), { cols: COLS, now: FIXED_CLOCK, homeInventory: homeInventoryData, sessionProps: ENTRY_SESSION_PROPS });
+  const ansi = renderR4Screen(askingSideBySide(loadR4Fixture(screen)), { cols: COLS, now: FIXED_CLOCK, homeInventory: homeInventoryData, sessionProps: ENTRY_SESSION_PROPS });
   return ansiToSegmentLines(ansi).map((line) => textOf(line).trimEnd());
 }
 
@@ -61,9 +65,9 @@ afterAll(() => {
   }
 });
 
-describe("every r4 screen at 80 columns: side by side, every view and card legible in the 51-column pane", () => {
-  it("covers every view kind and every flow (41 screens)", () => {
-    expect(SCREENS).toHaveLength(41);
+describe("every r4 screen at 80 columns, asked side by side: every view and card legible in the 51-column pane", () => {
+  it("covers every view kind and every flow (40 screens with a turn)", () => {
+    expect(SCREENS).toHaveLength(40);
     expect(left).toBe(26);
     expect(right).toBe(51);
   });
@@ -104,4 +108,18 @@ describe("every r4 screen at 80 columns: side by side, every view and card legib
     expect(tops.length).toBeGreaterThan(5);
     for (const top of tops) expect(displayWidth(top), top).toBe(right);
   });
+});
+
+describe("every r4 screen at 80 columns, as asked: one column, two for a compare card", () => {
+  for (const screen of r4FixtureIds()) {
+    // A compare card asks for two columns on its own (chat-layout.ts).
+    const compares = loadR4Fixture(screen).turn?.views.some((view) => view.kind === "compare") === true;
+    it(`${screen}: no row wider than 80, ${compares ? "side by side" : "nothing beside the answer"}`, () => {
+      const ansi = renderR4Screen(loadR4Fixture(screen), { cols: COLS, now: FIXED_CLOCK, homeInventory: homeInventoryData, sessionProps: ENTRY_SESSION_PROPS });
+      const all = ansiToSegmentLines(ansi).map((line) => textOf(line).trimEnd());
+      const shown = all.join("\n");
+      for (const row of all) expect(displayWidth(row), `${row}\n\n${shown}`).toBeLessThanOrEqual(COLS);
+      for (const row of body(all)) expect(Array.from(row)[left + 1] === "│", `${row}\n\n${shown}`).toBe(compares);
+    });
+  }
 });

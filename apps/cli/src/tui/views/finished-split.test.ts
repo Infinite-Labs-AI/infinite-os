@@ -5,7 +5,9 @@
 // to the window, the answer pane like the details pane (its own `↓ N more` /
 // `↑ N above` line). Tab switches the keys between the two sides, ↓/↑
 // (PgDn/PgUp) scroll the focused side only, `o` opens the view's place from
-// either side (after tab), Esc leaves. Synthetic data only.
+// either side (after tab), Esc leaves. Since the one-column default
+// (2026-10-15) the split is a turn that asks for two columns, as the question
+// below does. Synthetic data only.
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import type { AnswerViewV1 } from "@infinite-os/types";
@@ -26,7 +28,7 @@ const steps: TurnStep[] = [
   { id: "s1", name: "list_sources", label: "checking your sources", status: "ok", startedAt: 0, endedAt: 500, result: "6 sources" }
 ];
 const longAnswer: Msg[] = [
-  { role: "user", text: "how are my sources?" },
+  { role: "user", text: "how are my sources? side by side" },
   { role: "assistant", text: Array.from({ length: 40 }, (_unused, index) => `Line ${index + 1} of the answer.`).join("\n\n") }
 ];
 
@@ -141,7 +143,12 @@ describe("a finished tall turn keeps the split, both panes held to the window (l
   });
 
   it("a turn with no view keys but a cut answer: tab puts the keys on the answer, ↓ scrolls it", () => {
-    const drawn = renderLiveTurn({ messages: longAnswer, views: [], focus: null, width: 100, color: false, theme, rows: TURN_ROWS, steps });
+    // A quiet view: r4's `steps only` details pane, which has no keys of its own.
+    const quiet = decodeAnswerView({
+      v: 1, kind: "quiet", tool: "read_playbook", title: "", state: "ready", asOf: null,
+      scope: { workspaceName: "Demo", crossWorkspace: false }, caveats: [], body: { stepLine: "read the playbook" }
+    })!;
+    const drawn = renderLiveTurn({ messages: longAnswer, views: [quiet], focus: null, width: 100, color: false, theme, rows: TURN_ROWS, steps, captionOpen: true });
     expect(drawn.answerPane).not.toBeNull();
     const facts = answerOnlyFacts({ above: 0, below: drawn.answerPane!.below, page: drawn.answerPane!.shown });
     const start = viewFocusAfterTurnDone([], CAPS);

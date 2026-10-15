@@ -1,39 +1,38 @@
-// The r4 turn layout (terminal-r4 `frame()`): the CURRENT turn, in a window
-// at least 80 columns wide (r4's own `const wide=W>=80`, so an everyday
-// window sees it; layout decision, 2026-10-03), puts the answer on the
-// left, the view's details on the right and the Steps strip below. When wide
-// it ALWAYS splits, as r4 does: a turn with nothing for the right pane shows
-// r4's dim `steps only` there. Narrower, and for every turn committed to
-// scrollback, the turn is ONE column: the question, the answer, a rule, the
-// details underneath, then the Steps. The key bar and the composer are the
-// session's, below all of it.
+// The live turn's layout (one-column default, 2026-10-15, `chat-layout.ts`).
 //
-// One thing keeps a turn in ONE column from 80 columns too, a case r4 does
-// not draw: its answer carries a markdown table that would not draw whole in
-// the answer pane. The pane is 26 to 40 columns, where a wide table turns
-// into `label: value` stacks or drops columns; at the whole width it stays a
-// bordered table, and the details follow under it. A table small enough for
-// the pane keeps the split.
+// ONE column at every width, as a chat reads: the question, then each tool
+// call as one compact line (`  ✓ checking your Meta ads · 3 ad sets`), then
+// the answer's words in full, then a blank row and the details (each view, then
+// a waiting card) at the whole width. A finished turn prints into scrollback
+// the same way, whole, its calls kept in place.
 //
-// A turn TALLER than the window keeps the split too (layout decision,
+// Two columns, the r4 turn layout (terminal-r4 `frame()`), are for a turn that
+// asks for them (`asksSideBySide`) in a window at least 80 columns wide: the
+// answer on the left, the view's details on the right and the Steps strip
+// below, but only when it has something for the right pane (a view or a
+// waiting card): a plain answer stays one column whatever the question says.
+// Its answer shows two sentences above the view (the caption gate, `… more (?)`). Its answer stays one column if it carries a
+// markdown table that would not draw whole in the answer pane (26 to 40
+// columns, where a wide table turns into `label: value` stacks).
+//
+// A side-by-side turn TALLER than the window keeps the split (layout decision,
 // 2026-10-03): given the rows the live region has for it, the panes are held
 // to them. The details pane shows the view from its top (or where ↓/↑ scrolled
 // it, after tab; j/k scroll it just enough to keep the selected row on
 // screen) and its last row says `↓ N more · tab, then ↓`; while the turn
 // runs, an answer taller than the room shows its newest lines. FINISHED, the
-// answer pane is held the same way (live L8: a finished tall turn kept the
-// split and its keys only if it fit): it shows the question from the top (or
-// where ↓/↑ scrolled it, once tab put the keys on it) with its own `↓ N more`
-// / `↑ N above` line. A short pane is padded as r4's frame() pads it (16 rows,
-// as the window allows), and a blank pane row always sits over the Steps rule.
-// Committed to scrollback the turn is written whole, in one column, as before.
+// answer pane is held the same way (live L8): it shows the question from the
+// top (or where ↓/↑ scrolled it, once tab put the keys on it) with its own
+// `↓ N more` / `↑ N above` line. A short pane is padded as r4's frame() pads
+// it (16 rows, as the window allows), and a blank pane row always sits over
+// the Steps rule.
 //
 // Every line this returns fits its width: the panes are laid out to their own
 // widths first, and each line is cut to fit as a last resort.
 import type { AnswerViewV1 } from "@infinite-os/types";
 
 import { holdOpenMarkers } from "../../formatting/markdown-inline.js";
-import { markdownHasTable, markdownTablesFit, renderMarkdown } from "../../formatting/markdown-render.js";
+import { markdownHasTable, markdownTablesFit } from "../../formatting/markdown-render.js";
 import { answerTextWidth } from "../app/answer-column.js";
 import { renderTurnBody, workingAnswerLines } from "../app/transcript-renderer.js";
 import type { TurnState, TurnStep } from "../app/turn-store.js";
@@ -55,12 +54,13 @@ import { gateAnswerMessages } from "./caption-gate.js";
 import { turnRepeats } from "./meta-fold.js";
 import { fitLine, paint } from "./primitives.js";
 import { renderView } from "./registry.js";
-import { stepHeader, stepRowLines, stepsFromTrail, unsettledStepLines } from "./steps.js";
+import { stepFlowLines, stepHeader, stepRowLines, stepsFromTrail } from "./steps.js";
 import type { ViewRender, ViewRenderCtx } from "./types.js";
+import { asksSideBySide } from "./chat-layout.js";
 
 export { stepLabelWidth } from "./steps.js";
 
-/** At this width and up, the current turn's answer and details sit side by side (r4 `frame()`: `wide=W>=80`). */
+/** At this width and up, a turn that asks for two columns sits side by side (r4 `frame()`: `wide=W>=80`). */
 export const SPLIT_MIN_COLUMNS = 80;
 export const PANE_SEPARATOR = " │ ";
 /** The answer pane's widest (28% of the window, clamped to 26–40). */
@@ -98,11 +98,12 @@ export function viewLines(render: ViewRender, width: number, compact = false): s
  * answer alone, full width. A quiet view with no head never takes the details
  * pane: its step line prints with the Steps, so a turn whose views are all
  * quiet keeps its answer full width (one with a head, r4's `steps only`, is a
- * details pane like any other). `split: false` keeps one column at any width (a turn
- * committed to scrollback). `steps` is the Steps strip's rows (the header is
- * drawn here). `compact: true` leaves out the blank rows around the details
- * (over the rule, under the details' head, over the Steps): see
- * `LiveTurnInput.compact`.
+ * details pane like any other). `split: false` keeps one column at any width:
+ * the answer, a blank row, then the details, with no Steps strip (one column
+ * draws its calls in the answer column). `steps` is the side-by-side Steps
+ * strip's rows (the header is drawn here). `compact: true` leaves out the
+ * blank rows around the details (over them in one column, under the details'
+ * head): see `LiveTurnInput.compact`.
  */
 export function layoutTurn(
   answer: readonly string[],
@@ -196,8 +197,9 @@ function layoutTurnParts(
   const panes = paneWidths(total);
   const wide = panes.wide && options.split !== false;
   const compact = options.compact === true;
-  // `steps: false` (a turn committed to scrollback, D1) draws no Steps strip at all.
-  const strip = options.steps === false ? [] : [...steps, ...quietSteps];
+  // Only a side-by-side turn has a Steps strip: one column draws its calls in
+  // the answer column (`stepFlowLines`), and `steps: false` draws none.
+  const strip = options.steps === false || !wide ? [] : [...steps, ...quietSteps];
   let pane: PaneWindow | null = null;
   let answerPane: PaneWindow | null = null;
   let natural = 0;
@@ -277,11 +279,11 @@ function layoutTurnParts(
         out.push(row("", ""));
       }
     } else {
-      // The rule parts the answer from the details; a turn with no answer
-      // (a card that arrived on its own) starts at its details.
+      // A blank row parts the answer from the details, as a chat does; a turn
+      // with no answer (a card that arrived on its own) starts at its details.
       out.push(
         ...answer.map((line) => fitLine(line, total)),
-        ...(answer.length ? [...(compact ? [] : [""]), rule("─".repeat(total))] : []),
+        ...(answer.length && !compact ? [""] : []),
         ...details
       );
     }
@@ -291,11 +293,6 @@ function layoutTurnParts(
     natural = out.length;
   }
   if (strip.length) {
-    // One column: a blank row between the details and the Steps (r4 stacked frame).
-    if (renders.length && !wide && !compact) {
-      out.push("");
-      natural += 1;
-    }
     out.push(stepHeader(total, style ?? { color: false, theme: DEFAULT_THEME }), ...strip.map((line) => fitLine(line, total)));
     natural += strip.length + 1;
   }
@@ -317,7 +314,8 @@ function paneMoreLine(pane: PaneWindow, keysOnPane: boolean, style: { color: boo
 /**
  * The answer column: the question (`❯`), then the answer (`∞`, markdown, with
  * its project label), diffs, the trail's thinking and todos, and any notes.
- * The tool calls are not here: they are the Steps strip. The same renderer as
+ * The tool calls are not here: one column draws them as lines between the
+ * question and the answer, side by side as the Steps strip. The same renderer as
  * the transcript (`renderTurnBody`), so a turn drawn here or committed to
  * scrollback keeps everything the transcript shows.
  */
@@ -349,16 +347,15 @@ export interface LiveTurnInput {
   livePageNext?: boolean;
   /**
    * The turn's tool calls with their start and end (the turn store's `steps`),
-   * for the Steps strip. Absent or empty: the strip comes from the tool trail
-   * in `messages`, laid end to end.
+   * for the call lines (one column) or the Steps strip (side by side). Absent
+   * or empty: they come from the tool trail in `messages`, laid end to end.
    */
   steps?: readonly TurnStep[];
   /** Now (epoch ms), for a call still running. */
   nowMs?: number;
   /**
-   * The running turn's state, for a question drawn with nothing in its details
-   * pane but `steps only`: until something answers, the answer column ends on
-   * the transcript's `⠋ Working…` line (at `nowMs`).
+   * The running turn's state: until something answers, the answer column ends
+   * on the transcript's `⠋ Working…` line (at `nowMs`).
    */
   working?: TurnState;
   /**
@@ -368,11 +365,12 @@ export interface LiveTurnInput {
    */
   running?: boolean;
   /**
-   * Lines already drawn for the details pane, after the views: the turn's
-   * pending write card (its head, source and box), so it takes the right pane
-   * from 80 columns and follows the answer and a rule below that, with the
-   * Steps under it, as r4 draws "Needs your OK". Draw them at
-   * `detailsPaneWidth(width)` columns.
+   * Lines already drawn for the details, after the views: the turn's pending
+   * write card (its head, source and box). One column (the default), it sits
+   * under the answer at the whole width; on a turn that asks for two columns
+   * (`asksSideBySide`) it takes the right pane from 80 columns, with the Steps
+   * under it, as r4 draws "Needs your OK". Draw them at
+   * `detailsPaneWidth(width, turnMaySplit(…))` columns.
    */
   details?: readonly string[];
   /**
@@ -425,21 +423,24 @@ export function answerCarriesTable(messages: readonly Msg[]): boolean {
 }
 
 /**
- * Whether a live turn with these messages may sit side by side at this width:
- * the window is at least 80 columns and every table of the answer's own
- * draws whole (bordered, no column dropped) in the answer pane.
+ * Whether a live turn with these messages and views sits side by side at this
+ * width: it asks for two columns (`asksSideBySide`), it has something for the
+ * right pane (a view, or a waiting `card`), the window is at least 80 columns
+ * and every table of the answer's own draws whole (bordered, no column
+ * dropped) in the answer pane. Every other turn is one column: a question that
+ * names a dashboard in passing never splits a plain answer beside an empty pane.
  * The session draws a pending card at `detailsPaneWidth(width, turnMaySplit(…))`.
  */
-export function turnMaySplit(messages: readonly Msg[], width: number): boolean {
+export function turnMaySplit(messages: readonly Msg[], width: number, views: readonly Pick<AnswerViewV1, "kind">[] = [], card = false): boolean {
   const panes = paneWidths(width);
-  return panes.wide && answerTablesFit(messages, panes.left);
+  return panes.wide && (views.length > 0 || card) && asksSideBySide(messages, views) && answerTablesFit(messages, panes.left);
 }
 
 /**
  * Whether the live messages are a question to Infinite (a typed line that is
- * not a `/` command, and no command output with it): the turns r4 draws in its
- * frame, so the session draws one in the turn layout even with no view, its
- * details pane r4's `steps only`. A command's output stays the transcript's.
+ * not a `/` command, and no command output with it): the session draws one in
+ * the turn layout even with no view (one column, its calls as lines). A
+ * command's output stays the transcript's.
  * The question's own notes (its stop or error line, a line queued behind it:
  * `turnNote`) keep it a question, so it never jumps to one column as it ends.
  */
@@ -464,8 +465,9 @@ export interface LiveTurnRender {
   focused: { render: ViewRender; facts: ViewKeyFacts } | null;
   /**
    * The turn draws details (a view that takes the details pane, or a card):
-   * right of the answer from 80 columns, under it below that. The key bar
-   * offers `tab switch side` only then.
+   * under the answer in one column (the default), right of it from 80 columns
+   * on a turn that asks for two (`asksSideBySide`). The key bar offers `tab`
+   * only then: `to card` in one column, `switch side` side by side.
    */
   details: boolean;
   /** A view pages inside itself (a long document's `space next page`): the turn is not whole on screen. */
@@ -487,7 +489,7 @@ export interface LiveTurnRender {
   cardShown: boolean | null;
 }
 
-/** The latest turn with its views, laid out for the live region: side by side from 80 columns. */
+/** The latest turn with its views, laid out for the live region: one column, or side by side when it asks (`turnMaySplit`). */
 export function renderLiveTurn(input: LiveTurnInput): LiveTurnRender {
   const width = Math.max(1, Math.floor(input.width));
   const budget = typeof input.rows === "number" && Number.isFinite(input.rows) ? Math.max(1, Math.floor(input.rows)) : undefined;
@@ -533,12 +535,11 @@ export function renderLiveTurn(input: LiveTurnInput): LiveTurnRender {
 
 /**
  * The rows a live turn shows WITH its pending card, besides the card, at
- * `width`: the other views in the details pane and the Steps (with the blank
- * pane row over them from 80 columns), plus, below
- * 80 columns, the blank and the rule over the details and the blank over
- * the Steps. The question and the answer are not counted: from 80 they sit
- * beside the card, and below it a tall answer pages away above it (the turn
- * opens on its card). The session holds the card to the rest of the live
+ * `width`: side by side, the other views in the details pane and the Steps
+ * (with the blank pane row over them); one column, the other views and the
+ * blank row over the details. The question, its calls and the answer are not
+ * counted: side by side they sit beside the card, and in one column a tall
+ * answer pages away above it (the turn opens on its card). The session holds the card to the rest of the live
  * budget, so the card's head, title and OK key stay on screen.
  */
 export function rowsBesideCard(input: Omit<LiveTurnInput, "details" | "rows" | "livePageNext">): number {
@@ -551,8 +552,8 @@ export function rowsBesideCard(input: Omit<LiveTurnInput, "details" | "rows" | "
     const above = drawn.detailRows > 1 ? 1 : 0;
     return drawn.stepRows + (drawn.stepRows ? 1 : 0) + above;
   }
-  // One column: the other views, the blank and the rule over the details and the blank over the Steps.
-  return drawn.stepRows + drawn.detailRows - 1 + (drawn.answerRows ? 2 : 0) + (drawn.stepRows ? 1 : 0);
+  // One column: the other views and the blank row over the details.
+  return drawn.detailRows - 1 + (drawn.answerRows ? 1 : 0);
 }
 
 /** One details row standing in for the card while its neighbours are measured. */
@@ -569,41 +570,17 @@ export interface CommittedTurnInput extends Omit<LiveTurnInput, "rows" | "livePa
 
 /**
  * A finished turn as it is printed once into scrollback (D1): ONE column at
- * any width, the question, the answer and its details underneath, every page
- * of it (no row budget). No Steps strip: the calls belonged to the live turn.
- * The one thing kept of them is every call that did NOT end clean (failed, no
- * outcome, the thing had changed, an OK never answered): its row follows the
- * answer, a blank row apart, so why a step failed is still in scrollback.
+ * any width, as it read live in one column: the question, its calls in place
+ * (every one of them, as a chat keeps its tool lines, unless they stay live
+ * under a waiting card), the answer's words, then its details underneath,
+ * every page of it (no row budget, so a document is one page as tall as its
+ * body, with no page line that no key could act on in scrollback). No rule of
+ * its own: scrollback draws the ONE thin rule under each turn (D1,
+ * transcript-app.tsx), so a rule here would print two.
  */
 export function renderCommittedTurn(input: CommittedTurnInput): string[] {
   const width = Math.max(1, Math.floor(input.width));
-  // No row budget: a document is one page as tall as its body (no page line,
-  // which no key could act on in scrollback), whatever page the live turn showed.
-  // No rule of its own: scrollback draws the ONE thin rule under each turn (D1,
-  // transcript-app.tsx), so a rule here would print two.
-  const drawn = drawLiveTurn(input, width, ALL_ROWS, false, false);
-  // The caption gate (round 4): at most two sentences above the view; the
-  // folded rest follows the view, dim, so scrollback keeps every word.
-  const lines = drawn.foldedRest === null
-    ? drawn.lines
-    : [...drawn.lines, "", ...foldedRestLines(drawn.foldedRest, width, { color: input.color, theme: input.theme })];
-  if (input.stepsStayLive) {
-    return lines;
-  }
-  const kept = unsettledStepLines(input.steps?.length ? input.steps : stepsFromTrail(input.messages), {
-    width, color: input.color, theme: input.theme, views: [...input.views, ...(input.statusViews ?? [])]
-  });
-  return kept.length ? [...lines, ...(lines.length ? [""] : []), ...kept] : lines;
-}
-
-/**
- * The folded rest of an answer as scrollback prints it under the view: a dim
- * paragraph, drawn as the answer's markdown (its bullets and tables), in the
- * answer column's indent.
- */
-function foldedRestLines(rest: string, width: number, style: { color: boolean; theme: Theme }): string[] {
-  return renderMarkdown(rest, { width: Math.max(1, width - 2), color: false, theme: style.theme })
-    .map((line) => (line.trim() ? paint(fitLine(`  ${line}`, width), "dim", style) : ""));
+  return drawLiveTurn(input, width, ALL_ROWS, false, input.stepsStayLive !== true).lines;
 }
 
 /** A row budget no view reaches: a committed turn is drawn whole. */
@@ -611,13 +588,21 @@ const ALL_ROWS = Number.MAX_SAFE_INTEGER;
 
 /**
  * One draw of the turn, its views given at most `rows` rows; `split` allows the
- * side-by-side layout; `withSteps` draws the Steps strip; `frame` holds a split
- * turn to that many rows (see `LayoutOptions.maxRows`).
+ * side-by-side layout (false: a turn committed to scrollback); `withSteps`
+ * draws the turn's calls (as lines in one column, as the Steps strip side by
+ * side); `frame` holds a split turn to that many rows (see `LayoutOptions.maxRows`).
  */
 function drawLiveTurn(input: LiveTurnInput, width: number, rows: number | undefined, split: boolean, withSteps = true, frame?: number) {
+  // A turn that asked for two columns but whose views drew nothing for the
+  // right pane (a folded lookup, a failed quiet call) is drawn in one column.
+  return drawTurn(input, width, rows, split, withSteps, frame, false) ?? drawTurn(input, width, rows, split, withSteps, frame, true)!;
+}
+
+/** `drawLiveTurn` once: in one column when `oneColumn`; null when it would split with nothing for the right pane. */
+function drawTurn(input: LiveTurnInput, width: number, rows: number | undefined, split: boolean, withSteps: boolean, frame: number | undefined, oneColumn: boolean) {
   const panes = paneWidths(width);
-  // An answer with a table of its own keeps the whole width (see the header).
-  const wide = split && turnMaySplit(input.messages, width);
+  // Side by side only when the turn asks, has a view or a card, and fits (see the header).
+  const wide = split && !oneColumn && turnMaySplit(input.messages, width, input.views, Boolean(input.details?.length));
   const caps = input.focus?.caps ?? input.caps ?? NO_VIEW_CAPS;
   const base = {
     width: wide ? panes.right : width, color: input.color, theme: input.theme, timeZone: input.timeZone,
@@ -625,7 +610,7 @@ function drawLiveTurn(input: LiveTurnInput, width: number, rows: number | undefi
   };
   const plainCtx: ViewRenderCtx = {
     ...base, selected: 0, tab: 0, page: 0, explainOpen: false, showHiddenColumns: false, caps,
-    ...(split ? {} : { scrollback: true })
+    ...(split ? {} : { scrollback: true }), ...(wide ? {} : { noStepsStrip: true })
   };
   // A lookup of the card's own target is that card's Steps row, not a view (live run-4 N11).
   const folded = foldedLookups(input.views, [...input.views, ...(input.statusViews ?? [])]);
@@ -678,39 +663,33 @@ function drawLiveTurn(input: LiveTurnInput, width: number, rows: number | undefi
     ? [{ head: "", source: null, detail: [...input.details], footnotes: [], keys: [], okKey: null, rowCount: 0 }]
     : [];
   const steps = !withSteps ? [] : input.steps?.length ? input.steps : stepsFromTrail(input.messages);
-  const stepRows = stepRowLines(steps, {
+  const stepOptions = {
     width, color: input.color, theme: input.theme, nowMs: input.nowMs, views: [...input.views, ...(input.statusViews ?? [])]
-  });
+  };
+  // One column draws each call as one compact line under the question; side by side, the Steps strip.
+  const stepRows = wide ? stepRowLines(steps, stepOptions) : [];
+  // A quiet view draws nothing in one column (`noStepsStrip`): its call is one of these lines.
+  const callLines = !wide ? stepFlowLines(steps, stepOptions) : [];
   const takesPane = paneRenders([...drawn, ...card]).length > 0;
-  // The caption gate (round 4): an answer that comes with a view shows two
-  // sentences above it. Live, a dim `… more (?)` line follows them until `?`
-  // opens the rest; committed, the rest prints under the view.
-  const gate = takesPane ? gateAnswerMessages(input.messages) : null;
+  if (wide && !takesPane) return null;
+  // The caption gate (round 4), side by side only: an answer that comes with a
+  // view shows two sentences above it, then a dim `… more (?)` line until `?`
+  // opens the rest. One column shows the answer's words whole, the card under them.
+  const gate = takesPane && wide ? gateAnswerMessages(input.messages) : null;
   const foldedRest = gate?.rest ?? null;
   const foldOpen = split && input.captionOpen === true;
   const answerMessages = gate && foldedRest !== null && !foldOpen ? gate.messages : input.messages;
   const answerAt = (columns: number): string[] => {
-    const body = [
+    const body = !wide ? oneColumnAnswerLines(answerMessages, callLines, columns, input.theme, input.color) : [
       ...renderAnswerColumn(answerMessages, columns, input.theme, input.color),
-      ...(split && foldedRest !== null && !foldOpen ? [paint(fitLine(CAPTION_FOLD_LINE, columns), "dim", { color: input.color, theme: input.theme })] : [])
+      ...(foldedRest !== null && !foldOpen ? [paint(fitLine(CAPTION_FOLD_LINE, columns), "dim", { color: input.color, theme: input.theme })] : [])
     ];
     const working = input.working
       ? workingAnswerLines(input.messages, input.working, { columns, color: input.color, theme: input.theme, nowMs: input.nowMs ?? 0 })
       : [];
     return working.length ? [...body, ...(body.length ? [""] : []), ...working] : body;
   };
-  // When wide, r4 always splits: a turn with an answer and nothing for the
-  // details pane shows r4's dim `steps only` there (its calls are the Steps).
-  // A finished turn with no Steps at all leaves the pane empty (the separator
-  // only), so the label never points at a strip that is not on screen.
-  const leftAnswer = wide && !takesPane ? answerAt(panes.left) : [];
-  const quietCalls = drawn.some((render) => !inDetailsPane(render) && render.detail.length > 0);
-  const hasSteps = stepRows.length > 0 || quietCalls || input.working !== undefined;
-  const stepsOnly: ViewRender[] = leftAnswer.length
-    ? [hasSteps ? stepsOnlyRender({ color: input.color, theme: input.theme }) : EMPTY_PANE]
-    : [];
-  const sideBySide = wide && (takesPane || stepsOnly.length > 0);
-  const answer = leftAnswer.length ? leftAnswer : answerAt(sideBySide ? panes.left : width);
+  const answer = answerAt(wide ? panes.left : width);
   const compact = input.compact === true;
   const keysOnAnswer = Boolean(input.focus?.answerFocus);
   const keysOnPane = Boolean(input.focus && input.focus.engaged && input.focus.focus !== "composer") && !keysOnAnswer;
@@ -718,7 +697,7 @@ function drawLiveTurn(input: LiveTurnInput, width: number, rows: number | undefi
   const answerCut = input.running !== true && !input.details?.length;
   // A card waiting in the pane: the pane opens on it, and ↑/↓ (the card's own keys, no tab) move it (W3L2-M2).
   const cardLines = card.length ? input.details!.length : 0;
-  const laid = layoutTurnParts(answer, [...drawn, ...card, ...stepsOnly], stepRows, width, { color: input.color, theme: input.theme }, {
+  const laid = layoutTurnParts(answer, [...drawn, ...card], stepRows, width, { color: input.color, theme: input.theme }, {
     split: wide, steps: withSteps, compact,
     ...(split && frame !== undefined
       ? {
@@ -731,24 +710,30 @@ function drawLiveTurn(input: LiveTurnInput, width: number, rows: number | undefi
   });
   const lines = laid.lines;
   const detailRows = paneRenders([...drawn, ...card])
-    .reduce((sum, render, index) => sum + (index > 0 ? 1 : 0) + viewLines(render, sideBySide ? panes.right : width, compact).length, 0);
+    .reduce((sum, render, index) => sum + (index > 0 ? 1 : 0) + viewLines(render, wide ? panes.right : width, compact).length, 0);
   return {
-    renders, lines, focusIndex: folded.has(focusIndex) ? -1 : focusIndex, rows, wide: sideBySide, details: takesPane,
+    renders, lines, focusIndex: folded.has(focusIndex) ? -1 : focusIndex, rows, wide, details: takesPane,
     stepRows: stepRows.length ? stepRows.length + 1 : 0, detailRows, answerRows: answer.length,
     pane: laid.pane, answerPane: laid.answerPane, natural: laid.natural, foldedRest, cardShown: laid.cardShown
   };
 }
 
 /**
- * r4's `steps only` details pane (view-12's dim head) for a wide turn with
- * nothing else to show: the label alone, no source row and no sentence.
+ * The one-column answer column: the question, then the turn's calls as compact
+ * lines, then the answer's words (and its notes) in full. A turn with no
+ * question (a card on its own) starts at its calls.
  */
-function stepsOnlyRender(style: { color: boolean; theme: Theme }): ViewRender {
-  return { head: paint("steps only", "dim", style), source: null, detail: [], footnotes: [], keys: [], okKey: null, rowCount: 0, quiet: true };
+function oneColumnAnswerLines(messages: readonly Msg[], calls: readonly string[], width: number, theme: Theme, color: boolean): string[] {
+  const split = messages.findIndex((msg) => msg.role !== "user");
+  const asked = split < 0 ? messages : messages.slice(0, split);
+  const said = split < 0 ? [] : messages.slice(split);
+  const blocks = [
+    renderAnswerColumn(asked, width, theme, color),
+    [...calls],
+    renderAnswerColumn(said, width, theme, color)
+  ].filter((block) => block.length > 0);
+  return blocks.flatMap((block, index) => (index > 0 ? ["", ...block] : block));
 }
-
-/** An empty details pane: a wide turn with no view, no card and no Steps keeps r4's split, the separator only. */
-const EMPTY_PANE: ViewRender = { head: "", source: null, detail: [], footnotes: [], keys: [], okKey: null, rowCount: 0 };
 
 /** The renders the details pane draws: a quiet one only when the turn has nothing else to show. */
 function paneRenders(all: readonly ViewRender[]): ViewRender[] {

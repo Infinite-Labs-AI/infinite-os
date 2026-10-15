@@ -50,6 +50,12 @@ export interface ViewRenderCtx {
    */
   scrollback?: boolean;
   /**
+   * The turn draws no Steps strip (one column: its calls are lines above the
+   * answer): a quiet view draws nothing of its own, as in scrollback (no
+   * literal `steps only`, no sentence pointing at a strip below).
+   */
+  noStepsStrip?: boolean;
+  /**
    * `false`: `→` does not act on this view (a live turn's view the keys are not
    * on), so a table names what it hid in words, never `→ to see`. Absent = it
    * acts, unless `scrollback`.

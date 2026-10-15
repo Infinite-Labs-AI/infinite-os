@@ -32,6 +32,7 @@ import { openKeyLabel, type AppOpenTarget } from "./open-target.js";
 import { truncatedMoreAsk, turnAsk, viewText } from "./primitives.js";
 import { quietStopAsk, renderView } from "./registry.js";
 import type { ViewRender, ViewRenderCtx } from "./types.js";
+import { tabSideWords } from "./chat-layout.js";
 
 export { turnAsk };
 
@@ -580,7 +581,9 @@ function applyViewAction(action: KeyAction, state: ViewFocusState, facts: ViewKe
 export function viewKeyHints(
   state: ViewFocusState,
   facts: ViewKeyFacts = state.facts,
-  kindKeys: readonly KeyHint[] = []
+  kindKeys: readonly KeyHint[] = [],
+  /** The turn on screen is drawn side by side (it asked for two columns, `chat-layout.ts`). */
+  twoColumns = false
 ): KeyHint[] {
   if (state.answerFocus) {
     return answerKeyHints(facts);
@@ -590,7 +593,7 @@ export function viewKeyHints(
     return answerCut(facts) ? [{ key: "tab", label: "switch side" }] : [];
   }
   if (state.focus === "composer") {
-    return [tabHint(state, facts)];
+    return [tabHint(state, facts, twoColumns)];
   }
   const hints: KeyHint[] = [];
   if (state.engaged && facts.approve && !state.approvalClosed) {
@@ -623,7 +626,7 @@ export function viewKeyHints(
   if (facts.explain) {
     hints.push({ key: "?", label: state.explainOpen ? "hide" : "what it does", ...(facts.explainInside ? { chipOnly: true } : {}) });
   }
-  hints.push(tabHint(state, facts));
+  hints.push(tabHint(state, facts, twoColumns));
   return hints;
 }
 
@@ -641,13 +644,20 @@ function answerKeyHints(facts: ViewKeyFacts): KeyHint[] {
  * the first letter of a message (an empty prompt never captures a letter, as
  * in any coding harness), so the resting bar says honestly what tab unlocks:
  * ONE chip naming the first such key the view offers, by priority o > w > m >
- * c (`tab then o open in Meta Ads`), in place of `tab switch side`. Engaged,
- * or with nothing behind the gate, it is `tab switch side`. (TJ-3; r4's
- * goldens draw `o open` at rest: a deliberate deviation for the visual eval.)
+ * c (`tab then o open in Meta Ads`), in place of the side words. With nothing
+ * behind the gate it is `tab to card` in one column and `tab switch side` on a
+ * side-by-side turn (`tabSideWords`). Engaged, it is `tab back to chat` in one
+ * column (tab takes the keys back to the composer) and `tab switch side` side
+ * by side. (TJ-3; r4's goldens draw `o open` at rest: a deliberate deviation
+ * for the visual eval.)
  */
-function tabHint(state: ViewFocusState, facts: ViewKeyFacts): KeyHint {
-  const unlocks = state.engaged && state.focus !== "composer" ? null : gatedKeyHint(state, facts);
-  return { key: "tab", label: unlocks ? `then ${unlocks.key} ${unlocks.label}` : "switch side" };
+function tabHint(state: ViewFocusState, facts: ViewKeyFacts, twoColumns = false): KeyHint {
+  const engaged = state.engaged && state.focus !== "composer";
+  if (!twoColumns && engaged) {
+    return { key: "tab", label: "back to chat" };
+  }
+  const unlocks = engaged ? null : gatedKeyHint(state, facts);
+  return { key: "tab", label: unlocks ? `then ${unlocks.key} ${unlocks.label}` : tabSideWords(twoColumns) };
 }
 
 /** The first key the engagement gate holds back, by priority o > w > m > c (null = none). */

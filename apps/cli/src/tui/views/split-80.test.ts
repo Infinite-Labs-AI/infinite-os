@@ -11,19 +11,21 @@ import { cutAtWord, wrapWords } from "./primitives.js";
 import { stepRowLines } from "./steps.js";
 import type { ViewRender } from "./types.js";
 
-// The current turn sits side by side exactly where terminal-r4's `frame()`
-// does: from 80 columns (`const wide=W>=80`), with r4's pane widths
-// (`lw=max(26,min(40,floor(W*0.28)))`, `rw=W-lw-3`). When wide it always
-// splits: a turn with nothing for the details pane shows r4's dim `steps only`
-// there. Two protections r4 has no case for stay: an answer whose own table
-// cannot draw whole in the answer pane keeps one column, and a turn committed
-// to scrollback is one column. Synthetic data only.
+// A turn that asks for two columns (its question says `side by side`; the
+// one-column default, 2026-10-15, `chat-layout.ts`) sits side by side exactly
+// where terminal-r4's `frame()` does: from 80 columns (`const wide=W>=80`),
+// with r4's pane widths (`lw=max(26,min(40,floor(W*0.28)))`, `rw=W-lw-3`).
+// It splits only with something for the details pane (a view or a card): a
+// turn with neither stays one column. Two protections r4 has no case for stay: an
+// answer whose own table cannot draw whole in the answer pane keeps one
+// column, and a turn committed to scrollback is one column. The questions
+// below ask for side by side. Synthetic data only.
 const theme = INFINITE_R4_THEME;
 const view = (over: Partial<ViewRender> = {}): ViewRender => ({
   head: " Rows  ✓ Ready", source: "Demo · up to Sep 30", detail: ["row one", "row two"], footnotes: [], keys: [], okKey: null, rowCount: 0, ...over
 });
 const messages: Msg[] = [
-  { role: "user", text: "how is the week going?" },
+  { role: "user", text: "the week, side by side" },
   { role: "assistant", text: "Steady: the same pace as last week." }
 ];
 
@@ -56,56 +58,36 @@ describe("the split threshold is r4's: 80 columns", () => {
 
   it("a live turn with a view splits at 80 and stays one column at 79", () => {
     const at = (width: number) => renderLiveTurn({ messages, views: [], focus: null, width, color: false, theme, details: ["┌─ card ─┐"] }).lines;
-    expect(at(80)[0]).toBe(`❯ how is the week going?${" ".repeat(2)} │ ┌─ card ─┐`);
+    expect(at(80)[0]).toBe(`❯ the week, side by side${" ".repeat(2)} │ ┌─ card ─┐`);
     expect(at(79).some((line) => line.includes(" │ "))).toBe(false);
   });
 });
 
-describe("a turn with nothing for the details pane: r4's `steps only`", () => {
+describe("a turn with nothing for the details pane stays one column, whatever it asks", () => {
   const read = [{ id: "c1", name: "read_sample", label: "reading the sample", status: "ok" as const, startedAt: 0, endedAt: 400, result: "read" }];
 
-  it.each([80, 100, 160])("at %i the answer is the left pane and the details pane says `steps only`, dim", (width) => {
-    const { left } = r4Panes(width);
-    const drawn = renderLiveTurn({ messages, views: [], focus: null, steps: read, width, color: true, theme });
-    expect(r4Segments(drawn.lines[0]!).slice(-3)).toEqual(seg(["│", "line"], [" ", ""], ["steps only", "dim"]));
-    const plain = renderLiveTurn({ messages, views: [], focus: null, steps: read, width, color: false, theme }).lines;
-    expect(plain[0]).toBe(`❯ how is the week going?${" ".repeat(left - 24)} │ steps only`);
-    // Every row of the body carries the separator, and no line is wider than the window.
-    const body = drawn.lines.slice(0, drawn.lines.findIndex((line) => line.includes("Steps")));
-    expect(body.length).toBeGreaterThan(0);
-    expect(body.every((line) => line.includes("│"))).toBe(true);
-    // Nothing on the right to switch to: the key bar keeps `tab switch side` off.
+  it.each([80, 100, 160])("at %i its calls are lines above the whole-width answer: no separator, no `steps only`, no Steps strip", (width) => {
+    const drawn = renderLiveTurn({ messages, views: [], focus: null, steps: read, width, color: false, theme });
+    expect(drawn.lines).toEqual(["❯ the week, side by side", "", "  ✓ reading the sample · read", "", "∞ Steady: the same pace as last week."]);
+    // Nothing on the right to switch to: the key bar offers no `tab`.
     expect(drawn.details).toBe(false);
   });
 
-  it("says nothing else: no scenario sentence, no source row", () => {
-    const lines = renderLiveTurn({ messages, views: [], focus: null, steps: read, width: 100, color: false, theme }).lines;
-    const body = lines.slice(0, lines.findIndex((line) => line.startsWith("─ Steps")));
-    const right = body.map((line) => line.slice(31).trimEnd()).filter(Boolean);
-    expect(right).toEqual(["steps only"]);
-  });
-
-  it.each([80, 100, 160])("at %i a finished turn with no Steps keeps the split, its details pane empty: no `steps only` pointing at nothing", (width) => {
-    const { left } = r4Panes(width);
+  it.each([80, 100, 160])("at %i a finished turn with no Steps is the question and the answer, one column", (width) => {
     const drawn = renderLiveTurn({ messages, views: [], focus: null, width, color: false, theme });
-    expect(drawn.lines.join("\n")).not.toContain("steps only");
-    expect(drawn.lines.some((line) => line.startsWith("─ Steps"))).toBe(false);
-    // Still two columns: every row ends at the separator, the answer in the left pane.
-    expect(drawn.lines[0]).toBe(`❯ how is the week going?${" ".repeat(left - 24)} │`);
-    expect(drawn.lines.every((line) => line.endsWith(" │"))).toBe(true);
-    expect(drawn.details).toBe(false);
+    expect(drawn.lines).toEqual(["❯ the week, side by side", "", "∞ Steady: the same pace as last week."]);
   });
 
-  it("a running turn with no Steps yet says `steps only` (its calls are on the way)", () => {
+  it("a running turn with no Steps yet is one column, its working line under the question", () => {
     resetTurnState();
     const working = getTurnState();
     const lines = renderLiveTurn({ messages: messages.slice(0, 1), views: [], focus: null, width: 80, color: false, theme, working, nowMs: 0 }).lines;
-    expect(lines[0]!.slice(26)).toBe(" │ steps only");
+    expect(lines[0]).toBe("❯ the week, side by side");
+    expect(lines.some((line) => line.includes("│") || line.includes("steps only"))).toBe(false);
   });
 
-  it("the Steps strip stays under both panes, at the whole width", () => {
-    const steps = [{ id: "c1", name: "read_sample", label: "reading the sample", status: "ok" as const, startedAt: 0, endedAt: 400, result: "read" }];
-    const lines = renderLiveTurn({ messages, views: [], focus: null, steps, width: 80, color: false, theme }).lines;
+  it("with a card, the Steps strip stays under both panes, at the whole width", () => {
+    const lines = renderLiveTurn({ messages, views: [], focus: null, steps: read, width: 80, color: false, theme, details: ["┌─ card ─┐"] }).lines;
     const at = lines.findIndex((line) => line.startsWith("─ Steps"));
     expect(at).toBeGreaterThan(0);
     expect(lines[at]).toHaveLength(80);
@@ -132,13 +114,13 @@ describe("a turn with nothing for the details pane: r4's `steps only`", () => {
 
   it("in scrollback it is one column, with no `steps only`", () => {
     const lines = renderCommittedTurn({ messages, views: [], focus: null, width: 160, color: false, theme });
-    expect(lines).toEqual(["❯ how is the week going?", "", "∞ Steady: the same pace as last week."]);
+    expect(lines).toEqual(["❯ the week, side by side", "", "∞ Steady: the same pace as last week."]);
   });
 });
 
 describe("a question stays a question turn when it stops or fails (it never jumps to one column)", () => {
   const partial: Msg[] = [
-    { role: "user", text: "how is the week going?" },
+    { role: "user", text: "the week, side by side" },
     { role: "assistant", text: "Steady so far: the same", partial: true }
   ];
   const note = (text: string): Msg => ({ kind: "slash", role: "system", text, turnNote: true });
@@ -157,9 +139,9 @@ describe("a question stays a question turn when it stops or fails (it never jump
     expect(isQuestionTurn([partial[0]!, note(text)])).toBe(true);
   });
 
-  it("a stopped question draws side by side at 80 with the stop line in the answer pane", () => {
+  it("a stopped question with a card draws side by side at 80 with the stop line in the answer pane", () => {
     const stopped = [...partial, note("■ Stopped. Anything already running in the app may still finish.")];
-    const lines = renderLiveTurn({ messages: stopped, views: [], focus: null, width: 80, color: false, theme }).lines;
+    const lines = renderLiveTurn({ messages: stopped, views: [], focus: null, width: 80, color: false, theme, details: ["┌─ card ─┐"] }).lines;
     expect(lines.every((line) => line.slice(26).startsWith(" │"))).toBe(true);
     expect(lines.join("\n")).toContain("■ Stopped.");
     expect(lines.every((line) => line.length <= 80)).toBe(true);
@@ -199,8 +181,8 @@ describe("an answer whose own table cannot draw whole in the answer pane keeps o
   });
 
   it("a table small enough for the answer pane keeps the split", () => {
-    const small: Msg[] = [{ role: "user", text: "two?" }, { role: "assistant", text: "| A | B |\n| --- | --- |\n| 1 | 2 |" }];
-    expect(turnMaySplit(small, 80)).toBe(true);
+    const small: Msg[] = [{ role: "user", text: "two, side by side?" }, { role: "assistant", text: "| A | B |\n| --- | --- |\n| 1 | 2 |" }];
+    expect(turnMaySplit(small, 80, [], true)).toBe(true);
   });
 });
 
