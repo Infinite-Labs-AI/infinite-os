@@ -124,8 +124,8 @@ describe("Ink busy input handling", () => {
     const stopAt = afterEsc.lastIndexOf("■ Stopped.");
     expect(afterEsc.lastIndexOf("PARTIAL-ANSWER-TEXT")).toBeGreaterThan(-1);
     expect(afterEsc.lastIndexOf("PARTIAL-ANSWER-TEXT")).toBeLessThan(stopAt);
-    // The running call keeps its Steps row, marked stopped (no raw tool id).
-    expect(stripAnsi(afterEsc)).toMatch(/pausing entity[^\n]*■ stopped/u);
+    // The running call keeps its line, marked stopped (no raw tool id).
+    expect(stripAnsi(afterEsc)).toMatch(/■ pausing entity · stopped/u);
 
     await sendKeys(input, "second\r");
     await waitFor(() => signals.length === 2, 4_000, output.text);

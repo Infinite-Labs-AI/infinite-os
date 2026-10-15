@@ -15,7 +15,9 @@ import { renderView } from "./registry.js";
 import type { ViewRender } from "./types.js";
 
 // A turn taller than the window keeps the split (layout decision, 2026-10-03:
-// an everyday window should see it). From 80 columns the current turn is drawn in the two
+// an everyday window should see it). Since the one-column default (2026-10-15)
+// that is a turn that asks for two columns, as the questions below do. From 80
+// columns such a turn is drawn in the two
 // panes WHATEVER its height: the answer pane keeps the question and the
 // answer (while it runs, the newest lines when the answer alone is taller than
 // the room; finished, from its top with its own more line, live L8), the
@@ -26,7 +28,7 @@ import type { ViewRender } from "./types.js";
 // right under the last line. Synthetic data only.
 const theme = INFINITE_R4_THEME;
 const messages: Msg[] = [
-  { role: "user", text: "show me every row" },
+  { role: "user", text: "show me every row, side by side" },
   { role: "assistant", text: "Here they are, newest first." }
 ];
 const steps: TurnStep[] = [
@@ -130,7 +132,7 @@ describe("a tall turn keeps the split from 80 columns", () => {
 
   // The caption gate's fold is open (`?`): the whole answer, taller than the room.
   const long: Msg[] = [
-    { role: "user", text: "tell me everything" },
+    { role: "user", text: "tell me everything, side by side" },
     { role: "assistant", text: Array.from({ length: 60 }, (_unused, index) => `Line ${index + 1} of the answer.`).join("\n\n") }
   ];
 

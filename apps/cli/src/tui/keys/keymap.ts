@@ -96,10 +96,11 @@ export function shortOkVerb(label: string): string {
 }
 
 /**
- * The keys the bar ends with (terminal-r4): `tab` switches between the answer
- * and its details, `/` starts a command. `/ commands` is always there; `tab
- * switch side` only while the turn on screen has details to switch to (a view
- * or a card: the right pane from 80 columns, under the answer below that).
+ * The keys the bar ends with (terminal-r4): `tab` moves the keys between the
+ * answer and its details, `/` starts a command. `/ commands` is always there;
+ * `tab` only while the turn on screen has details (a view or a card: under
+ * the answer in one column, where it says `to card`; the right pane of a
+ * side-by-side turn, where it says `switch side`, `tabSideWords`).
  */
 export const ALWAYS_KEY_HINTS: readonly KeyHint[] = [
   { key: "tab", label: "switch side" },
@@ -111,13 +112,12 @@ export interface KeyBarOptions {
   /** A modal picker owns typing, so / cannot open commands until it closes. */
   commands?: boolean;
   /**
-   * The turn on screen has a details view or card, so `tab switch side` has a
-   * side to switch to. Default true (r4's bar, and the boot frame's, which is
-   * r4's frame as drawn). False drops the hint: a plain answer, a turn that
-   * went to scrollback.
+   * The turn on screen has a details view or card, so `tab` has somewhere to
+   * go. Default true (r4's bar). False drops the hint: a plain answer, the
+   * boot frame, a turn that went to scrollback.
    */
   sides?: boolean;
-  /** The turn on screen is drawn side by side: `tab` says `switch side` in every layout (chat-layout.ts). */
+  /** The turn on screen is drawn side by side: `tab` says `switch side`, else `to card` (chat-layout.ts). */
   twoColumns?: boolean;
 }
 
@@ -222,7 +222,7 @@ export function resolveKey(input: string, key: Key, ctx: KeyContext): KeyAction 
  * turn: Esc resolves to stop exactly then), first and once, and nothing of
  * its own when idle. The rows and document hints of a finished turn's views
  * come from `views/focus.ts` (`viewKeyHints`), from the same facts its key
- * resolver uses. The bar itself ends with `tab switch side` (while the turn
+ * resolver uses. The bar itself ends with `tab to card` / `tab switch side` (while the turn
  * has details) and `/ commands` (`keyBarSegments`).
  */
 export function keyBarHints(ctx: KeyContext): KeyHint[] {
@@ -279,7 +279,7 @@ function cardTabs(card: CardKeys): number {
 
 /**
  * The hints the bar draws, in order: the state's own keys (each key once, the
- * first meaning wins, each in its bar words), then `tab switch side` while
+ * first meaning wins, each in its bar words), then `tab to card` (`tab switch side` side by side) while
  * there is a side to switch to (`options.sides`), then always `/ commands`.
  * A view's `? what it does` is on the bar (run-2 N12); a card's is a chip
  * inside the card (`chipOnly`), never on the bar.
@@ -295,9 +295,9 @@ export function keyBarShownHints(hints: readonly KeyHint[], options: KeyBarOptio
     seen.add(hint.key);
     shown.push(hint.barLabel ? { key: hint.key, label: hint.barLabel, ...(hint.ok ? { ok: true } : {}) } : hint);
   }
-  // A view's own `tab` words (`tab then o open`, focus.ts TJ-3) replace `switch side`
-  // in its place, and show whether or not there is a side: tab engages the view.
-  const sideWords = tabSideWords(undefined, options.twoColumns === true);
+  // A view's own `tab` words (`tab then o open`, focus.ts TJ-3) replace the side
+  // words in their place, and show whether or not there is a side: tab engages the view.
+  const sideWords = tabSideWords(options.twoColumns === true);
   const tabWords = hints.find((hint) => hint.key === "tab" && !hint.chipOnly && hint.label !== TAB_HINT.label && hint.label !== sideWords);
   return [
     ...shown,
@@ -339,7 +339,7 @@ export function formatKeyBar(hints: readonly KeyHint[]): string {
 
 /**
  * The drawn bar's text with no colour, uncut: chips keep their padding and the
- * bar ends with `tab switch side` (unless `sides` is false) and `/ commands`
+ * bar ends with `tab to card` or `tab switch side` (unless `sides` is false) and `/ commands`
  * (` p  Pause    n  dismiss    tab  …`).
  */
 export function keyBarText(hints: readonly KeyHint[], options: KeyBarOptions = {}): string {

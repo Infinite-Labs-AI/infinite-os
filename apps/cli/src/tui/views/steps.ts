@@ -1,5 +1,7 @@
-// The Steps strip (terminal-r4 `frame()`, spec §5 "Steps strip"): one row per
-// tool call of the turn, under a `─ Steps ───` rule:
+// A turn's tool calls. In the one-column turn (the default, `chat-layout.ts`)
+// each call is one compact line in the flow (`stepFlowLines`). A side-by-side
+// turn draws them as the Steps strip (terminal-r4 `frame()`, spec §5 "Steps
+// strip"): one row per tool call of the turn, under a `─ Steps ───` rule:
 //
 //   ␣␣<label padded to label_w> <offset><bar ━━━, or ━━╍╍ while running>  <glyph> <result>
 //
@@ -709,12 +711,13 @@ export function stepRowLines(steps: readonly TurnStep[], options: StepStripOptio
 }
 
 /**
- * The turn's calls as compact lines in the one-column flow (V1/V2,
- * `chat-layout.ts`): one line per call, in call order, the mark first, then
- * the label and, dim, its result (`  ✓ checking your Meta ads · 3 ad sets`).
- * No Gantt bar, no header. The words, the marks and their tones are the Steps
+ * The turn's calls as compact lines in the one-column turn (`chat-layout.ts`):
+ * one line per call, in call order, the mark first, then the label and, dim,
+ * its result (`  ✓ checking your Meta ads · 3 ad sets`). No Gantt bar, no
+ * header. The words, the marks and their tones are the side-by-side Steps
  * strip's own (`stepRowFacts`), so the two never disagree; a failed reason cut
- * short prints whole under its line, as in the strip.
+ * short prints whole under its line, as in the strip. Scrollback keeps every
+ * line in place.
  */
 export function stepFlowLines(steps: readonly TurnStep[], options: StepStripOptions): string[] {
   const width = Math.max(1, Math.floor(options.width));
@@ -748,35 +751,6 @@ function rowWithReason(
     return [row];
   }
   return [row, ...wrapText(result, Math.max(1, width - 4)).map((line) => `    ${paint(line, "dim")}`)];
-}
-
-/**
- * The statuses a turn printed into scrollback keeps a row for. The Steps strip
- * belongs to the live turn (D1), but a call that did not end clean must stay
- * readable once its turn is committed: failed (✗), no outcome came back (?),
- * the thing had changed (⧗), or an OK still unanswered (▣).
- */
-const UNSETTLED: ReadonlySet<StepStatus> = new Set<StepStatus>(["fail", "unk", "old", "wait"]);
-
-/**
- * The rows a committed turn keeps under its answer: one per call that did not
- * end clean, in call order, as the Steps strip words it but without the bar
- * (`  reading today ✗ not synced yet`). The labels are padded to the longest,
- * so the glyphs sit in one column. Clean calls (✓, ·, ◐, ⟳) are dropped: no
- * header and no rows when every call ended clean.
- */
-export function unsettledStepLines(steps: readonly TurnStep[], options: StepStripOptions): string[] {
-  const width = Math.max(1, Math.floor(options.width));
-  const paint = (text: string, tone: ThemeStyle) => (options.color && text ? ansi(options.theme, tone, text) : text);
-  const kept = steps
-    .map((step) => stepRowFacts(step, steps, options))
-    .filter((facts) => UNSETTLED.has(facts.status));
-  const labelWidth = Math.min(stepLabelWidth(width), Math.max(0, ...kept.map((facts) => displayWidth(facts.label))));
-  return kept.flatMap(({ status, mark, tone, label, result }) => rowWithReason([
-    [`  ${padEndCells(cut(label, labelWidth), labelWidth)} `, "text"],
-    [mark, tone],
-    [result ? ` ${result}` : "", "dim"]
-  ], status, result, width, paint));
 }
 
 /** r4 `trunc()` for one string: past the width, cut to width − 1 and `…`. */

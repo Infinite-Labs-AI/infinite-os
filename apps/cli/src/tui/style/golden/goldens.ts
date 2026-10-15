@@ -1,6 +1,11 @@
 // Loads the synthetic r4 goldens copied into `__goldens__/` (never the product
 // goldens: infinite-os is public). Regenerate the copy with the private
 // `spec/terminal/tools/export-synthetic-goldens.mjs <this worktree>`.
+//
+// The one-column default (River, 2026-10-15, V1) re-drew every frame golden
+// whose screen it changed from the CLI's own one-column renderer, the approved
+// design since (`drawn_by` on the file): r4 draws only the two-column layout,
+// which is now drawn on request. A re-export from r4 must keep those frames.
 import { readdirSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 

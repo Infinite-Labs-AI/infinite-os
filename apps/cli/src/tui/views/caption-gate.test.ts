@@ -131,9 +131,10 @@ describe("the gate over a turn's messages", () => {
   });
 });
 
-// The gate as the terminal draws it: two sentences above the view, then a dim
-// `… more (?)` line (the left pane when split, above the view in one column);
-// `?` opens the rest in the live turn; scrollback prints the rest under the view.
+// The gate as the terminal draws it (since the one-column default, 2026-10-15,
+// only on a turn drawn side by side): two sentences in the left pane, then a
+// dim `… more (?)` line; `?` opens the rest in the live turn. One column shows
+// the answer's words whole above the view, live and in scrollback.
 describe("the caption gate in the terminal's turn", () => {
   const numbers = (): AnswerViewV1 => {
     const raw = JSON.parse(readFileSync(fileURLToPath(new URL("./__fixtures__/meta-level-campaigns.json", import.meta.url)), "utf8"));
@@ -142,49 +143,61 @@ describe("the caption gate in the terminal's turn", () => {
     return view;
   };
   const v1Turn: Msg[] = [{ role: "user", text: "how is spend?" }, { role: "assistant", text: V1 }];
+  const askedTurn: Msg[] = [{ role: "user", text: "spend, side by side?" }, { role: "assistant", text: V1 }];
   const FOLDED = "Today is still open, so treat it separately.";
-  // The answer's words: the left pane's when split (from 80), else every row's.
-  const words = (lines: readonly string[], width = 79) => {
+  // The answer's words: the left pane's when split, else every row's.
+  const words = (lines: readonly string[], width = 79, split = false) => {
     const panes = paneWidths(width);
-    return lines.map(stripAnsi).map((line) => (panes.wide ? line.slice(0, panes.left) : line)).join(" ").replace(/\s+/gu, " ");
+    return lines.map(stripAnsi).map((line) => (split && panes.wide ? line.slice(0, panes.left) : line)).join(" ").replace(/\s+/gu, " ");
   };
   const dim = (line: string) => paint(stripAnsi(line), "dim", { color: true, theme: DEFAULT_THEME });
 
   for (const width of [79, 100, 140]) {
-    it(`at ${width}: two sentences and a dim \`… more (?)\` above the view; ? opens the rest`, () => {
-      const closed = renderLiveTurn({ messages: v1Turn, views: [numbers()], focus: null, width, color: true, theme: DEFAULT_THEME, rows: 40 });
+    it(`at ${width}, one column: the answer's words whole above the view, no fold line`, () => {
+      const drawn = renderLiveTurn({ messages: v1Turn, views: [numbers()], focus: null, width, color: false, theme: DEFAULT_THEME, rows: 40 });
+      expect(drawn.folded).toBe(false);
+      const text = words(drawn.lines, width);
+      expect(text).toContain("Spend is up 12% this week. I would not scale this yet: trials are not confirmed.");
+      expect(text).toContain(FOLDED);
+      expect(text.indexOf(FOLDED)).toBeLessThan(text.indexOf("Ads by campaign"));
+      expect(drawn.lines.some((line) => line.includes("more (?)"))).toBe(false);
+    });
+  }
+
+  for (const width of [100, 140]) {
+    it(`at ${width}, asked side by side: two sentences and a dim \`… more (?)\` beside the view; ? opens the rest`, () => {
+      const closed = renderLiveTurn({ messages: askedTurn, views: [numbers()], focus: null, width, color: true, theme: DEFAULT_THEME, rows: 40 });
       expect(closed.folded).toBe(true);
-      const text = words(closed.lines, width);
+      const text = words(closed.lines, width, true);
       expect(text).toContain("Spend is up 12% this week. I would not scale this yet: trials are not confirmed.");
       expect(text).not.toContain(FOLDED);
       const foldRow = closed.lines.find((line) => stripAnsi(line).includes("… more (?)"))!;
       expect(foldRow).toBeDefined();
       expect(foldRow).toContain(dim("  … more (?)"));
-      const open = renderLiveTurn({ messages: v1Turn, views: [numbers()], focus: null, width, color: false, theme: DEFAULT_THEME, rows: 40, captionOpen: true });
+      const open = renderLiveTurn({ messages: askedTurn, views: [numbers()], focus: null, width, color: false, theme: DEFAULT_THEME, rows: 40, captionOpen: true });
       expect(open.folded).toBe(false);
-      expect(words(open.lines, width)).toContain(FOLDED);
+      expect(words(open.lines, width, true)).toContain(FOLDED);
       expect(open.lines.some((line) => line.includes("… more (?)"))).toBe(false);
     });
   }
 
-  it("committed to scrollback: two sentences above the view, the folded rest under it, dim, every word kept", () => {
-    const lines = renderCommittedTurn({ messages: v1Turn, views: [numbers()], focus: null, width: 100, color: true, theme: DEFAULT_THEME });
-    const plainLines = lines.map(stripAnsi);
-    const head = plainLines.findIndex((line) => line.includes("Ads by campaign"));
-    const rest = plainLines.findIndex((line) => line.includes("Today is still open"));
-    expect(head).toBeGreaterThan(0);
-    expect(rest).toBeGreaterThan(head);
-    expect(plainLines.slice(0, head).join(" ")).toContain("trials are not confirmed.");
-    expect(lines[rest]).toBe(dim(lines[rest]!));
-    expect(plainLines.some((line) => line.includes("… more (?)"))).toBe(false);
-    expect(words(lines).split(FOLDED).length - 1).toBe(1);
+  it("committed to scrollback: one column, the answer's words whole above the view, every word once", () => {
+    for (const messages of [v1Turn, askedTurn]) {
+      const lines = renderCommittedTurn({ messages, views: [numbers()], focus: null, width: 100, color: true, theme: DEFAULT_THEME });
+      const plainLines = lines.map(stripAnsi);
+      const head = plainLines.findIndex((line) => line.includes("Ads by campaign"));
+      expect(head).toBeGreaterThan(0);
+      expect(plainLines.slice(0, head).join(" ").replace(/\s+/gu, " ")).toContain(V1);
+      expect(plainLines.some((line) => line.includes("… more (?)"))).toBe(false);
+      expect(words(lines).split(FOLDED).length - 1).toBe(1);
+    }
   });
 
   it("V6: the same text in a turn with no view is never touched, and has no fold line", () => {
-    for (const width of [79, 100]) {
-      const drawn = renderLiveTurn({ messages: v1Turn, views: [], focus: null, width, color: false, theme: DEFAULT_THEME, rows: 40 });
+    for (const [width, messages] of [[79, v1Turn], [100, v1Turn], [100, askedTurn]] as const) {
+      const drawn = renderLiveTurn({ messages, views: [], focus: null, width, color: false, theme: DEFAULT_THEME, rows: 40 });
       expect(drawn.folded).toBe(false);
-      expect(words(drawn.lines, width)).toContain(FOLDED);
+      expect(words(drawn.lines, width, messages === askedTurn)).toContain(FOLDED);
       expect(drawn.lines.some((line) => line.includes("more (?)"))).toBe(false);
     }
     const committed = renderCommittedTurn({ messages: v1Turn, views: [], focus: null, width: 100, color: false, theme: DEFAULT_THEME });

@@ -6,7 +6,7 @@ import { describe, expect, it } from "vitest";
 
 import { ansiLineToCells, ansiToSegmentLines, applySgr, RESET_STATE, tokenOf } from "./ansi-to-segments.js";
 import { compareRegion, formatRegionResults, goldenRegionRows, locate, paintGoldenLines } from "./compare.js";
-import { firstProblem, GoldenEvaluator, hasTruecolorSgr } from "./evaluate.js";
+import { firstProblem, GoldenEvaluator, hasTruecolorSgr, REGION_SCREENS } from "./evaluate.js";
 import { goldenIds, loadGolden } from "./goldens.js";
 import { normalizeCells, textOf, type SegmentLine } from "./normalize.js";
 import { PALETTE, xterm256Hex } from "./palette.js";
@@ -153,17 +153,21 @@ describe("the evaluator passes r4 itself (a renderer that prints the golden)", (
     "flow-pause-01-needs-your-ok": "region-card-needs-ok",
     "flow-pause-03-done": "region-card-done-green"
   };
-  const painted = new GoldenEvaluator((fixture, cols) => {
-    const golden = loadGolden(cols === 69 ? CARD_AT_69[fixture.screen]! : `${fixture.screen}--c${cols}`);
-    return paintGoldenLines(golden.lines, sgr("truecolor")).join("\n");
-  });
+  // r4's two-column chrome (`sideBySide` regions) is drawn on a screen asked side by side: no frame golden is
+  // that screen (the frames are one column since 2026-10-15), so there the renderer prints the region itself.
+  const SIDE_BY_SIDE_REGION: Readonly<Record<string, string>> = Object.fromEntries(
+    Object.entries(REGION_SCREENS).filter(([, where]) => where.sideBySide).map(([id, where]) => [`${where.screen}+side-by-side@${where.cols}`, id])
+  );
+  const goldenFor = (screen: string, cols: number) =>
+    loadGolden(cols === 69 ? CARD_AT_69[screen]! : SIDE_BY_SIDE_REGION[`${screen}@${cols}`] ?? `${screen}--c${cols}`);
+  const painted = new GoldenEvaluator((fixture, cols) => paintGoldenLines(goldenFor(fixture.screen, cols).lines, sgr("truecolor")).join("\n"));
   const DECIDED = new Set([
     "flow-pause-02-working--c60", "flow-pause-02-working--c100", "flow-pause-02-working--c160",
     "flow-images-02-making-them--c60", "flow-images-02-making-them--c100", "flow-images-02-making-them--c160",
     "flow-images-06-with-your-codex--c60", "flow-images-06-with-your-codex--c100", "flow-images-06-with-your-codex--c160",
-    "flow-images-07-cmd-l-only--c60", "flow-images-07-cmd-l-only--c100", "flow-images-07-cmd-l-only--c160", "region-keybar-busy",
-    // T4: r4 draws `Sent to the app` under the dismissed card; the decision drops it.
-    "flow-pause-09-dismissed--c60", "flow-pause-09-dismissed--c100", "flow-pause-09-dismissed--c160"
+    "region-keybar-busy"
+    // D3 and T4 edit r4's words; the frames they touched (flow-images-07, flow-pause-09) are drawn by the CLI
+    // since the one-column default, already in the decided words, so nothing is left for them to change.
   ]);
 
   it("matches every frame and line-region golden; fails exactly the decided ones", () => {
@@ -180,7 +184,7 @@ describe("the evaluator passes r4 itself (a renderer that prints the golden)", (
   // The frame must hold ONLY the r4 frame (D4: no wordmark or inventory at boot; D1: no top bar per turn; no
   // stray spinner rows). A painted golden with anything else on screen must FAIL.
   const paintedWith = (edit: (lines: string[]) => string[]) =>
-    new GoldenEvaluator((fixture, cols) => edit(paintGoldenLines(loadGolden(`${fixture.screen}--c${cols}`).lines, sgr("truecolor"))).join("\n"));
+    new GoldenEvaluator((fixture, cols) => edit(paintGoldenLines(goldenFor(fixture.screen, cols).lines, sgr("truecolor"))).join("\n"));
   const plain = (text: string) => `${ESC}[0m${text}${ESC}[0m`;
 
   it("fails a boot screen that still prints the wordmark and the inventory above the frame (D4)", () => {
@@ -210,7 +214,7 @@ describe("the evaluator passes r4 itself (a renderer that prints the golden)", (
   });
 
   it("a full-width region is found at column 0 only: a longer key bar never matches as its tail (run-r2 MUST 2)", () => {
-    // flow-numbers-02's bar is ` tab  switch side    /  commands`; ` j k  row    tab …` ends with it but is another bar.
+    // flow-numbers-02's bar is ` tab  to card    /  commands`; ` j k  row    tab …` ends with it but is another bar.
     const golden = loadGolden("flow-numbers-02-not-measured--c100");
     const bar = golden.regions!.keybar![0];
     const chip = paintGoldenLines([[{ text: " j k ", style: "key" }, { text: " row    ", style: "" }]], sgr("truecolor"))[0]!;
@@ -242,9 +246,16 @@ describe("the evaluator passes r4 itself (a renderer that prints the golden)", (
     expect(hasTruecolorSgr(`${ESC}[38:2:1:2:3mx`)).toBe(true);
   });
 
-  it("the 100-col body is compared: the --c100 goldens are r4 drawn side by side (r4 splits at 80)", () => {
+  it("the 100-col body is compared: one column as the CLI draws it, side by side as r4 draws it where the turn still splits", () => {
+    // A compare card asks for two columns: r4's frame as drawn.
+    const compare = loadGolden("view-09-compare--c100");
+    expect(compare.layout).toMatchObject({ wide: true, answer_w: 28, details_w: 69 });
+    expect(compare.drawn_by).toBeUndefined();
+    expect(painted.evaluate(compare).regions.find((region) => region.region === "body")?.verdict).toBe("MATCH");
+    // Every other turn is one column (the one-column default, 2026-10-15), re-drawn from the CLI's renderer.
     const golden = loadGolden("view-06-change--c100");
-    expect(golden.layout).toMatchObject({ wide: true, answer_w: 28, details_w: 69 });
+    expect(golden.layout).toMatchObject({ wide: false, answer_w: 100, details_w: 100 });
+    expect(golden.drawn_by).toMatch(/one-column/u);
     expect(painted.evaluate(golden).regions.find((region) => region.region === "body")?.verdict).toBe("MATCH");
     const answerRow = golden.lines.findIndex((line) => textOf(line).startsWith("∞ Ready."));
     const edited = paintedWith((lines) => lines.map((line, i) => (i === answerRow ? plain("∞ Ready.") : line))).evaluate(golden);

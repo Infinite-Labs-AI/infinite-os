@@ -326,9 +326,19 @@ describe("the r4 layout", () => {
     expect(lines[1]).toMatch(/│ Demo source · up to Jan 15, 10:40$/u);
   });
 
-  it("the Steps strip comes from the turn's tool trail, laid end to end, one row per call", () => {
+  it("the calls come from the turn's tool trail, one line per call; side by side, the Steps strip laid end to end", () => {
+    const oneColumn = renderLiveTurn({
+      messages: [
+        { role: "user", text: "q" },
+        { kind: "trail", role: "system", text: "", tools: ["Read Items(\"week\") (0.6s) :: 3 items ✓", "Load Other :: timed out ✗"] },
+        { role: "assistant", text: "a" }
+      ],
+      views: [listViewFixture()], focus: null, width: 100, color: false, theme
+    }).lines;
+    expect(oneColumn.slice(0, 6)).toEqual(["❯ q", "", "  ✓ reading items · 3 items", "  ✗ loading other · timed out", "", "∞ a"]);
+    expect(oneColumn.some((line) => line.startsWith("─ Steps "))).toBe(false);
     const messages: Msg[] = [
-      { role: "user", text: "q" },
+      { role: "user", text: "q, side by side" },
       { kind: "trail", role: "system", text: "", tools: ["Read Items(\"week\") (0.6s) :: 3 items ✓", "Load Other :: timed out ✗"] },
       { role: "assistant", text: "a" }
     ];
@@ -354,13 +364,18 @@ describe("the r4 layout", () => {
     expect(lines.findIndex((line) => line.includes("Ads running"))).toBeGreaterThan(lines.indexOf("∞ Two are on."));
   });
 
-  it("the live turn shows the question and the answer left of the view", () => {
+  it("the live turn shows the question and the answer above the view; side by side when asked, left of it", () => {
     const messages: Msg[] = [{ role: "user", text: "which ads are on?" }, { role: "assistant", text: "Two are **on**." }];
-    const text = renderLiveTurn({ messages, views: [listViewFixture()], focus: null, width: 120, color: false, theme }).lines.join("\n");
+    const lines = renderLiveTurn({ messages, views: [listViewFixture()], focus: null, width: 120, color: false, theme }).lines;
+    const text = lines.join("\n");
     expect(text).toContain("❯ which ads are on?");
     expect(text).toContain("∞ Two are on.");
-    expect(text).toContain("│ [Ads running] ✓ Ready");
+    expect(lines).toContain("[Ads running] ✓ Ready");
+    expect(lines.indexOf("[Ads running] ✓ Ready")).toBeGreaterThan(lines.indexOf("∞ Two are on."));
     expect(text).not.toContain("**");
+    const asked: Msg[] = [{ role: "user", text: "which ads are on, side by side?" }, messages[1]!];
+    expect(renderLiveTurn({ messages: asked, views: [listViewFixture()], focus: null, width: 120, color: false, theme }).lines.join("\n"))
+      .toContain("│ [Ads running] ✓ Ready");
   });
 
   it("a tall view never makes the live region exceed the cap", () =>

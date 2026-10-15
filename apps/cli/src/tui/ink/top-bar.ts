@@ -8,8 +8,6 @@ import type { AnswerViewV1 } from "@infinite-os/types";
 
 import { terminalText } from "../../desktop/terminal-text.js";
 import type { Theme } from "../theme.js";
-import { paneWidths } from "../views/layout.js";
-import { chatLayout, isFlow } from "../views/chat-layout.js";
 import {
   padSegments,
   paintSegments,
@@ -194,27 +192,11 @@ export function stepsRuleLine(width: number, theme: Theme): string {
 }
 
 /**
- * The boot frame's body (D4): an empty answer area, then the Steps rule, at
- * most `rows` rows. An empty row is a single space: Ink draws an empty text
- * as no row at all.
+ * The boot frame's body (D4): an empty answer area (one column, as every turn
+ * that does not ask for two), then the Steps rule, at most `rows` rows. An
+ * empty row is a single space: Ink draws an empty text as no row at all.
  */
 export function bootBodyLines(width: number, theme: Theme, rows: number = BOOT_BODY_ROWS): string[] {
   const answerRows = Math.max(0, Math.min(BOOT_ANSWER_ROWS, Math.floor(rows) - 1));
-  const row = bootAnswerRow(width, theme);
-  return [...Array.from({ length: answerRows }, () => row), stepsRuleLine(width, theme)];
-}
-
-/**
- * One row of the boot frame's empty answer area. In the split layout (from
- * 80 columns, as r4's `frame()` and the turn layout's `paneWidths`) it is the
- * empty answer pane (28% of the width, clamped to 26–40 columns) and the
- * separator's `│`; one column, a blank row.
- */
-function bootAnswerRow(width: number, theme: Theme): string {
-  const panes = paneWidths(width);
-  // The one-column flows (chat-layout.ts) open on one column too.
-  if (!panes.wide || isFlow(chatLayout())) {
-    return " ";
-  }
-  return paintSegments([["", " ".repeat(panes.left + 1)], ["line", "│"]], theme);
+  return [...Array.from({ length: answerRows }, () => " "), stepsRuleLine(width, theme)];
 }

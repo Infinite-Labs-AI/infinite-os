@@ -76,10 +76,9 @@ describe("P33-M2 / S3 wiring (CI-runnable)", () => {
     expect(indexSource).toContain("turnSignal: turnAbort.signal");
   });
 
-  it("typed lines wait while the follow-up runs; the bar says esc stop first; the kept strip hides", () => {
+  it("typed lines wait while the follow-up runs; the bar says esc stop first", () => {
     expect(source).toContain("if (lineWaits({ busy, followUpRunning })) {");
     expect(source).toContain("return runningBarHints(hints, followUpRunning && turnStoppable);");
-    expect(source).toContain("const liveKeptSteps = !busy && !followUpRunning && !turnSteps.length ? keptSteps : null;");
     expect(source).toContain(": followUps ? followUpNote(followUps.startedAt, clock) : null),");
   });
 

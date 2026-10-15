@@ -284,6 +284,6 @@
     ]
   },
   "gaps": [
-    "An explicit request for two columns (its question says 'side by side'): the one-column flows (V1/V2) keep today's split for it. Same sample data as 02-ads-card and 03-funnel."
+    "An explicit request for two columns (its question says 'side by side'): the one-column default keeps today's split for it. Same sample data as 02-ads-card and 03-funnel."
   ]
 }

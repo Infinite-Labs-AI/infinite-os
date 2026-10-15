@@ -11,8 +11,10 @@ import { viewFocusAfterTurnDone } from "./focus.js";
 import { answerCarriesTable, detailsPaneWidth, layoutTurn, renderCommittedTurn, renderLiveTurn, turnMaySplit } from "./layout.js";
 import type { ViewRender } from "./types.js";
 
-// The r4 frame body (terminal-r4 `frame()`): side by side from 80 columns, as
-// r4 draws it, one column below. Synthetic data only.
+// The live turn's body: one column at every width (the one-column default,
+// 2026-10-15, `chat-layout.ts`); a turn that asks for two columns is r4's
+// frame body (terminal-r4 `frame()`), side by side from 80 columns, one column
+// below. Synthetic data only.
 const theme = INFINITE_R4_THEME;
 const view = (over: Partial<ViewRender> = {}): ViewRender => ({
   head: " Ads running  ✓ Ready", source: "Demo · up to Sep 30", detail: ["row one", "row two"], footnotes: [], keys: [], okKey: null, rowCount: 0, ...over
@@ -21,11 +23,21 @@ const messages: Msg[] = [
   { role: "user", text: "which ads are on?" },
   { role: "assistant", text: "Two are on, and both are spending at their usual pace this week." }
 ];
+/** The same turn, its question asking for two columns. */
+const asked: Msg[] = [{ role: "user", text: "which ads are on, side by side?" }, messages[1]!];
 
 describe("the frame body", () => {
-  it("one column below 80: answer, a blank, a line rule, the details, a blank, then the Steps", () => {
-    const lines = layoutTurn(["❯ q", "", "∞ a"], view(), ["  step"], 79);
-    expect(lines).toEqual(["❯ q", "", "∞ a", "", "─".repeat(79), " Ads running  ✓ Ready", "Demo · up to Sep 30", "", "row one", "row two", "", `─ Steps ${"─".repeat(71)}`, "  step"]);
+  it("one column: the answer, a blank, then the details; no rule and no Steps strip (the calls are lines in the answer column)", () => {
+    for (const width of [79, 120]) {
+      const lines = layoutTurn(["❯ q", "", "∞ a"], view(), ["  step"], width, null, { split: false });
+      expect(lines).toEqual(["❯ q", "", "∞ a", "", " Ads running  ✓ Ready", "Demo · up to Sep 30", "", "row one", "row two"]);
+    }
+    expect(layoutTurn(["❯ q", "", "∞ a"], view(), ["  step"], 79)).toEqual(layoutTurn(["❯ q", "", "∞ a"], view(), ["  step"], 79, null, { split: false }));
+  });
+
+  it("side by side, the Steps strip runs under both panes", () => {
+    const lines = layoutTurn(["❯ q", "", "∞ a"], view(), ["  step"], 120);
+    expect(lines.slice(-2)).toEqual([`─ Steps ${"─".repeat(112)}`, "  step"]);
   });
 
   it("side by side from 120: the answer pane padded to 33, the separator in line, an empty details row ends at the bar", () => {
@@ -36,9 +48,9 @@ describe("the frame body", () => {
   });
 
   it("wraps the answer pane at its width less one (r4 `wrap(…, lw − 1)`)", () => {
-    const lines = renderLiveTurn({ messages, views: [], focus: null, width: 160, color: false, theme, details: ["┌─ card ─┐"] }).lines;
+    const lines = renderLiveTurn({ messages: asked, views: [], focus: null, width: 160, color: false, theme, details: ["┌─ card ─┐"] }).lines;
     const left = lines.map((line) => line.slice(0, 40).trimEnd());
-    expect(left[0]).toBe("❯ which ads are on?");
+    expect(left[0]).toBe("❯ which ads are on, side by side?");
     expect(left[2]).toBe("∞ Two are on, and both are spending at");
     expect(left.every((line) => line.length <= 39)).toBe(true);
   });
@@ -48,11 +60,11 @@ describe("the frame body", () => {
 // its blank rows around the details, so it stays live (its Steps and its keys
 // with it) where it would otherwise go to scrollback. The session asks for it.
 describe("the compact frame body (a finished turn that just misses the window)", () => {
-  it("one column: no blank over the rule, under the details' head or over the Steps; nothing else changes", () => {
+  it("one column: no blank over the details or under the details' head; nothing else changes", () => {
     const lines = layoutTurn(["❯ q", "", "∞ a"], view(), ["  step"], 79, null, { compact: true });
-    expect(lines).toEqual(["❯ q", "", "∞ a", "─".repeat(79), " Ads running  ✓ Ready", "Demo · up to Sep 30", "row one", "row two", `─ Steps ${"─".repeat(71)}`, "  step"]);
-    // Three rows fewer than the r4 frame body.
-    expect(layoutTurn(["❯ q", "", "∞ a"], view(), ["  step"], 79)).toHaveLength(lines.length + 3);
+    expect(lines).toEqual(["❯ q", "", "∞ a", " Ads running  ✓ Ready", "Demo · up to Sep 30", "row one", "row two"]);
+    // Two rows fewer than the roomy body.
+    expect(layoutTurn(["❯ q", "", "∞ a"], view(), ["  step"], 79)).toHaveLength(lines.length + 2);
   });
 
   it("side by side: only the blank under the details' head goes", () => {
@@ -66,24 +78,29 @@ describe("the compact frame body (a finished turn that just misses the window)",
     const roomy = renderLiveTurn(input);
     const tight = renderLiveTurn({ ...input, compact: true });
     expect(tight.lines.filter((line) => line.trim())).toEqual(roomy.lines.filter((line) => line.trim()));
-    expect(roomy.lines.length - tight.lines.length).toBe(2);
+    expect(roomy.lines.length - tight.lines.length).toBe(1);
     expect(tight.details).toBe(true);
-    // The blank between the question and the answer is the answer column's own: it stays.
-    expect(tight.lines.slice(0, 3)).toEqual(["❯ which ads are on?", "", "∞ Two are on, and both are spending at their usual pace this week."]);
+    // The blanks between the question, its calls and the answer are the answer column's own: they stay.
+    expect(tight.lines.slice(0, 5)).toEqual([
+      "❯ which ads are on?", "", "  ✓ listing sample rows · 2 rows", "", "∞ Two are on, and both are spending at their usual pace this week."
+    ]);
   });
 });
 
 describe("what takes the details pane", () => {
-  it("a pending card handed in sits right of the answer from 80, under it below", () => {
+  it("a pending card handed in sits under the answer; right of it from 80 when the turn asks for two columns", () => {
     const card = ["┌─ Pause ad? ─┐", "│ status      │", "└─────────────┘"];
     expect(detailsPaneWidth(160)).toBe(117);
     expect(detailsPaneWidth(100)).toBe(69);
     expect(detailsPaneWidth(79)).toBe(79);
-    const wide = renderLiveTurn({ messages, views: [], focus: null, width: 160, color: false, theme, details: card }).lines;
-    expect(wide[0]).toBe(`❯ which ads are on?${" ".repeat(21)} │ ┌─ Pause ad? ─┐`);
-    const narrow = renderLiveTurn({ messages, views: [], focus: null, width: 79, color: false, theme, details: card }).lines;
-    expect(narrow.slice(-3)).toEqual(card);
-    expect(narrow.some((line) => line.includes(" │ "))).toBe(false);
+    expect(detailsPaneWidth(160, false)).toBe(160);
+    const wide = renderLiveTurn({ messages: asked, views: [], focus: null, width: 160, color: false, theme, details: card }).lines;
+    expect(wide[0]).toBe(`${"❯ which ads are on, side by side?".padEnd(40)} │ ┌─ Pause ad? ─┐`);
+    for (const width of [79, 160]) {
+      const one = renderLiveTurn({ messages, views: [], focus: null, width, color: false, theme, details: card }).lines;
+      expect(one.slice(-4)).toEqual(["", ...card]);
+      expect(one.some((line) => line.includes(" │ "))).toBe(false);
+    }
   });
 
   it("a quiet view with a head (r4 `steps only`) is a details pane; without one it prints with the Steps", () => {
@@ -95,19 +112,18 @@ describe("what takes the details pane", () => {
   });
 });
 
-describe("a committed turn in scrollback is the question and the answer (D1, run-2 M3)", () => {
+describe("a committed turn in scrollback is the question, its calls and the answer (D1, run-2 M3)", () => {
   const steps: Msg[] = [
     { role: "user", text: "site traffic" },
     { kind: "trail", role: "system", text: "", tools: ["checking GA4 (0.4s) :: 3 pages ✓"] },
     { role: "assistant", text: "Up 12% on the week." }
   ];
 
-  it("keeps no Steps strip, live or quiet, at any width", () => {
+  it("keeps no Steps strip at any width: its calls stay in place as lines", () => {
     for (const width of [60, 100, 160]) {
       const lines = renderCommittedTurn({ messages: steps, views: [], focus: null, width, color: false, theme });
       expect(lines.some((line) => line.includes("Steps"))).toBe(false);
-      expect(lines.some((line) => line.includes("checking GA4"))).toBe(false);
-      expect(lines).toEqual(["❯ site traffic", "", "∞ Up 12% on the week."]);
+      expect(lines).toEqual(["❯ site traffic", "", "  ✓ checking GA4 · 3 pages", "", "∞ Up 12% on the week."]);
     }
   });
 
@@ -121,35 +137,40 @@ describe("a committed turn in scrollback is the question and the answer (D1, run
     expect(lines.some((line) => line.includes(" │ "))).toBe(false);
   });
 
-  it("the live turn keeps its Steps strip", () => {
+  it("the live turn draws the same lines; a turn that asks for two columns keeps its Steps strip", () => {
     const lines = renderLiveTurn({ messages: steps, views: [], focus: null, width: 100, color: false, theme }).lines;
-    expect(lines.some((line) => line.startsWith("─ Steps"))).toBe(true);
+    expect(lines).toEqual(["❯ site traffic", "", "  ✓ checking GA4 · 3 pages", "", "∞ Up 12% on the week."]);
+    const twoColumns = [{ role: "user" as const, text: "site traffic, side by side" }, ...steps.slice(1)];
+    expect(renderLiveTurn({ messages: twoColumns, views: [], focus: null, width: 100, color: false, theme }).lines.some((line) => line.startsWith("─ Steps"))).toBe(true);
   });
 });
 
-describe("a committed turn keeps the calls that did not end clean (a failed step never disappears)", () => {
+describe("a committed turn keeps every call in place (a failed step never disappears)", () => {
   const turn: Msg[] = [{ role: "user", text: "site traffic" }, { role: "assistant", text: "Up 12% on the week." }];
   const steps: TurnStep[] = [
     { id: "c1", name: "mcp__sample_app__get_sample_rows", label: "reading the last 200 days", status: "ok", startedAt: 0, endedAt: 300, result: "200 days" },
     { id: "c2", name: "mcp__sample_app__get_sample_rows", label: "reading today", status: "fail", startedAt: 340, endedAt: 640, result: "not synced yet" }
   ];
 
-  it("the failed call's row follows the answer, a blank row apart; the clean call and the Steps header are gone", () => {
+  it("every call is a line between the question and the answer, the failed one with its reason; no Steps header", () => {
     for (const width of [60, 100, 160]) {
       const lines = renderCommittedTurn({ messages: turn, views: [], focus: null, steps, width, color: false, theme });
-      expect(lines).toEqual(["❯ site traffic", "", "∞ Up 12% on the week.", "", "  reading today ✗ not synced yet"]);
+      expect(lines).toEqual([
+        "❯ site traffic", "", "  ✓ reading the last 200 days · 200 days", "  ✗ reading today · not synced yet", "", "∞ Up 12% on the week."
+      ]);
     }
   });
 
-  it("the row follows the details when the turn has a view", () => {
+  it("the calls stay above the answer when the turn has a view", () => {
     const listing = decodeAnswerView({
       v: 1, kind: "quiet", tool: "read_playbook", title: "Playbook", state: "ready", asOf: null,
       scope: { workspaceName: "Demo", crossWorkspace: false }, caveats: [], body: { stepLine: "read the playbook" }
     });
     const lines = renderCommittedTurn({ messages: turn, views: listing ? [listing] : [], focus: null, steps, width: 100, color: false, theme });
-    expect(lines.slice(-2)).toEqual(["", "  reading today ✗ not synced yet"]);
+    expect(lines.slice(0, 6)).toEqual([
+      "❯ site traffic", "", "  ✓ reading the last 200 days · 200 days", "  ✗ reading today · not synced yet", "", "∞ Up 12% on the week."
+    ]);
     expect(lines.some((line) => line.includes("Steps"))).toBe(false);
-    expect(lines.some((line) => line.includes("reading the last 200 days"))).toBe(false);
   });
 
   it("reads the calls from the tool trail when the turn store has none", () => {
@@ -159,7 +180,7 @@ describe("a committed turn keeps the calls that did not end clean (a failed step
       turn[1]!
     ];
     const lines = renderCommittedTurn({ messages: trail, views: [], focus: null, width: 100, color: false, theme });
-    expect(lines).toEqual(["❯ site traffic", "", "∞ Up 12% on the week.", "", "  pausing entity ✗ refused"]);
+    expect(lines).toEqual(["❯ site traffic", "", "  ✓ checking GA4 · 3 pages", "  ✗ pausing entity · refused", "", "∞ Up 12% on the week."]);
   });
 
   it("prints none while the calls stay live with a waiting card (they print when that turn is committed)", () => {
@@ -167,10 +188,14 @@ describe("a committed turn keeps the calls that did not end clean (a failed step
     expect(lines).toEqual(["❯ site traffic", "", "∞ Up 12% on the week."]);
   });
 
-  it("the live turn still draws every call in its Steps strip", () => {
+  it("the live turn draws every call too: as lines in one column, in its Steps strip side by side", () => {
     const lines = renderLiveTurn({ messages: turn, views: [], focus: null, steps, width: 100, color: false, theme, details: ["card"] }).lines;
-    expect(lines.some((line) => /reading the last 200 days\s+━+\s+✓ 200 days/u.test(line))).toBe(true);
-    expect(lines.some((line) => /reading today\s+━+\s+✗ not synced yet/u.test(line))).toBe(true);
+    expect(lines).toContain("  ✓ reading the last 200 days · 200 days");
+    expect(lines).toContain("  ✗ reading today · not synced yet");
+    const twoColumns = [{ role: "user" as const, text: "site traffic, side by side" }, turn[1]!];
+    const split = renderLiveTurn({ messages: twoColumns, views: [], focus: null, steps, width: 100, color: false, theme, details: ["card"] }).lines;
+    expect(split.some((line) => /reading the last 200 days\s+━+\s+✓ 200 days/u.test(line))).toBe(true);
+    expect(split.some((line) => /reading today\s+━+\s+✗ not synced yet/u.test(line))).toBe(true);
   });
 });
 
@@ -238,6 +263,7 @@ describe("an answer table that drops columns says so in one wording, live or in 
   });
 });
 
+// The split is for a turn that asks for two columns (the questions below do).
 describe("an answer with a table of its own takes the whole width (the split is for a view or a card)", () => {
   // Six columns, as a model writes them: about 100 columns wide as a bordered table.
   const table = [
@@ -248,21 +274,21 @@ describe("an answer with a table of its own takes the whole width (the split is 
     "| Demo item carousel | $123.45 | 19 | 2.12 | $12.34 | Steady |"
   ].join("\n");
   const withTable: Msg[] = [
-    { role: "user", text: "how did the ads do?" },
+    { role: "user", text: "the ads, side by side?" },
     { role: "assistant", text: `Spend is up on the week.\n\n${table}\n\nTwo ads carry most of it.` }
   ];
-  const prose: Msg[] = [{ role: "user", text: "how did the ads do?" }, { role: "assistant", text: "Spend is up on the week. Two ads carry most of it." }];
+  const prose: Msg[] = [{ role: "user", text: "the ads, side by side?" }, { role: "assistant", text: "Spend is up on the week. Two ads carry most of it." }];
   const card = ["┌─ Pause ad? ─┐", "│ status      │", "└─────────────┘"];
   const header = /│ Ad\s+│\s+Spend │\s+Purchases │\s+ROAS │\s+CPA │ Note\s+│/u;
 
   it.each([120, 140, 159])("at %i the table stays a bordered table with every column, and the card follows under the answer", (width) => {
     const lines = renderLiveTurn({ messages: withTable, views: [], focus: null, width, color: false, theme, details: card }).lines;
-    // One column: no pane separator beside the answer, the card under a rule.
-    expect(lines[0]).toBe("❯ how did the ads do?");
+    // One column: no pane separator beside the answer, the card under it, a blank row apart.
+    expect(lines[0]).toBe("❯ the ads, side by side?");
     expect(lines.some((line) => line.includes(" │ ┌─ Pause ad? ─┐"))).toBe(false);
-    const rule = lines.indexOf("─".repeat(width));
-    expect(rule).toBeGreaterThan(0);
-    expect(lines.slice(rule + 1, rule + 4)).toEqual(card);
+    const at = lines.indexOf(card[0]!);
+    expect(at).toBeGreaterThan(0);
+    expect(lines.slice(at - 1, at + 3)).toEqual(["", ...card]);
     // A bordered table, all six columns on one header row; never `label: value` stacks, nothing dropped.
     expect(lines.some((line) => header.test(line))).toBe(true);
     expect(lines.filter((line) => /^ {2}┌[─┬]+┐$/u.test(line))).toHaveLength(1);
@@ -273,7 +299,7 @@ describe("an answer with a table of its own takes the whole width (the split is 
 
   it.each([120, 140, 159])("at %i an answer with no table still sits left of its card", (width) => {
     const lines = renderLiveTurn({ messages: prose, views: [], focus: null, width, color: false, theme, details: card }).lines;
-    expect(lines[0]).toMatch(/^❯ how did the ads do\? + │ ┌─ Pause ad\? ─┐$/u);
+    expect(lines[0]).toMatch(/^❯ the ads, side by side\? + │ ┌─ Pause ad\? ─┐$/u);
     expect(lines.includes("─".repeat(width))).toBe(false);
   });
 
@@ -291,14 +317,16 @@ describe("an answer with a table of its own takes the whole width (the split is 
     });
     if (!doc) throw new Error("document fixture does not decode");
     const lines = renderLiveTurn({ messages: withTable, views: [doc], focus: null, width: 140, color: false, theme }).lines;
-    const rule = lines.indexOf("─".repeat(140));
-    expect(lines.some((line) => header.test(line))).toBe(true);
-    expect(lines.findIndex((line) => line.includes("Win-back sequence"))).toBeGreaterThan(rule);
+    const tableAt = lines.findIndex((line) => header.test(line));
+    expect(tableAt).toBeGreaterThan(0);
+    expect(lines.findIndex((line) => line.includes("Win-back sequence"))).toBeGreaterThan(tableAt);
     expect(turnMaySplit(withTable, 140)).toBe(false);
     expect(detailsPaneWidth(140, turnMaySplit(withTable, 140))).toBe(140);
     expect(turnMaySplit(prose, 140)).toBe(true);
     expect(turnMaySplit(prose, 80)).toBe(true);
     expect(turnMaySplit(prose, 79)).toBe(false);
+    // A question that does not ask is one column at any width.
+    expect(turnMaySplit([{ role: "user", text: "how did the ads do?" }, prose[1]!], 140)).toBe(false);
   });
 
   it("only the answer's own markdown counts: the question, a tool's output and a diff never do; a table still arriving does", () => {
@@ -415,7 +443,7 @@ describe("a committed turn hides nothing behind a key (scrollback has none)", ()
   it.each([60, 80])("a truncated view at %i says what it shows, never `m for more`", (width) => {
     const tall = fixture("numbers-tall");
     const live = renderLiveTurn({ messages, views: [tall], focus: null, width, color: false, theme }).lines;
-    // From 80 columns it is in the details pane, right of the answer.
+    // Under the answer, at the whole width.
     expect(live.some((line) => line.endsWith("40 of 100 · First 40 by spend · m for more"))).toBe(true);
     const lines = renderCommittedTurn({ messages, views: [tall], focus: null, width, color: false, theme });
     expect(lines).toContain("40 of 100 · First 40 by spend");
@@ -440,9 +468,9 @@ describe("a committed turn hides nothing behind a key (scrollback has none)", ()
   });
 });
 
-describe("a table that draws whole in the answer pane keeps the split", () => {
+describe("a table that draws whole in the answer pane keeps the split (a turn that asks for two columns)", () => {
   const small: Msg[] = [
-    { role: "user", text: "which won?" },
+    { role: "user", text: "which won, side by side?" },
     { role: "assistant", text: "Two ran.\n\n| Ad | Spend |\n| --- | ---: |\n| Spring | $120 |\n| Autumn | $80 |" }
   ];
   const card = ["┌─ card ─┐"];
@@ -450,7 +478,7 @@ describe("a table that draws whole in the answer pane keeps the split", () => {
   it.each([160, 200])("at %i a two-column table sits in the answer pane, bordered, left of the card", (width) => {
     expect(turnMaySplit(small, width)).toBe(true);
     const lines = renderLiveTurn({ messages: small, views: [], focus: null, width, color: false, theme, details: card }).lines;
-    expect(lines[0]).toMatch(/^❯ which won\? + │ ┌─ card ─┐$/u);
+    expect(lines[0]).toMatch(/^❯ which won, side by side\? + │ ┌─ card ─┐$/u);
     expect(lines.some((line) => /│ Ad\s+│\s+Spend │/u.test(line))).toBe(true);
     expect(lines.some((line) => /hidden|needs|Ad: /u.test(line))).toBe(false);
     expect(lines.includes("─".repeat(width))).toBe(false);
@@ -465,7 +493,7 @@ describe("a table that draws whole in the answer pane keeps the split", () => {
 
 // Live run 4, N11: before a pause card the turn looked the ad up, and that
 // lookup (a list whose one row IS the card's ad) printed above the card as
-// its own view. r4 draws the card alone: the lookup is its Steps row.
+// its own view. r4 draws the card alone: the lookup is its call's line.
 describe("a lookup of the card's own target folds into its Steps row (live run-4 N11)", () => {
   const fixture = (name: string) => {
     const view = decodeAnswerView(JSON.parse(readFileSync(fileURLToPath(new URL(`./__fixtures__/${name}.json`, import.meta.url)), "utf8")));
@@ -485,14 +513,14 @@ describe("a lookup of the card's own target folds into its Steps row (live run-4
   const card = ["┌─ Pause ad “Demo A”? ─┐", "│  p  Pause    n  dismiss │", "└──────────────────────┘"];
   const turn: Msg[] = [{ role: "user", text: "pause demo a" }, { role: "assistant", text: "Ready. It stops spending once you say OK." }];
 
-  it.each([60, 100, 160])("at %i, with the card waiting: the card and the Steps, never the lookup's head or row", (width) => {
+  it.each([60, 100, 160])("at %i, with the card waiting: the card and its calls, never the lookup's head or row", (width) => {
     const views = [lookup(["ad_1"])];
     const drawn = renderLiveTurn({ messages: turn, views, focus: viewFocusAfterTurnDone(views), width, color: false, theme, details: card, statusViews: [fixture("change-pause-card")], steps, nowMs: 600 });
     const text = drawn.lines.join("\n");
     expect(text).not.toContain("Sample ads");
     expect(drawn.lines.some((line) => /│\s*Demo A\b|^\s*▸?\s*●?\s*on\s+Demo A/u.test(line))).toBe(false);
     expect(text).toContain("┌─ Pause ad “Demo A”? ─┐");
-    expect(drawn.lines.some((line) => /checking your campaigns\s+━+\s+✓ 1 ad/u.test(line))).toBe(true);
+    expect(drawn.lines).toContain("  ✓ checking your campaigns · 1 ad");
     // The keys are the card's: the folded list offers none.
     expect(drawn.focused).toBeNull();
   });

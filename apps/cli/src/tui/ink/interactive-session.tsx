@@ -49,8 +49,7 @@ import {
   recordCreativeDraft,
   recordTurnView,
   subscribeTurnState,
-  type TurnState,
-  type TurnStep
+  type TurnState
 } from "../app/turn-store.js";
 import { TYPING_IDLE_MS } from "../config/timing.js";
 import { displayWidth, truncateCells } from "../lib/display-width.js";
@@ -105,7 +104,6 @@ import {
 } from "../views/focus.js";
 import { clipboardSequence, copyTargets, copyThroughPbcopy } from "../views/clipboard.js";
 import { detailsPaneWidth, isQuestionTurn, paneWidths, renderCommittedTurn, renderLiveTurn, rowsBesideCard, turnMaySplit, type LiveTurnRender } from "../views/layout.js";
-import { chatLayout, isFlow } from "../views/chat-layout.js";
 import { besideWorkingTurn, workingTurnMessages, workingTurnSteps, type InfiniteTranscriptInput } from "../app/transcript-renderer.js";
 import {
   approvalRender,
@@ -299,12 +297,7 @@ export interface InkInteractiveSessionAppProps {
    * user having pressed `v`): the head card's documents open. Absent = the
    * default. A list's opening row is the view's own (`body.selected`).
    */
-  /**
-   * The focus the session opens in: a write card opened on its documents
-   * (`documentOpen`), or the keys already on the turn's view (`viewEngaged`,
-   * the screen after tab; in the V2 flow that opens its cards in place).
-   */
-  initialFocus?: { documentOpen?: boolean; viewEngaged?: boolean };
+  initialFocus?: { documentOpen?: boolean };
   onRememberInput?: (line: string) => void;
   /**
    * Run one submitted line. `signal` aborts when the user stops the turn (Esc,
@@ -628,9 +621,7 @@ export function InkInteractiveSessionApp({
   const [viewFocus, setViewFocus] = useState<ViewFocusState | null>(() => {
     const views = getTurnState().views;
     const cards = initialPendingConfirmations.flatMap((action) => (action.view ? [action.view] : []));
-    const start = views.length ? viewFocusAfterTurnDone(views.map((frame) => frame.view), viewCaps(), cards.slice(0, 1)) : null;
-    // `viewEngaged`: as after tab (the keys on a view that has some).
-    return start && initialFocus?.viewEngaged && start.focus !== "composer" ? { ...start, engaged: true } : start;
+    return views.length ? viewFocusAfterTurnDone(views.map((frame) => frame.view), viewCaps(), cards.slice(0, 1)) : null;
   });
   const viewFocusRef = useRef(viewFocus);
   viewFocusRef.current = viewFocus;
@@ -669,14 +660,6 @@ export function InkInteractiveSessionApp({
   const [activeFieldTick, setActiveFieldTick] = useState(0);
   const [queuedLines, setQueuedLines] = useState<readonly string[]>([]);
   const [turnState, setTurnState] = useState<TurnState>(() => getTurnState());
-  // A finished turn too tall for the live region goes whole into scrollback,
-  // but its Steps strip stays live under it, as r4 keeps the strip under the
-  // turn on screen (live run-4 N12), until the next line commits it (only
-  // its calls that did not end clean print then). The views its calls drew
-  // go with it, so each row keeps the status its view gave it.
-  const [keptSteps, setKeptSteps] = useState<{ steps: readonly TurnStep[]; views: readonly AnswerViewV1[] } | null>(null);
-  const keptStepsRef = useRef(keptSteps);
-  keptStepsRef.current = keptSteps;
   // The head write card's view, for a turn that goes up while the card stays live:
   // a lookup of the card's own target is folded out of scrollback too (live run-4 N11).
   const headCardViewRef = useRef<AnswerViewV1 | null>(null);
@@ -744,29 +727,19 @@ export function InkInteractiveSessionApp({
   // only the frame stays live. A write card still waiting for its answer stays
   // live with the turn's Steps (`keepCard`): only the question, the answer and
   // the other views go up.
-  const commitLiveTurn = useCallback((why: "submit" | "overflow", keepCard = false, keepStripLive = false) => {
+  const commitLiveTurn = useCallback((why: "submit" | "overflow", keepCard = false) => {
     commitSeq.current += 1;
     const turn = historyRef.current;
-    const { views, steps: storeSteps } = getTurnState();
-    // The strip an earlier overflow kept live is this turn's, until the next line.
-    const kept = storeSteps.length ? null : keptStepsRef.current;
-    const steps = kept ? kept.steps : storeSteps;
-    const statusViews = [...(kept ? kept.views : []), ...(keepCard && headCardViewRef.current ? [headCardViewRef.current] : [])];
+    const { views, steps } = getTurnState();
+    const statusViews = keepCard && headCardViewRef.current ? [headCardViewRef.current] : [];
     const focus = viewFocusRef.current;
     // Scrollback is ONE column at any width (layout decision, 2026-10-02): the question,
-    // the answer, its views underneath, under a thin rule.
+    // its calls, the answer, its views underneath, under a thin rule.
     // `redraw` draws it again at another width (a width change reprints scrollback).
-    // A call that did not end clean keeps its row under the answer (a failed
-    // step never disappears with the Steps strip). While a card still waits,
-    // or the turn went up only for being too tall, the turn's calls stay live
-    // and print when that is committed. A strip too tall for the resting
-    // frame (`keepStripLive` false) goes up with the turn: its unsettled
-    // calls print under the answer now.
-    const keepStrip = why === "overflow" && steps.length > 0 && !keepCard && keepStripLive;
-    const stepsStayLive = why === "overflow" && steps.length > 0 && (keepCard || keepStrip);
-    const nextKept = keepStrip ? { steps, views: [...statusViews, ...views.map((frame) => frame.view)] } : null;
-    keptStepsRef.current = nextKept;
-    setKeptSteps(nextKept);
+    // Every call keeps its line in place (one-column default, 2026-10-15). While
+    // a card still waits, the turn's calls stay live with it and print when
+    // that is committed.
+    const stepsStayLive = why === "overflow" && steps.length > 0 && keepCard;
     const drawTurn = (width: number) => renderCommittedTurn({
       messages: turn,
       views: views.map((frame) => frame.view),
@@ -950,11 +923,10 @@ export function InkInteractiveSessionApp({
   const workingState = busy ? turnState : null;
   const workingClock = busy ? clock : 0;
   // The head write card is the turn's last details (r4 "Needs your OK"):
-  // beside the answer from 80 columns, under the answer and a rule below
-  // that, the Steps under it. It is drawn at the details pane's width.
-  // A turn whose answer has a table of its own stays one column at any width,
-  // so its card is drawn at the whole width, under the answer.
-  // The one-column flows (`INFINITE_CHAT_LAYOUT`, chat-layout.ts) split only a turn that asks for two columns.
+  // under the answer at the whole width (one column, the default), or, on a
+  // turn that asks for two columns (chat-layout.ts), beside the answer from
+  // 80 columns with the Steps under it, drawn at the details pane's width. A
+  // turn whose answer has a table of its own stays one column at any width.
   const turnSplits = useMemo(
     () => turnMaySplit(history, transcriptColumns(columns), turnViews.map((frame) => frame.view)),
     [columns, history, turnViews]
@@ -1081,26 +1053,20 @@ export function InkInteractiveSessionApp({
   useLayoutEffect(() => {
     setCardPaneScroll(null);
   }, [columns, rows, headCardRowCount]);
-  // The strip a tall finished turn left live (see `keptSteps`): only while no other turn runs or has calls.
-  // A streamed follow-up is the card's turn still running: the kept strip stays hidden while it runs.
-  const liveKeptSteps = !busy && !followUpRunning && !turnSteps.length ? keptSteps : null;
-  // A question with no view or card yet is drawn in the turn layout too once
-  // the window is wide enough to split (r4 always splits): its details pane
-  // is r4's `steps only`. Narrower, or a command's output, the transcript draws it.
-  // The one-column flows draw every question in the turn layout (its calls as lines in the flow).
-  const questionSplits = (turnSplits || isFlow(chatLayout())) && isQuestionTurn(history);
+  // Every question is drawn in the turn layout, with or without a view: its
+  // calls as lines in one column (side by side, r4's `steps only` pane). A
+  // command's output stays the transcript's.
+  const questionTurn = isQuestionTurn(history);
   const renderTurnAt = useMemo(() => {
-    if (!turnViews.length && !headCardLines && !liveKeptSteps && !questionSplits) {
+    if (!turnViews.length && !headCardLines && !questionTurn) {
       return null;
     }
     const messages = workingState ? workingTurnMessages(history, workingState, agentTitle) : history;
     // A call still running says how far it is (its latest progress), busy or not.
-    const steps = liveKeptSteps
-      ? liveKeptSteps.steps
-      : workingState
-        ? workingTurnSteps(messages, workingState, workingClock)
-        : turnSteps.some((step) => step.endedAt === null) ? workingTurnSteps(messages, getTurnState(), clock) : turnSteps;
-    const statusViews = [...(headConfirmAction?.view ? [headConfirmAction.view] : []), ...(liveKeptSteps?.views ?? [])];
+    const steps = workingState
+      ? workingTurnSteps(messages, workingState, workingClock)
+      : turnSteps.some((step) => step.endedAt === null) ? workingTurnSteps(messages, getTurnState(), clock) : turnSteps;
+    const statusViews = headConfirmAction?.view ? [headConfirmAction.view] : [];
     const cache = new Map<string, LiveTurnRender>();
     // `compact`: without the blank rows around the details (see `compactTurn` below).
     return (turnRows: number | undefined, compact = false): LiveTurnRender => {
@@ -1130,7 +1096,7 @@ export function InkInteractiveSessionApp({
       cache.set(cacheKey, drawn);
       return drawn;
     };
-  }, [agentTitle, captionOpen, cardPaneScroll, clock, columns, headCardLines, headConfirmAction, history, liveKeptSteps, questionSplits, t, turnSteps, turnViews, viewFocus, workingClock, workingState]);
+  }, [agentTitle, captionOpen, cardPaneScroll, clock, columns, headCardLines, headConfirmAction, history, questionTurn, t, turnSteps, turnViews, viewFocus, workingClock, workingState]);
   // Beside a drawn turn, the transcript carries only what the drawn turn does
   // not show: its Steps are the drawn turn's own strip, and while it runs its
   // arriving answer and calls are in it too, so nothing is drawn twice.
@@ -2072,11 +2038,11 @@ export function InkInteractiveSessionApp({
   // draw again when the bar's height differs from the guess.
   const drawTurnWith = (
     reserved: number,
-    compact = false,
-    render: ((turnRows: number | undefined, compact?: boolean) => LiveTurnRender) | null = renderTurnAt
+    compact = false
   ): { turn: LiveTurnRender | null; turnRows: number | undefined } => {
     let turn: LiveTurnRender | null = null;
     let turnRows: number | undefined;
+    const render = renderTurnAt;
     if (render) {
       let barRows = DEFAULT_KEY_BAR_ROWS;
       for (let pass = 0; pass < 3; pass += 1) {
@@ -2186,44 +2152,10 @@ export function InkInteractiveSessionApp({
   if (finishedOverflow && reservedRows !== restingReservedRows) {
     finishedOverflow = pagedAtRest(compactTurn);
   }
-  // The Steps strip a turn that goes up keeps live (see `keptSteps`) only
-  // when the strip alone is whole in the RESTING frame, under its header: a
-  // finished turn never pages, its strip neither. A strip taller than that
-  // goes up with the turn, and only its calls that did not end clean print
-  // under the answer (lane review MUST).
-  const keptStripFitsAtRest = (): boolean => {
-    // The flow's calls are lines of the turn itself: they go up with it, in place.
-    if (isFlow(chatLayout())) {
-      return false;
-    }
-    const steps = turnSteps.length ? turnSteps : keptSteps?.steps ?? [];
-    if (!steps.length) {
-      return false;
-    }
-    const statusViews = [...(turnSteps.length ? [] : keptSteps?.views ?? []), ...turnViews.map((frame) => frame.view)];
-    const drawStrip = (turnRows: number | undefined): LiveTurnRender => renderLiveTurn({
-      messages: [],
-      views: [],
-      focus: null,
-      steps,
-      width: transcriptColumns(columns),
-      color: colorEnabled(t),
-      theme: t,
-      rows: turnRows,
-      ...(statusViews.length ? { statusViews } : {})
-    });
-    const strip = drawTurnWith(restingReservedRows, false, drawStrip).turn;
-    return strip !== null && !layoutAt(
-      { id: "live-turn", lines: strip.lines },
-      idleTranscript,
-      restingReservedRows,
-      keyBarRowCount(keyHintsFor(strip), columns)
-    ).window.paged;
-  };
   useLayoutEffect(() => {
     if (finishedOverflow) {
       const keepCard = pendingConfirmActions.length > 0;
-      commitLiveTurn("overflow", keepCard, !keepCard && keptStripFitsAtRest());
+      commitLiveTurn("overflow", keepCard);
     }
   });
   // The frame in which the overflow is found draws the turn nowhere (the commit
@@ -2251,10 +2183,6 @@ export function InkInteractiveSessionApp({
       : markSide === "view" ? { from: panesNow.left + 3, to: panesNow.left + 3 + panesNow.right } : null,
     [markSide, panesNow.left, panesNow.right]
   );
-  // The boot frame is r4's frame as drawn (D4), its key bar included: `tab
-  // switch side`, then `/ commands`. After it the bar offers `tab switch side`
-  // only while the turn on screen has details to switch to.
-  const bootFrameDrawn = frameProps.bootFrame && liveLayout.window.total === 0;
   // With nothing live after the first turn, the top bar's rule is the rule
   // over the composer (the frame is top bar, rule, composer, key bar), unless
   // a picker, the /connect steps or a draft line sit between them.
@@ -2435,7 +2363,7 @@ export function InkInteractiveSessionApp({
         theme={t}
         width={columns}
       />
-      <KeyBar hints={keyHints} commands={!modelPicker.state} sides={!modelPicker.state && ((bootFrameDrawn && !isFlow(chatLayout())) || (Boolean(liveTurn?.details) && !finishedOverflow))} twoColumns={turnSplits} theme={t} width={columns} />
+      <KeyBar hints={keyHints} commands={!modelPicker.state} sides={!modelPicker.state && Boolean(liveTurn?.details) && !finishedOverflow} twoColumns={turnSplits} theme={t} width={columns} />
     </Box>
   );
 }

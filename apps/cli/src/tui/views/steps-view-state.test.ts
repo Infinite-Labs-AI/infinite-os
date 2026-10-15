@@ -8,7 +8,7 @@ import type { AnswerViewV1 } from "@infinite-os/types";
 import { describe, expect, it } from "vitest";
 
 import type { TurnStep } from "../app/turn-store.js";
-import { NOT_SENT_STEP_WORDS, refineStepStatus, settleNotSentStep, stepRowLines, toolOutcome, unsettledStepLines } from "./steps.js";
+import { NOT_SENT_STEP_WORDS, refineStepStatus, settleNotSentStep, stepFlowLines, stepRowLines, toolOutcome } from "./steps.js";
 import { resolveTheme } from "../theme.js";
 
 const theme = resolveTheme({});
@@ -48,8 +48,9 @@ describe("a step follows the one view that stands for it (TJ-10)", () => {
     expect(card).toMatch(/▣ waiting for your OK$/u);
   });
 
-  it("in scrollback, a not-connected read is not kept as an unsettled row", () => {
-    expect(unsettledStepLines([step({ status: "fail", result: "didn't go through" })], { width: 100, color: false, theme, views: [view("read_metrics", "not_connected")] })).toEqual([]);
+  it("in one column and scrollback, a not-connected read is `· not connected`, never ✗", () => {
+    expect(stepFlowLines([step({ status: "fail", result: "didn't go through" })], { width: 100, color: false, theme, views: [view("read_metrics", "not_connected")] }))
+      .toEqual([expect.stringMatching(/^ {2}· .* · not connected$/u)]);
   });
 
   for (const width of [48, 60, 80, 100, 140]) {
@@ -113,12 +114,12 @@ describe("a step's words come from the view that stands for it (W3 r2)", () => {
     expect(rows([step({ status: "ok", result: "sample words" })], [quiet("read_metrics", "outcome_unknown")])[0]).toMatch(/\? sample words$/u);
   });
 
-  it("in scrollback, blocked, limit and unknown rows keep their words", () => {
+  it("in one column and scrollback, blocked, limit and unknown lines keep their words", () => {
     const kept = (state: string, status: "fail" | "ok") =>
-      unsettledStepLines([step({ status, result: status === "fail" ? "didn't go through" : "" })], { width: 100, color: false, theme, views: [quiet("read_metrics", state)] });
-    expect(kept("blocked", "fail")).toEqual([expect.stringMatching(/✗ not allowed$/u)]);
-    expect(kept("hit_limit", "fail")).toEqual([expect.stringMatching(/✗ limit$/u)]);
-    expect(kept("outcome_unknown", "ok")).toEqual([expect.stringMatching(/\? not sure it happened$/u)]);
+      stepFlowLines([step({ status, result: status === "fail" ? "didn't go through" : "" })], { width: 100, color: false, theme, views: [quiet("read_metrics", state)] });
+    expect(kept("blocked", "fail")).toEqual([expect.stringMatching(/^ {2}✗ .* · not allowed$/u)]);
+    expect(kept("hit_limit", "fail")).toEqual([expect.stringMatching(/^ {2}✗ .* · limit$/u)]);
+    expect(kept("outcome_unknown", "ok")).toEqual([expect.stringMatching(/^ {2}\? .* · not sure it happened$/u)]);
   });
 
   for (const width of [48, 60, 100, 140]) {
@@ -184,9 +185,9 @@ describe("the view's state wins over the wire's failure (W3 r2 review)", () => {
     for (const row of drawn) expect(row).toContain("✗");
   });
 
-  it("in scrollback, the unknown row keeps its words", () => {
-    expect(unsettledStepLines([wired()], { width: 100, color: false, theme, views: [quiet("update_sample_brief", "outcome_unknown", { outcome: "unknown" })] }))
-      .toEqual([expect.stringMatching(/\? not sure it happened$/u)]);
+  it("in one column and scrollback, the unknown line keeps its words", () => {
+    expect(stepFlowLines([wired()], { width: 100, color: false, theme, views: [quiet("update_sample_brief", "outcome_unknown", { outcome: "unknown" })] }))
+      .toEqual([expect.stringMatching(/^ {2}\? .* · not sure it happened$/u)]);
   });
 
   it("a partial view's row says its words, never a lone ◐", () => {
@@ -283,11 +284,11 @@ describe("a blocked or limited row says the host's step word (W3 r3 parity)", ()
     expect(row).toMatch(/✗ Sample Step$/u);
   });
 
-  it("in scrollback, a blocked row keeps the host's word", () => {
-    const kept = unsettledStepLines([step({ status: "fail", result: "didn't go through" })], {
+  it("in one column and scrollback, a blocked line keeps the host's word", () => {
+    const kept = stepFlowLines([step({ status: "fail", result: "didn't go through" })], {
       width: 100, color: false, theme, views: [quiet("blocked", { code: "needs_person_ok", words: "A sample sentence.", short: "needs your OK" })]
     });
-    expect(kept).toEqual([expect.stringMatching(/✗ needs your OK$/u)]);
+    expect(kept).toEqual([expect.stringMatching(/^ {2}✗ .* · needs your OK$/u)]);
   });
 
   for (const width of [60, 100, 140]) {

@@ -11,7 +11,5 @@ import type { InkInteractiveSessionAppProps } from "../../ink/interactive-sessio
 import type { R4ScreenFixture } from "./fixtures.js";
 
 export function focusProps(fixture: R4ScreenFixture): Partial<InkInteractiveSessionAppProps> {
-  const focus = fixture.turn?.focus;
-  if (!focus?.viewOpen && !focus?.viewEngaged) return {};
-  return { initialFocus: { ...(focus.viewOpen ? { documentOpen: true } : {}), ...(focus.viewEngaged ? { viewEngaged: true } : {}) } };
+  return fixture.turn?.focus?.viewOpen ? { initialFocus: { documentOpen: true } } : {};
 }

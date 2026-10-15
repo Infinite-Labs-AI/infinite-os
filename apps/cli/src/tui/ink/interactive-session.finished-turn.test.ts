@@ -77,8 +77,8 @@ describe("a finished turn that fits stays live (fake TTY; skipped on CI like the
     expect(rows.findIndex((row) => row.includes("❯ how are the ads?"))).toBeGreaterThan(rows.findIndex((row) => row.includes("∞ Infinite")));
     expect(stripAnsi(output.text())).not.toMatch(/more lines|lines above/u);
     expect(getTurnState().views).toHaveLength(1);
-    // The bar offers the view's keys and, with details on screen, `tab switch side`.
-    expect(rows.filter((row) => row.trim()).at(-1)).toContain("j k  row    tab  switch side    /  commands");
+    // The bar offers the view's keys and, with details on screen, `tab to card` (one column).
+    expect(rows.filter((row) => row.trim()).at(-1)).toContain("j k  row    tab  to card    /  commands");
     // Nothing is selected until the user moves.
     expect(selectedRows(frame)).toEqual([]);
 
@@ -112,11 +112,11 @@ describe("a finished turn that fits stays live (fake TTY; skipped on CI like the
 
 // The fit is measured against the frame as it rests (an empty one-row
 // composer), with the rows the composer really draws. The numbers-ads turn is
-// 24 rows: with the top bar and its rule, the rule over the composer, the
-// composer and the key bar that is a 29-row frame, and Ink needs 2 rows spare.
-// A finished turn that misses by a row or two is drawn without its blank rows
-// around the details (22 rows here: this turn has no Steps) before it is given
-// up to scrollback.
+// 23 rows in one column: with the top bar and its rule, the rule over the
+// composer, the composer and the key bar that is a 28-row frame, and Ink needs
+// 2 rows spare. A finished turn that misses by a row or two is drawn without
+// its blank rows around the details (21 rows here: this turn has no calls)
+// before it is given up to scrollback.
 describe("what fits is decided against the resting frame (fake TTY; skipped on CI like the other PTY tests)", () => {
   async function start(columns: number, rows: number) {
     resetTurnState();
@@ -184,8 +184,8 @@ describe("what fits is decided against the resting frame (fake TTY; skipped on C
     await session;
   });
 
-  it.skipIf(process.env.CI === "true")("at 79x31 the turn just fits: it stays live and j selects a row", { timeout: 30_000 }, async () => {
-    const { input, output, session } = await start(79, 31);
+  it.skipIf(process.env.CI === "true")("at 79x30 the turn just fits: it stays live and j selects a row", { timeout: 30_000 }, async () => {
+    const { input, output, session } = await start(79, 30);
     await waitFor(() => stripAnsi(lastFrame(output.text())).includes("j k  row"), 4_000, output.text);
     expect(getTurnState().views).toHaveLength(1);
     expect(liveQuestion(output.text())).toBe(true);
@@ -197,21 +197,20 @@ describe("what fits is decided against the resting frame (fake TTY; skipped on C
     await session;
   });
 
-  it.skipIf(process.env.CI === "true")("at 79x30 it misses by a row: it stays live without the blank rows around its details, and j still selects a row", { timeout: 30_000 }, async () => {
-    const { input, output, session } = await start(79, 30);
+  it.skipIf(process.env.CI === "true")("at 79x29 it misses by a row: it stays live without the blank rows around its details, and j still selects a row", { timeout: 30_000 }, async () => {
+    const { input, output, session } = await start(79, 29);
     await waitFor(() => stripAnsi(lastFrame(output.text())).includes("j k  row"), 4_000, output.text);
     expect(getTurnState().views).toHaveLength(1);
     expect(liveQuestion(output.text())).toBe(true);
     expect(stripAnsi(output.text())).not.toMatch(/more lines|lines above/u);
     const rows = stripAnsi(lastFrame(output.text())).split("\n").map((row) => row.trimEnd());
-    // The rule sits right under the answer, and the table right under the source line (this turn made no calls: no Steps).
+    // The view's head sits right under the answer, and the table right under the source line (this turn made no calls).
     const answer = rows.findIndex((row) => row.includes("∞ Three ad sets spent this week."));
-    expect(rows[answer + 1]).toBe("─".repeat(79));
     const head = rows.findIndex((row) => row.includes("✓ Ready"));
-    expect(head).toBe(answer + 2);
+    expect(head).toBe(answer + 1);
     expect(rows.slice(head, head + 3).every((row) => row.trim() !== "")).toBe(true);
-    // The frame keeps its chrome: the top bar above the turn, the view's keys and `tab switch side` below.
-    expect(rows.filter((row) => row.trim()).at(-1)).toContain("j k  row    tab  switch side    /  commands");
+    // The frame keeps its chrome: the top bar above the turn, the view's keys and `tab to card` below.
+    expect(rows.filter((row) => row.trim()).at(-1)).toContain("j k  row    tab  to card    /  commands");
     const mark = output.text().length;
     await sendKeys(input, "j");
     await waitFor(() => selectedRows(lastFrame(output.text().slice(mark))).length === 1, 4_000, output.text);

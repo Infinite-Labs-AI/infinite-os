@@ -6,7 +6,8 @@
 // key is offered, and acts, only while the card is on screen: ↑ scrolls it
 // off and `p` leaves the bar and does nothing; `n` stays a real decline.
 // Fake TTY, real Ink, read back through a small terminal emulator, at 80x24,
-// 100x40 and 140x44. Synthetic data only.
+// 100x40 and 140x44. The pane is a side-by-side turn's, which the typed
+// question asks for (one-column default, 2026-10-15). Synthetic data only.
 import { readFileSync, writeFileSync } from "node:fs";
 import { PassThrough } from "node:stream";
 import { fileURLToPath } from "node:url";
@@ -96,7 +97,7 @@ describe("a waiting card under a tall view is on screen whenever p is offered (f
       });
 
       await waitFor(() => output.text().includes("Ask Infinite"), 4_000, output.text);
-      await sendKeys(input, "pause my worst ad\r");
+      await sendKeys(input, "pause my worst ad, side by side\r");
       await waitFor(() => vt.screenText().some((row) => CARD_TITLE.test(row)), 4_000, () => vt.screenText().join("\n"));
 
       // Opened on the card: its title, its row and its keys are on screen, with p on the bar.
@@ -185,7 +186,7 @@ describe("a resize opens the pane on the card again (W3R5 review; fake TTY, skip
         title: "Infinite TUI"
       });
       await waitFor(() => output.text().includes("Ask Infinite"), 4_000, output.text);
-      await sendKeys(input, "pause my worst ad\r");
+      await sendKeys(input, "pause my worst ad, side by side\r");
       await waitFor(() => offersPause(vt.screenText()), 4_000, () => vt.screenText().join("\n"));
 
       // ↑ a row: the card's foot leaves the pane, so p leaves the bar.

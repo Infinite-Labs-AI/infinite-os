@@ -96,16 +96,20 @@ const messages: Msg[] = [
   { role: "user", text: "how are my campaigns and ads doing?" },
   { role: "assistant", text: "Here are both levels." }
 ];
+/** The same turn, its question asking for two columns (r4's split). */
+const asked: Msg[] = [{ role: "user", text: "campaigns and ads, side by side?" }, messages[1]!];
 const text = (lines: readonly string[]) => lines.map(stripAnsi).join("\n");
 
 describe("the terminal draws the fold (N27)", () => {
   for (const width of [48, 60, 80, 100, 140]) {
     it(`the later view keeps its rows and our sign-ups, drops the repeats, and says so once (${width} columns)`, () => {
-      // From 80 columns the live views are the details pane, right of the answer: read that pane.
+      // Asked side by side, from 80 columns the live views are the details pane, right of the answer: read that pane.
       const panes = paneWidths(width);
       const details = (lines: readonly string[]) => panes.wide ? lines.map((line) => stripAnsi(line).slice(panes.left + 3)) : lines;
+      const all = (lines: readonly string[]) => lines;
       for (const [lines, shown] of [
-        [renderLiveTurn({ messages, views: [campaigns(), ads()], focus: null, width, color: false, theme, timeZone: "UTC" }).lines, details],
+        [renderLiveTurn({ messages, views: [campaigns(), ads()], focus: null, width, color: false, theme, timeZone: "UTC" }).lines, all],
+        [renderLiveTurn({ messages: asked, views: [campaigns(), ads()], focus: null, width, color: false, theme, timeZone: "UTC" }).lines, details],
         [renderCommittedTurn({ messages, views: [campaigns(), ads()], focus: null, width, color: false, theme, timeZone: "UTC" }), (all: readonly string[]) => all]
       ] as const) {
         const out = text(shown(lines));

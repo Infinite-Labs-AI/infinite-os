@@ -65,13 +65,13 @@ describe("the boot frame (D4: terminal-r4's frame, nothing else)", () => {
     expect(rows).toEqual([
       " ∞ Infinite   Infinite workspace   ⊘ Shopify ● GA4 ● Stripe ● PostHog ● Google Ads ● Meta",
       "─".repeat(100),
-      // From 80 columns: the split's empty answer pane and its separator (r4 boot--c100).
-      ...Array.from({ length: 8 }, () => `${" ".repeat(29)}│`),
+      // One column at every width (the one-column default): an empty answer area.
+      ...Array.from({ length: 8 }, () => ""),
       `─ Steps ${"─".repeat(92)}`,
       "─".repeat(100),
       "❯ Ask Infinite…",
-      // r4's boot key bar, as drawn: `tab switch side`, then `/ commands`.
-      " tab  switch side    /  commands"
+      // Nothing to switch to before the first turn: `/ commands` alone.
+      " /  commands"
     ]);
   });
 

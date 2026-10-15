@@ -1,11 +1,9 @@
 // Live run 4, N12: a finished numbers turn too tall for the window went whole
-// into scrollback and took its Steps strip with it, so the frame under it was
-// the top bar and the composer alone. r4 keeps the strip under the turn on
-// screen (flow-numbers-01: `checking Google Ads ━ ✓ 3 campaigns` over the
-// composer). Here r4's own flow-numbers-01 turn is drawn in a window too short
-// for it: the frame's top bar, Steps header, Steps row, bottom rule and
-// composer must still BE r4's (the key bar is the composer's: the view and its
-// keys went up with the turn).
+// into scrollback and took its Steps strip with it. Since the one-column
+// default (River, 2026-10-15, V1) a turn's calls are lines of the turn itself:
+// a turn that goes up takes every call line with it, in place, and the frame
+// under it is the chrome alone. r4's two-column turn, asked for, keeps its
+// split and its Steps strip in a window too short for it.
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
 const pinnedEnv = vi.hoisted(() => {
@@ -28,6 +26,7 @@ import { patchTurnState, recordTurnView, resetTurnState } from "../../app/turn-s
 import { renderInkInteractiveSessionToString } from "../../ink/interactive-session.js";
 import { ansiToSegmentLines } from "./ansi-to-segments.js";
 import { compareRegion, goldenRegionRows, type RegionName } from "./compare.js";
+import { askingSideBySide } from "./evaluate.js";
 import { chromeProps, ENTRY_SESSION_PROPS } from "./feed-chrome.js";
 import { feedSteps, turnMessages } from "./feed-steps.js";
 import { loadR4Fixture } from "./fixtures.js";
@@ -38,10 +37,11 @@ const FIXED_CLOCK = Date.parse("2026-10-01T10:44:00Z");
 const SCREEN = "flow-numbers-01-ready";
 /** A window the turn does not fit, at every width tested. */
 const ROWS = 16;
-const KEPT: readonly RegionName[] = ["topbar", "steps_header", "steps", "rule_bottom", "composer"];
+/** The chrome every frame keeps, as its golden draws it. */
+const CHROME: readonly RegionName[] = ["topbar", "rule_bottom", "composer"];
 
-function drawShort(cols: number): string {
-  const fixture = loadR4Fixture(SCREEN);
+function drawShort(cols: number, sideBySide = false): string {
+  const fixture = sideBySide ? askingSideBySide(loadR4Fixture(SCREEN)) : loadR4Fixture(SCREEN);
   const turn = fixture.turn!;
   resetTurnState();
   turn.views.forEach((view, index) => {
@@ -70,31 +70,30 @@ afterAll(() => {
   }
 });
 
-describe("a finished turn that went up whole keeps r4's Steps strip in the frame (live run-4 N12)", () => {
-  for (const cols of [60]) {
+describe("a finished turn that went up whole takes its call lines with it (live run-4 N12, one column)", () => {
+  for (const cols of [60, 100, 160]) {
     it(`flow-numbers-01 at ${cols} columns in a ${ROWS}-row window`, () => {
       const lines = ansiToSegmentLines(drawShort(cols));
       const text = lines.map((line) => textOf(line).trimEnd());
-      // The turn did go up: the frame starts under the turn, and nothing is paged.
+      // The turn did go up: nothing is paged, and its call is in scrollback once, above its answer.
       expect(text.some((line) => /more lines|lines above/u.test(line))).toBe(false);
+      const call = text.filter((line) => line === "  ✓ checking Google Ads · 3 campaigns");
+      expect(call).toHaveLength(1);
+      expect(text.indexOf(call[0]!)).toBeLessThan(text.findIndex((line) => line.startsWith("∞ ")));
       const golden = loadGolden(`${SCREEN}--c${cols}`);
-      const frame = lines.slice(text.lastIndexOf(text.find((line) => line.startsWith(" ∞ Infinite"))!));
-      for (const region of KEPT) {
+      const top = text.lastIndexOf(text.find((line) => line.startsWith(" ∞ Infinite"))!);
+      const frame = lines.slice(top);
+      for (const region of CHROME) {
         const result = compareRegion(frame, goldenRegionRows(golden, region), region, { anchored: true });
         expect(result.verdict, `${region}: ${JSON.stringify(result.diffs[0] ?? null)}`).toBe("MATCH");
       }
-      // Top bar, rule, Steps, rule, composer, key bar: the frame and nothing else.
-      expect(frame.map((line) => textOf(line).trimEnd()).filter(Boolean)).toHaveLength(7);
+      // Top bar, its rule (the rule over the composer too), composer, key bar: the frame and nothing else (no Steps strip).
+      expect(frame.map((line) => textOf(line).trimEnd()).filter(Boolean)).toHaveLength(4);
     });
   }
 });
 
-// Lane review MUST: a kept strip taller than the resting frame would page
-// under a finished turn (`▲ 13 lines above · PgUp`) and lose its `─ Steps`
-// header, though a finished turn never pages. Such a strip goes up with the
-// turn, as before: only its calls that did not end clean print, under the
-// answer, once.
-describe("a Steps strip too tall for the resting frame goes up with the turn, never paged", () => {
+describe("every call goes up with its turn, in place, never paged", () => {
   const answer = Array.from({ length: 60 }, (_, index) => `answer line ${index}`).join("\n");
   const drawSteps = (count: number, failAt: number | null) => {
     resetTurnState();
@@ -118,42 +117,40 @@ describe("a Steps strip too tall for the resting frame goes up with the turn, ne
     })).map((line) => textOf(line).trimEnd());
   };
 
-  it("20 calls, one failed, in a 16-row window: no pager, and the failed row once, under the answer", () => {
-    const text = drawSteps(20, 7);
+  it.each([[20, 7], [4, null]] as const)("%i calls (failed: %s) in a 16-row window: no pager, each call once, above the answer; no strip in the frame", (count, failAt) => {
+    const text = drawSteps(count, failAt);
     expect(text.some((line) => /lines above|PgUp|more lines/u.test(line))).toBe(false);
-    const failed = text.filter((line) => line.includes("checking source 7 "));
-    expect(failed).toHaveLength(1);
-    expect(text.indexOf(failed[0]!)).toBeGreaterThan(text.findIndex((line) => line.includes("answer line 59")));
-    // A clean call of a strip that went up is not printed.
-    expect(text.some((line) => line.includes("checking source 3 "))).toBe(false);
-  });
-
-  it("4 clean calls still keep their strip in the frame, under its header", () => {
-    const text = drawSteps(4, null);
-    expect(text.some((line) => /lines above|PgUp|more lines/u.test(line))).toBe(false);
+    const answerAt = text.findIndex((line) => line.includes("answer line 0"));
+    for (let index = 0; index < count; index += 1) {
+      const rows = text.filter((line) => line.includes(`checking source ${index} `));
+      expect(rows, String(index)).toHaveLength(1);
+      expect(text.indexOf(rows[0]!)).toBeLessThan(answerAt);
+    }
+    if (failAt !== null) expect(text).toContain(`  ✗ checking source ${failAt} · could not reach it`);
     const frame = text.slice(text.map((line) => line.startsWith(" ∞ Infinite")).lastIndexOf(true));
-    expect(frame.some((line) => line.startsWith("─ Steps"))).toBe(true);
-    expect(frame.filter((line) => line.includes("checking source "))).toHaveLength(4);
+    expect(frame.some((line) => line.startsWith("─ Steps") || line.includes("checking source "))).toBe(false);
   });
 });
 
-// From 80 columns a turn taller than the window no longer goes up (layout
-// decision, 2026-10-03: everyday windows should see the split): it stays live in its two panes,
-// held to the window, its details pane cut with `↓ N more`, and r4's frame
-// (top bar, Steps, rule, composer) is whole around it.
-describe("from 80 columns a turn too tall for the window stays split, the frame whole around it", () => {
+// A turn that asks for two columns, taller than the window, stays live in its
+// two panes (layout decision, 2026-10-03), held to the window, its details pane
+// cut with `↓ N more`, and r4's frame (top bar, Steps, rule, composer) is whole
+// around it.
+describe("asked side by side, from 80 columns a turn too tall for the window stays split, the frame whole around it", () => {
   for (const cols of [100, 160]) {
     it(`flow-numbers-01 at ${cols} columns in a ${ROWS}-row window`, () => {
-      const lines = ansiToSegmentLines(drawShort(cols));
+      const lines = ansiToSegmentLines(drawShort(cols, true));
       const text = lines.map((line) => textOf(line).trimEnd());
       expect(text.some((line) => /more lines|lines above/u.test(line))).toBe(false);
       const top = text.findIndex((line) => line.startsWith(" ∞ Infinite"));
       const frame = lines.slice(top);
       expect(text.length - top).toBeLessThanOrEqual(ROWS);
-      expect(text[top + 2]).toMatch(/^❯ google ads since launch\? +│ /u);
+      expect(text[top + 2]).toMatch(/^❯ google ads since launch\?,[a-z ]* +│ /u);
       expect(text.some((line) => /│ ↓ \d+ more · tab, then ↓$/u.test(line))).toBe(true);
+      expect(text.filter((line) => line.startsWith("─ Steps"))).toHaveLength(1);
+      expect(text.some((line) => /^ {2}checking Google Ads +━+ ✓ 3 campaigns$/u.test(line))).toBe(true);
       const golden = loadGolden(`${SCREEN}--c${cols}`);
-      for (const region of KEPT) {
+      for (const region of CHROME) {
         const result = compareRegion(frame, goldenRegionRows(golden, region), region, { anchored: true });
         expect(result.verdict, `${region}: ${JSON.stringify(result.diffs[0] ?? null)}`).toBe("MATCH");
       }

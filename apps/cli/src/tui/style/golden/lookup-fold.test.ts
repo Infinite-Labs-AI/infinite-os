@@ -3,7 +3,7 @@
 // own view, where r4 draws the card alone and the lookup as its Steps row
 // (`checking your campaigns ✓ 1 ad`). Here r4's own pause screens are drawn
 // with such a lookup recorded on the turn before the card (synthetic: the list
-// names only the fixture's own ad), and each must still BE its r4 golden.
+// names only the fixture's own ad), and each must still BE its golden.
 // A lookup that lists more than the card's ad stays a view (the frame differs).
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
@@ -92,7 +92,7 @@ describe("a lookup of the card's own ad is its Steps row, never a view above the
     const lines = ansiToSegmentLines(draw(["Demo C · demo"])(screen, 100)).map((line) => textOf(line));
     const head = lines.findIndex((line) => line.includes(LOOKUP_TITLE));
     expect(head).toBeGreaterThan(-1);
-    // From 80 columns both sit in the details pane, right of the answer: the card under the lookup.
-    expect(lines.findIndex((line) => line.includes("│ ┌─ Pause ad"))).toBeGreaterThan(head);
+    // Both sit under the answer (one column): the card under the lookup.
+    expect(lines.findIndex((line) => line.startsWith("┌─ Pause ad"))).toBeGreaterThan(head);
   });
 });

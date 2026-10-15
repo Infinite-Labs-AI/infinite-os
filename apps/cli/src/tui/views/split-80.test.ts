@@ -11,19 +11,21 @@ import { cutAtWord, wrapWords } from "./primitives.js";
 import { stepRowLines } from "./steps.js";
 import type { ViewRender } from "./types.js";
 
-// The current turn sits side by side exactly where terminal-r4's `frame()`
-// does: from 80 columns (`const wide=W>=80`), with r4's pane widths
-// (`lw=max(26,min(40,floor(W*0.28)))`, `rw=W-lw-3`). When wide it always
-// splits: a turn with nothing for the details pane shows r4's dim `steps only`
-// there. Two protections r4 has no case for stay: an answer whose own table
-// cannot draw whole in the answer pane keeps one column, and a turn committed
-// to scrollback is one column. Synthetic data only.
+// A turn that asks for two columns (its question says `side by side`; the
+// one-column default, 2026-10-15, `chat-layout.ts`) sits side by side exactly
+// where terminal-r4's `frame()` does: from 80 columns (`const wide=W>=80`),
+// with r4's pane widths (`lw=max(26,min(40,floor(W*0.28)))`, `rw=W-lw-3`).
+// When wide it always splits: a turn with nothing for the details pane shows
+// r4's dim `steps only` there. Two protections r4 has no case for stay: an
+// answer whose own table cannot draw whole in the answer pane keeps one
+// column, and a turn committed to scrollback is one column. The questions
+// below ask for side by side. Synthetic data only.
 const theme = INFINITE_R4_THEME;
 const view = (over: Partial<ViewRender> = {}): ViewRender => ({
   head: " Rows  ✓ Ready", source: "Demo · up to Sep 30", detail: ["row one", "row two"], footnotes: [], keys: [], okKey: null, rowCount: 0, ...over
 });
 const messages: Msg[] = [
-  { role: "user", text: "how is the week going?" },
+  { role: "user", text: "the week, side by side" },
   { role: "assistant", text: "Steady: the same pace as last week." }
 ];
 
@@ -56,7 +58,7 @@ describe("the split threshold is r4's: 80 columns", () => {
 
   it("a live turn with a view splits at 80 and stays one column at 79", () => {
     const at = (width: number) => renderLiveTurn({ messages, views: [], focus: null, width, color: false, theme, details: ["┌─ card ─┐"] }).lines;
-    expect(at(80)[0]).toBe(`❯ how is the week going?${" ".repeat(2)} │ ┌─ card ─┐`);
+    expect(at(80)[0]).toBe(`❯ the week, side by side${" ".repeat(2)} │ ┌─ card ─┐`);
     expect(at(79).some((line) => line.includes(" │ "))).toBe(false);
   });
 });
@@ -69,7 +71,7 @@ describe("a turn with nothing for the details pane: r4's `steps only`", () => {
     const drawn = renderLiveTurn({ messages, views: [], focus: null, steps: read, width, color: true, theme });
     expect(r4Segments(drawn.lines[0]!).slice(-3)).toEqual(seg(["│", "line"], [" ", ""], ["steps only", "dim"]));
     const plain = renderLiveTurn({ messages, views: [], focus: null, steps: read, width, color: false, theme }).lines;
-    expect(plain[0]).toBe(`❯ how is the week going?${" ".repeat(left - 24)} │ steps only`);
+    expect(plain[0]).toBe(`❯ the week, side by side${" ".repeat(left - 24)} │ steps only`);
     // Every row of the body carries the separator, and no line is wider than the window.
     const body = drawn.lines.slice(0, drawn.lines.findIndex((line) => line.includes("Steps")));
     expect(body.length).toBeGreaterThan(0);
@@ -91,7 +93,7 @@ describe("a turn with nothing for the details pane: r4's `steps only`", () => {
     expect(drawn.lines.join("\n")).not.toContain("steps only");
     expect(drawn.lines.some((line) => line.startsWith("─ Steps"))).toBe(false);
     // Still two columns: every row ends at the separator, the answer in the left pane.
-    expect(drawn.lines[0]).toBe(`❯ how is the week going?${" ".repeat(left - 24)} │`);
+    expect(drawn.lines[0]).toBe(`❯ the week, side by side${" ".repeat(left - 24)} │`);
     expect(drawn.lines.every((line) => line.endsWith(" │"))).toBe(true);
     expect(drawn.details).toBe(false);
   });
@@ -132,13 +134,13 @@ describe("a turn with nothing for the details pane: r4's `steps only`", () => {
 
   it("in scrollback it is one column, with no `steps only`", () => {
     const lines = renderCommittedTurn({ messages, views: [], focus: null, width: 160, color: false, theme });
-    expect(lines).toEqual(["❯ how is the week going?", "", "∞ Steady: the same pace as last week."]);
+    expect(lines).toEqual(["❯ the week, side by side", "", "∞ Steady: the same pace as last week."]);
   });
 });
 
 describe("a question stays a question turn when it stops or fails (it never jumps to one column)", () => {
   const partial: Msg[] = [
-    { role: "user", text: "how is the week going?" },
+    { role: "user", text: "the week, side by side" },
     { role: "assistant", text: "Steady so far: the same", partial: true }
   ];
   const note = (text: string): Msg => ({ kind: "slash", role: "system", text, turnNote: true });
@@ -199,7 +201,7 @@ describe("an answer whose own table cannot draw whole in the answer pane keeps o
   });
 
   it("a table small enough for the answer pane keeps the split", () => {
-    const small: Msg[] = [{ role: "user", text: "two?" }, { role: "assistant", text: "| A | B |\n| --- | --- |\n| 1 | 2 |" }];
+    const small: Msg[] = [{ role: "user", text: "two, side by side?" }, { role: "assistant", text: "| A | B |\n| --- | --- |\n| 1 | 2 |" }];
     expect(turnMaySplit(small, 80)).toBe(true);
   });
 });

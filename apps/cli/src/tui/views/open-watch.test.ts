@@ -56,9 +56,9 @@ function engaged(v: AnswerViewV1, caps: KeyContext["caps"]): ViewFocusState {
   const next = press(start, v, "", { tab: true });
   return next.handled ? next : { ...start, engaged: true, focus: "rows" };
 }
-function hints(state: ViewFocusState, v: AnswerViewV1) {
+function hints(state: ViewFocusState, v: AnswerViewV1, twoColumns = false) {
   const render = renderView(v, ctx(state.caps, { selected: state.selected, engaged: state.engaged }));
-  return viewKeyHints(state, viewKeyFacts(v, render), render.keys);
+  return viewKeyHints(state, viewKeyFacts(v, render), render.keys, twoColumns);
 }
 
 const images = () => view(raw("images-done"));
@@ -128,7 +128,7 @@ describe("the composer bar's `o` and `w` read as r4 draws them", () => {
 
   it("a running job: `w watch` then `o open` (r4 view-08-job), never the place's raw label", () => {
     const v = job();
-    expect(bar(engaged(v, NEW), v)).toEqual(["w watch", "o open", "tab switch side"]);
+    expect(bar(engaged(v, NEW), v)).toEqual(["w watch", "o open", "tab back to chat"]);
   });
 
   it("a fix or a link that does not name itself `Open in …` is plain `o open` on the bar", () => {
@@ -269,7 +269,7 @@ describe("one `o` label: the app link's own, never the fix sentence (live T4)", 
 // in a normal coding harness an empty prompt never captures a letter. Before
 // the view is engaged `o`, `w`, `m` and `c` are the first letter of a message;
 // the resting bar says so honestly: `tab` with what it then unlocks, in place
-// of `tab switch side`. (r4 view-01/08/10 and flow-pause-03 draw `o open` at
+// of `tab to card` (`tab switch side` side by side). (r4 view-01/08/10 and flow-pause-03 draw `o open` at
 // rest; this deviation goes to the visual eval.)
 describe("the resting bar names what tab unlocks (TJ-3)", () => {
   const tabChip = (state: ViewFocusState, v: AnswerViewV1) => hints(state, v).filter((hint) => hint.key === "tab");
@@ -310,15 +310,17 @@ describe("the resting bar names what tab unlocks (TJ-3)", () => {
     expect(tabChip(focus(noPlace, NEW), noPlace)).toEqual([{ key: "tab", label: "then w watch" }]);
   });
 
-  it("once engaged the bar is the keys themselves and `tab switch side` again", () => {
+  it("once engaged the bar is the keys themselves and `tab back to chat` (side by side: `tab switch side`)", () => {
     const v = images();
-    expect(tabChip(engaged(v, NEW), v)).toEqual([{ key: "tab", label: "switch side" }]);
+    expect(tabChip(engaged(v, NEW), v)).toEqual([{ key: "tab", label: "back to chat" }]);
+    expect(hints(engaged(v, NEW), v, true).filter((hint) => hint.key === "tab")).toEqual([{ key: "tab", label: "switch side" }]);
   });
 
-  it("a view with nothing behind the gate keeps `tab switch side`", () => {
+  it("a view with nothing behind the gate says `tab to card` (side by side: `tab switch side`)", () => {
     for (const name of ["list-rows", "numbers-ads"]) {
       const v = view(raw(name));
-      expect(tabChip(focus(v, OLD), v)).toEqual([{ key: "tab", label: "switch side" }]);
+      expect(tabChip(focus(v, OLD), v)).toEqual([{ key: "tab", label: "to card" }]);
+      expect(hints(focus(v, OLD), v, true).filter((hint) => hint.key === "tab")).toEqual([{ key: "tab", label: "switch side" }]);
     }
     // Without app.open.v1 the images' place is not behind the gate: no `o` is named.
     const v = images();
@@ -352,7 +354,7 @@ describe("`w` on a views-only (Wave 2) desktop", () => {
     expect(runner.streamCapable()).toBe(false);
     const v = job();
     const state = engaged(v, caps);
-    expect(hints(state, v).map((hint) => `${hint.key} ${hint.label}`)).toEqual(["w watch", "tab switch side"]);
+    expect(hints(state, v).map((hint) => `${hint.key} ${hint.label}`)).toEqual(["w watch", "tab back to chat"]);
     expect(press(state, v, "w").effect).toEqual({ type: "ask", text: "how is the blog post going?" });
     expect(press(state, v, "o").effect).toBeNull();
     // At rest the chip names `w` (nothing to open on this desktop).
