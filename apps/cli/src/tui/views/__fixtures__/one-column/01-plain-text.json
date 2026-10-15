@@ -1,0 +1,21 @@
+{
+  "screen": "01-plain-text",
+  "session": {
+    "workspace": "Demo shop",
+    "connections": [
+      { "name": "Shopify", "status": "connected" },
+      { "name": "GA4", "status": "connected" },
+      { "name": "Stripe", "status": "connected" },
+      { "name": "Meta", "status": "connected" }
+    ]
+  },
+  "turn": {
+    "question": "what should I test first on my landing page?",
+    "answer": "Start with the headline. It is the one line every visitor reads, so a change there shows up in sign-ups fastest.\n\n- **Test one thing at a time.** Keep the picture and the button the same.\n- **Run it for at least a week**, so weekdays and the weekend both count.\n- **Score it on sign-ups**, not on clicks.\n\nWhen you have two headlines you like, ask me to set up the test.",
+    "views": [],
+    "steps": []
+  },
+  "gaps": [
+    "A plain answer: no tool call, no view. Today, from 80 columns, the session still splits it (isQuestionTurn) and the right pane is empty: only the separator, because there are no Steps either (layout.ts EMPTY_PANE)."
+  ]
+}

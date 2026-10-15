@@ -1,0 +1,65 @@
+{
+  "screen": "03-funnel",
+  "session": {
+    "workspace": "Demo shop",
+    "connections": [
+      { "name": "Shopify", "status": "connected" },
+      { "name": "GA4", "status": "connected" },
+      { "name": "Stripe", "status": "connected" },
+      { "name": "Meta", "status": "connected" }
+    ]
+  },
+  "turn": {
+    "question": "how is my signup funnel this month?",
+    "answer": "Of 2,400 visits in the last 30 days, 312 registered and 9 are paying. The biggest drop is from a visit to a registration. Trials were only counted from Oct 1, so that step is not measured for the whole month.",
+    "views": [
+      {
+        "v": 1,
+        "kind": "numbers",
+        "tool": "read_funnel",
+        "title": "Signup funnel",
+        "state": "ready",
+        "asOf": "2026-10-15",
+        "provenance": { "source": "Demo analytics", "via": "our_db" },
+        "scope": { "workspaceName": "Demo shop", "crossWorkspace": false },
+        "caveats": [],
+        "body": {
+          "layout": "steps",
+          "currency": null,
+          "columns": [],
+          "legs": {
+            "settled": {
+              "window": { "from": "2026-09-15", "to": "2026-10-14", "tz": "UTC", "label": "last 30 days" },
+              "final": true,
+              "asOf": "2026-10-14T23:00:00Z",
+              "rows": [],
+              "steps": [
+                { "key": "visits", "label": "Visits", "count": 2400 },
+                { "key": "registered", "label": "Registered", "count": 312, "ofPrevious": true },
+                { "key": "app_signup", "label": "App signup", "count": 140, "ofPrevious": true },
+                {
+                  "key": "trial",
+                  "label": "Started trial",
+                  "count": null,
+                  "reason": { "code": "not_measured", "words": "not counted before Oct 1", "show": "dash" },
+                  "countingSince": "2026-10-01",
+                  "ofPrevious": true
+                },
+                { "key": "paying", "label": "Paying", "count": 9, "ofPrevious": true }
+              ]
+            }
+          },
+          "warnings": []
+        }
+      }
+    ],
+    "steps": [
+      { "label": "reading site visits", "start": 0, "end": 0.5, "result": "2,400 visits", "status": "ok" },
+      { "label": "reading sign-ups", "start": 0.1, "end": 0.7, "result": "312 registered", "status": "ok" },
+      { "label": "reading Stripe trials", "start": 0.2, "end": 1.1, "result": "9 paying", "status": "ok" }
+    ]
+  },
+  "gaps": [
+    "A funnel answer: a numbers view in the steps layout, one step not measured (a dash with a footnote), and three calls that overlap in time (the Steps strip draws them as a Gantt)."
+  ]
+}

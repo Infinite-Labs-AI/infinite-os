@@ -1,0 +1,60 @@
+{
+  "screen": "04-multi-step-job",
+  "session": {
+    "workspace": "Demo shop",
+    "connections": [
+      { "name": "Shopify", "status": "connected" },
+      { "name": "GA4", "status": "connected" },
+      { "name": "Stripe", "status": "connected" },
+      { "name": "Meta", "status": "connected" }
+    ]
+  },
+  "turn": {
+    "question": "write a blog post on how to choose a running shoe, based on what people search for on my site",
+    "answer": "I read your site and the terms people search for, then started the post. It runs on our servers and takes about 4 minutes. Search Console is not connected, so I used your site search only.",
+    "views": [
+      {
+        "v": 1,
+        "kind": "job",
+        "tool": "start_blog_post",
+        "title": "Blog post",
+        "state": "background",
+        "asOf": null,
+        "provenance": { "source": "Blog post", "via": "our_db" },
+        "scope": { "workspaceName": "Demo shop", "crossWorkspace": false },
+        "caveats": [],
+        "body": {
+          "jobId": "job_sample_1",
+          "label": "How to choose a running shoe",
+          "phase": "running",
+          "steps": [
+            { "id": "s1", "label": "Research", "state": "done", "detail": "9 sources" },
+            { "id": "s2", "label": "Outline", "state": "now", "detail": "section 2 of 6" },
+            { "id": "s3", "label": "Draft", "state": "todo" },
+            { "id": "s4", "label": "Images", "state": "todo" },
+            { "id": "s5", "label": "Ready for you", "state": "todo" }
+          ],
+          "progress": { "finished": 1, "of": 5 },
+          "startedAt": "2026-10-15T09:59:00Z",
+          "etaMs": 240000,
+          "runsWhere": "cloud",
+          "outlivesTurn": true,
+          "landsAt": { "place": "content.posts", "label": "Blog & AEO › Production" },
+          "noCompletionSignal": false,
+          "watch": { "label": "watch", "ask": "how is the blog post going?" }
+        }
+      }
+    ],
+    "steps": [
+      { "label": "reading your site", "start": 0, "end": 1.2, "result": "24 pages", "status": "ok" },
+      { "label": "reading site searches", "start": 1.2, "end": 1.9, "result": "18 terms", "status": "ok" },
+      { "label": "reading Search Console", "start": 1.2, "end": 1.4, "result": "not connected", "status": "fail" },
+      { "label": "picking the angle", "start": 1.9, "end": 2.6, "result": "1 topic", "status": "ok" },
+      { "label": "starting the post", "start": 2.6, "end": 2.8, "result": "started", "status": "ok" },
+      { "label": "writing the post", "start": 2.8, "end": 3.6, "result": "step 2 of 5", "status": "bg" }
+    ]
+  },
+  "gaps": [
+    "A multi-step job: six calls, one failed (kept under the answer once the turn goes to scrollback), one still running in the background, and a job view that outlives the turn."
+  ]
+}
