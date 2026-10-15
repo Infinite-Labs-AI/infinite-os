@@ -217,8 +217,12 @@ export interface LeaderV1 {
   measure: { key: string; label: string }; rowId: string; rowLabel: string; value: CellV1;
   detail?: string;  // one short context line from the host, drawn under the leader's name ("$12.34 spent", "5 of 40 impressions"); words are data, never computed by a renderer; rev 3
 }
-/** rev 6: a section drawn as one row that taps open; folded = drawn closed. */
-export interface SectionHeadV1 { logo?: ChannelLogoV1; verdict?: VerdictV1; quietLine?: QuietLineV1; age?: AgeV1; face?: string[]; folded?: true }
+/** rev 6: a section drawn as one row that taps open; folded = drawn closed. creativeRef = the HOST's picture for the line in
+ *  place of its logo (a channel whose spend all came from one creative we hold); pictureWord = an empty box's word. */
+export interface SectionHeadV1 {
+  logo?: ChannelLogoV1; verdict?: VerdictV1; quietLine?: QuietLineV1; age?: AgeV1; face?: string[]; folded?: true;
+  creativeRef?: CreativeRefV1; pictureWord?: string;
+}
 export type SectionV1 = (
   | { title: string; kind: "numbers"; body: NumbersBodyV1 } | { title: string; kind: "list"; body: ListBodyV1 }
   | { title: string; kind: "record"; body: RecordBodyV1 } | { title: string; kind: "health"; body: HealthBodyV1 }

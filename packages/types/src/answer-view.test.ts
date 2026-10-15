@@ -85,6 +85,8 @@ describe("answer view contract v1", () => {
       age: { days: 1, since: "2026-10-13", tooYoung: true }, face: ["spend"], folded: true },
       body: { layout: "table", currency: "USD", columns: [column], legs: { settled } } } satisfies SectionV1;
     const head = section.head satisfies SectionHeadV1;
+    const pictured = { logo: "youtube", creativeRef: { archiveAssetId: "youtube-video:YUkn0keVtOs", reader: "youtube", ratio: "16:9" }, pictureWord: "Video" } satisfies SectionHeadV1;
+    expect(pictured.creativeRef.reader).toBe("youtube");
     expect([row.face, listRow.creativeRef.reader, column.bar, step.rate, head.folded, quietRow.quietLine.code])
       .toEqual([["spend", "clicks"], "competitor", true, 23.4, true, "all_paused"]);
   });
