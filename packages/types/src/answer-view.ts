@@ -338,7 +338,8 @@ export interface CompareBodyV1 {
   window: WindowV1;
   armLabel?: string;                                      // the arm column's header ("Version"); rev 2
   arms: { key: string; label: string; n?: number | null; days?: number | null; metrics: Record<string, CellV1>;
-    interval?: { metric: string; low: number; high: number; level: number } }[];   // the arm's likely range for `metric`; rev 2
+    interval?: { metric: string; low: number; high: number; level: number };   // the arm's likely range for `metric`; rev 2
+    creativeRef?: CreativeRefV1 }[];   // the arm's own picture (a website version's first screen), by reference; rev 7
   metricRows: { key: string; label: string; unit: UnitV1 }[];
   differences: { label: string; against: string; absolute: CellV1; relative: CellV1;
     interval?: { low: number; high: number; level: number }; method: string }[];

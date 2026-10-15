@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import {
   ANSWER_VIEW_CONTRACT_REVISION, ANSWER_VIEW_KINDS, ANSWER_VIEW_LIMITS, ANSWER_VIEW_STATES, ARCHIVE_ASSET_ID_PATTERN,
-  CHANNEL_LOGOS, CREATIVE_REF_READERS, VERDICT_TONES,
+  CHANNEL_LOGOS, CREATIVE_REF_READERS, VERDICT_TONES, type CompareBodyV1,
   type AgeV1, type AnswerViewEnvelopeV1, type AnswerViewV1, type BenchmarkV1, type CardActionV1, type CardFaceV1, type ChangeBodyV1,
   type ChannelLogoV1, type ColumnV1, type CreativeRefReaderV1, type CreativeRefV1, type DeltaV1, type DocumentBodyV1, type ImagesBodyV1, type LaneV1, type LeaderV1, type ListBodyV1,
   type ListRowV1, type NumbersBodyV1, type NumbersRowV1, type PostV1, type QuietLineV1, type RankChangeV1, type RecordBodyV1,
@@ -39,6 +39,9 @@ describe("answer view contract v1", () => {
     // rev 7 also adds the 4:3 box (a Reddit thumbnail is 1200 × 900).
     const wide43 = { archiveAssetId: "asset_3", reader: "reddit_ads", ratio: "4:3" } satisfies CreativeRefV1;
     expect(wide43.ratio).toBe("4:3");
+    // rev 7: a compare arm may carry its own picture (a website version's first screen).
+    const arm = { key: "B", label: "B", metrics: {}, creativeRef: { archiveAssetId: "exp_1:b", reader: "website_variant", ratio: "16:9" } } satisfies CompareBodyV1["arms"][number];
+    expect(arm.creativeRef.reader).toBe("website_variant");
     expect([rev6.reader, rev7.reader, "reader" in bare]).toEqual(["meta_archive", "brand_photo", false]);
     for (const ref of [rev6, rev7, bare]) expect(ARCHIVE_ASSET_ID_PATTERN.test(ref.archiveAssetId)).toBe(true);
   });
