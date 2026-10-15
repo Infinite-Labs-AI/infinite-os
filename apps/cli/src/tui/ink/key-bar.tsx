@@ -14,6 +14,7 @@ export function KeyBar({
   hints,
   commands = true,
   sides,
+  twoColumns = false,
   theme,
   width
 }: {
@@ -21,8 +22,10 @@ export function KeyBar({
   commands?: boolean;
   /** The boot frame, or a turn on screen with a details view or card (see `KeyBarOptions.sides`). */
   sides: boolean;
+  /** The turn on screen is drawn side by side (see `KeyBarOptions.twoColumns`). */
+  twoColumns?: boolean;
   theme: Theme;
   width: number;
 }) {
-  return <AnsiLine line={keyBarLine(hints, width, theme, { sides, commands })} />;
+  return <AnsiLine line={keyBarLine(hints, width, theme, { sides, commands, twoColumns })} />;
 }

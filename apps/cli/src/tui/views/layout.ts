@@ -38,7 +38,7 @@ import { answerTextWidth } from "../app/answer-column.js";
 import { renderTurnBody, workingAnswerLines } from "../app/transcript-renderer.js";
 import type { TurnState, TurnStep } from "../app/turn-store.js";
 import type { KeyContext } from "../keys/keymap.js";
-import { padEndCells } from "../lib/display-width.js";
+import { displayWidth, padEndCells } from "../lib/display-width.js";
 import { DEFAULT_THEME, type Theme } from "../theme.js";
 import type { Msg } from "../types.js";
 import {
@@ -55,8 +55,10 @@ import { gateAnswerMessages } from "./caption-gate.js";
 import { turnRepeats } from "./meta-fold.js";
 import { fitLine, paint } from "./primitives.js";
 import { renderView } from "./registry.js";
-import { stepHeader, stepRowLines, stepsFromTrail, unsettledStepLines } from "./steps.js";
+import { stepFlowLines, stepHeader, stepRowLines, stepsFromTrail, unsettledStepLines } from "./steps.js";
 import type { ViewRender, ViewRenderCtx } from "./types.js";
+import { asksSideBySide, chatLayout, isFlow, type ChatLayout } from "./chat-layout.js";
+import { cardVerdict } from "./card-verdict.js";
 
 export { stepLabelWidth } from "./steps.js";
 
@@ -160,6 +162,12 @@ export interface LayoutOptions {
    * and `paneScroll` (the views' own keys) do not move a pane with a card.
    */
   card?: { lines: number; scroll?: number };
+  /**
+   * The one-column flow (V1/V2, `chat-layout.ts`): no rule between the answer
+   * and the details (a blank row only), and no Steps strip (the calls are
+   * compact lines in the answer column, drawn by the caller).
+   */
+  flow?: boolean;
 }
 
 /** r4 `frame()` pads the panes to this many rows (`while(wide&&body.length<16)`). */
@@ -197,7 +205,8 @@ function layoutTurnParts(
   const wide = panes.wide && options.split !== false;
   const compact = options.compact === true;
   // `steps: false` (a turn committed to scrollback, D1) draws no Steps strip at all.
-  const strip = options.steps === false ? [] : [...steps, ...quietSteps];
+  // The flow draws its calls in the answer column (`stepFlowLines`): no strip here.
+  const strip = options.steps === false || options.flow === true ? [] : [...steps, ...quietSteps];
   let pane: PaneWindow | null = null;
   let answerPane: PaneWindow | null = null;
   let natural = 0;
@@ -281,7 +290,8 @@ function layoutTurnParts(
       // (a card that arrived on its own) starts at its details.
       out.push(
         ...answer.map((line) => fitLine(line, total)),
-        ...(answer.length ? [...(compact ? [] : [""]), rule("─".repeat(total))] : []),
+        // The flow parts them with a blank row only, as a chat does (no rule).
+        ...(answer.length ? options.flow === true ? [""] : [...(compact ? [] : [""]), rule("─".repeat(total))] : []),
         ...details
       );
     }
@@ -401,6 +411,8 @@ export interface LiveTurnInput {
    * view shows its first two sentences and a dim `… more (?)` line.
    */
   captionOpen?: boolean;
+  /** The layout to draw in (`chat-layout.ts`); absent = the process's option (`chatLayout()`). */
+  layout?: ChatLayout;
 }
 
 /** The dim line under the two sentences an answer shows above its view while the rest is folded. */
@@ -430,8 +442,17 @@ export function answerCarriesTable(messages: readonly Msg[]): boolean {
  * draws whole (bordered, no column dropped) in the answer pane.
  * The session draws a pending card at `detailsPaneWidth(width, turnMaySplit(…))`.
  */
-export function turnMaySplit(messages: readonly Msg[], width: number): boolean {
+export function turnMaySplit(
+  messages: readonly Msg[],
+  width: number,
+  views: readonly Pick<AnswerViewV1, "kind">[] = [],
+  layout: ChatLayout = chatLayout()
+): boolean {
   const panes = paneWidths(width);
+  // The one-column flows split only a turn that asks for two columns (`asksSideBySide`).
+  if (isFlow(layout) && !asksSideBySide(messages, views)) {
+    return false;
+  }
   return panes.wide && answerTablesFit(messages, panes.left);
 }
 
@@ -577,6 +598,12 @@ export interface CommittedTurnInput extends Omit<LiveTurnInput, "rows" | "livePa
  */
 export function renderCommittedTurn(input: CommittedTurnInput): string[] {
   const width = Math.max(1, Math.floor(input.width));
+  if (isFlow(input.layout ?? chatLayout())) {
+    // The flow prints the turn as it read live: its calls stay in place, every
+    // one of them (as a chat keeps its tool lines), unless they stay live under
+    // a waiting card. Its cards print whole (no key opens a folded card here).
+    return drawLiveTurn(input, width, ALL_ROWS, false, input.stepsStayLive !== true).lines;
+  }
   // No row budget: a document is one page as tall as its body (no page line,
   // which no key could act on in scrollback), whatever page the live turn showed.
   // No rule of its own: scrollback draws the ONE thin rule under each turn (D1,
@@ -616,8 +643,11 @@ const ALL_ROWS = Number.MAX_SAFE_INTEGER;
  */
 function drawLiveTurn(input: LiveTurnInput, width: number, rows: number | undefined, split: boolean, withSteps = true, frame?: number) {
   const panes = paneWidths(width);
+  const layout = input.layout ?? chatLayout();
   // An answer with a table of its own keeps the whole width (see the header).
-  const wide = split && turnMaySplit(input.messages, width);
+  const wide = split && turnMaySplit(input.messages, width, input.views, layout);
+  // The one-column flow (V1/V2): every turn that does not ask for two columns.
+  const flow = isFlow(layout) && !wide;
   const caps = input.focus?.caps ?? input.caps ?? NO_VIEW_CAPS;
   const base = {
     width: wide ? panes.right : width, color: input.color, theme: input.theme, timeZone: input.timeZone,
@@ -663,7 +693,19 @@ function drawLiveTurn(input: LiveTurnInput, width: number, rows: number | undefi
   // with all of its columns. A numbers view keeps r4's ONE table there and
   // names what it hid in words (`+ CPM hidden`, run-2 M7): its records were
   // the ~150-line dump the live eval saw. No view names a key (`ctx.scrollback`).
-  const drawn = split ? renders.filter((_render, index) => !folded.has(index)) : renders.flatMap((render, index) => {
+  // V2 (`flow-compact`): live, each card is its head and a verdict line until
+  // the keys are on it (tab), then every card of the turn opens in place. A
+  // card that asks for an OK or an answer never folds (what it asks is on screen).
+  const style = { color: input.color, theme: input.theme };
+  const opened = Boolean(input.focus && input.focus.engaged && input.focus.focus !== "composer");
+  const foldable = (view: AnswerViewV1, render: ViewRender) => flow && split && layout === "flow-compact"
+    && view.kind !== "quiet" && inDetailsPane(render) && !view.approval && view.state !== "needs_yes" && view.state !== "needs_answer";
+  const shown = renders.map((render, index) => {
+    const view = input.views[index]!;
+    if (!foldable(view, render)) return render;
+    return opened ? openedCard(render, style) : compactCard(view, render, width, style);
+  });
+  const drawn = split ? shown.filter((_render, index) => !folded.has(index)) : renders.flatMap((render, index) => {
     if (folded.has(index)) return [];
     const view = input.views[index]!;
     const whole = { ...plainCtx, selected: openingRow(view), showHiddenColumns: Boolean(render.hiddenColumns) && view.kind !== "numbers", ...answered(index), ...folds(index) };
@@ -678,19 +720,29 @@ function drawLiveTurn(input: LiveTurnInput, width: number, rows: number | undefi
     ? [{ head: "", source: null, detail: [...input.details], footnotes: [], keys: [], okKey: null, rowCount: 0 }]
     : [];
   const steps = !withSteps ? [] : input.steps?.length ? input.steps : stepsFromTrail(input.messages);
-  const stepRows = stepRowLines(steps, {
+  const stepOptions = {
     width, color: input.color, theme: input.theme, nowMs: input.nowMs, views: [...input.views, ...(input.statusViews ?? [])]
-  });
+  };
+  // The flow draws each call as one compact line under the question; the strip is the split's.
+  const stepRows = flow ? [] : stepRowLines(steps, stepOptions);
+  const flowSteps = flow
+    ? [
+      ...stepFlowLines(steps, stepOptions),
+      // A turn whose views are all quiet: their step lines join the calls (the strip's `quietSteps`).
+      ...(drawn.every((render) => render.quiet) ? drawn.filter((render) => !inDetailsPane(render)).flatMap((render) => render.detail.map((line) => fitLine(`  ${line}`, width))) : [])
+    ]
+    : [];
   const takesPane = paneRenders([...drawn, ...card]).length > 0;
   // The caption gate (round 4): an answer that comes with a view shows two
   // sentences above it. Live, a dim `… more (?)` line follows them until `?`
   // opens the rest; committed, the rest prints under the view.
-  const gate = takesPane ? gateAnswerMessages(input.messages) : null;
+  // The flow shows the answer's words whole, the card under them: no gate.
+  const gate = takesPane && !flow ? gateAnswerMessages(input.messages) : null;
   const foldedRest = gate?.rest ?? null;
   const foldOpen = split && input.captionOpen === true;
   const answerMessages = gate && foldedRest !== null && !foldOpen ? gate.messages : input.messages;
   const answerAt = (columns: number): string[] => {
-    const body = [
+    const body = flow ? flowAnswerLines(answerMessages, flowSteps, columns, input.theme, input.color) : [
       ...renderAnswerColumn(answerMessages, columns, input.theme, input.color),
       ...(split && foldedRest !== null && !foldOpen ? [paint(fitLine(CAPTION_FOLD_LINE, columns), "dim", { color: input.color, theme: input.theme })] : [])
     ];
@@ -719,7 +771,7 @@ function drawLiveTurn(input: LiveTurnInput, width: number, rows: number | undefi
   // A card waiting in the pane: the pane opens on it, and ↑/↓ (the card's own keys, no tab) move it (W3L2-M2).
   const cardLines = card.length ? input.details!.length : 0;
   const laid = layoutTurnParts(answer, [...drawn, ...card, ...stepsOnly], stepRows, width, { color: input.color, theme: input.theme }, {
-    split: wide, steps: withSteps, compact,
+    split: wide, steps: withSteps, compact, flow,
     ...(split && frame !== undefined
       ? {
         maxRows: frame, paneScroll: input.focus?.paneScroll ?? 0, paneKeys: keysOnPane || cardLines > 0, answerTail: input.running === true,
@@ -737,6 +789,64 @@ function drawLiveTurn(input: LiveTurnInput, width: number, rows: number | undefi
     stepRows: stepRows.length ? stepRows.length + 1 : 0, detailRows, answerRows: answer.length,
     pane: laid.pane, answerPane: laid.answerPane, natural: laid.natural, foldedRest, cardShown: laid.cardShown
   };
+}
+
+/**
+ * The flow's answer column: the question, then the turn's calls as compact
+ * lines, then the answer's words (and its notes) in full. A turn with no
+ * question (a card on its own) starts at its calls.
+ */
+function flowAnswerLines(messages: readonly Msg[], calls: readonly string[], width: number, theme: Theme, color: boolean): string[] {
+  const split = messages.findIndex((msg) => msg.role !== "user");
+  const asked = split < 0 ? messages : messages.slice(0, split);
+  const said = split < 0 ? [] : messages.slice(split);
+  const blocks = [
+    renderAnswerColumn(asked, width, theme, color),
+    [...calls],
+    renderAnswerColumn(said, width, theme, color)
+  ].filter((block) => block.length > 0);
+  return blocks.flatMap((block, index) => (index > 0 ? ["", ...block] : block));
+}
+
+/** The compact card's fold mark (V2), and the open card's. */
+const FOLDED_MARK = "▸";
+const OPENED_MARK = "▾";
+
+/**
+ * A card folded to its head and one verdict line (V2): `▸ [Title] ✓ Ready ·
+ * source` (the source only when it fits whole), then the verdict, under the title.
+ */
+function compactCard(view: AnswerViewV1, render: ViewRender, width: number, style: { color: boolean; theme: Theme }): ViewRender {
+  const head = `${paint(FOLDED_MARK, "primary", style)} ${render.head}`;
+  const withSource = render.source !== null ? `${head}  ${render.source}` : head;
+  const verdict = cardVerdict(view, render);
+  return {
+    ...render,
+    head: displayWidth(withSource) <= width ? withSource : head,
+    source: verdict ? fitVerdict(verdict, width) : null,
+    detail: [],
+    footnotes: []
+  };
+}
+
+/**
+ * The verdict line under a folded card's title, indented 2: its ` · ` parts
+ * from the left while they fit whole (the last parts are the least needed:
+ * the row count, the window), cut only when its first part alone is too wide.
+ */
+function fitVerdict(verdict: string, width: number): string {
+  const parts = verdict.split(" · ");
+  let kept = parts[0] ?? "";
+  for (const part of parts.slice(1)) {
+    if (displayWidth(`  ${kept} · ${part}`) > width) break;
+    kept = `${kept} · ${part}`;
+  }
+  return fitLine(`  ${kept}`, width);
+}
+
+/** A V2 card opened in place: its whole render, its head marked open. */
+function openedCard(render: ViewRender, style: { color: boolean; theme: Theme }): ViewRender {
+  return { ...render, head: `${paint(OPENED_MARK, "primary", style)} ${render.head}` };
 }
 
 /**

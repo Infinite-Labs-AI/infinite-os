@@ -32,6 +32,7 @@ import { openKeyLabel, type AppOpenTarget } from "./open-target.js";
 import { truncatedMoreAsk, turnAsk, viewText } from "./primitives.js";
 import { quietStopAsk, renderView } from "./registry.js";
 import type { ViewRender, ViewRenderCtx } from "./types.js";
+import { chatLayout, isFlow, tabSideWords } from "./chat-layout.js";
 
 export { turnAsk };
 
@@ -423,7 +424,8 @@ export function resolveViewKey(
     return resolveAnswerKey(input, state, key, facts, base);
   }
   if (state.focus === "composer" || state.viewIndex < 0) {
-    if (key.tab && !key.shift && state.viewIndex >= 0 && hasViewKeys(facts)) {
+    // V2 (`flow-compact`): tab opens the folded cards even when the view has no keys of its own.
+    if (key.tab && !key.shift && state.viewIndex >= 0 && (hasViewKeys(facts) || chatLayout() === "flow-compact")) {
       return { ...base, focus: state.detailsFocus, engaged: true, handled: true };
     }
     // No view keys, but an answer cut to the window: tab puts the keys on it (live L8).
@@ -580,17 +582,26 @@ function applyViewAction(action: KeyAction, state: ViewFocusState, facts: ViewKe
 export function viewKeyHints(
   state: ViewFocusState,
   facts: ViewKeyFacts = state.facts,
-  kindKeys: readonly KeyHint[] = []
+  kindKeys: readonly KeyHint[] = [],
+  /** The turn on screen is drawn side by side (always the split layout's case from 80 columns). */
+  twoColumns = false
 ): KeyHint[] {
   if (state.answerFocus) {
     return answerKeyHints(facts);
+  }
+  // V2: a folded card offers only tab, which opens it (even when its view has no
+  // keys of its own): its rows and columns are not on screen. A card that asks
+  // for an OK never folds, so it keeps its keys.
+  const engaged = state.engaged && state.focus !== "composer";
+  if (state.viewIndex >= 0 && foldsCards(twoColumns) && !engaged && !facts.approve) {
+    return [tabHint(state, facts, twoColumns)];
   }
   if (state.viewIndex < 0 || !hasViewKeys(facts)) {
     // Nothing on the view, but an answer cut to the window: tab switches to it.
     return answerCut(facts) ? [{ key: "tab", label: "switch side" }] : [];
   }
   if (state.focus === "composer") {
-    return [tabHint(state, facts)];
+    return [tabHint(state, facts, twoColumns)];
   }
   const hints: KeyHint[] = [];
   if (state.engaged && facts.approve && !state.approvalClosed) {
@@ -623,7 +634,7 @@ export function viewKeyHints(
   if (facts.explain) {
     hints.push({ key: "?", label: state.explainOpen ? "hide" : "what it does", ...(facts.explainInside ? { chipOnly: true } : {}) });
   }
-  hints.push(tabHint(state, facts));
+  hints.push(tabHint(state, facts, twoColumns));
   return hints;
 }
 
@@ -645,9 +656,24 @@ function answerKeyHints(facts: ViewKeyFacts): KeyHint[] {
  * or with nothing behind the gate, it is `tab switch side`. (TJ-3; r4's
  * goldens draw `o open` at rest: a deliberate deviation for the visual eval.)
  */
-function tabHint(state: ViewFocusState, facts: ViewKeyFacts): KeyHint {
-  const unlocks = state.engaged && state.focus !== "composer" ? null : gatedKeyHint(state, facts);
-  return { key: "tab", label: unlocks ? `then ${unlocks.key} ${unlocks.label}` : "switch side" };
+function tabHint(state: ViewFocusState, facts: ViewKeyFacts, twoColumns = false): KeyHint {
+  const engaged = state.engaged && state.focus !== "composer";
+  const layout = chatLayout();
+  // The one-column flows (chat-layout.ts) have no sides: tab moves the keys to
+  // the card and back. In V2 it opens the folded cards in place and closes them.
+  if (foldsCards(twoColumns)) {
+    return { key: "tab", label: engaged ? "close cards" : "open cards" };
+  }
+  if (isFlow(layout) && !twoColumns && engaged) {
+    return { key: "tab", label: "back to chat" };
+  }
+  const unlocks = engaged ? null : gatedKeyHint(state, facts);
+  return { key: "tab", label: unlocks ? `then ${unlocks.key} ${unlocks.label}` : tabSideWords(layout, twoColumns) };
+}
+
+/** V2 (`flow-compact`) folds a one-column turn's cards: tab opens and closes them. */
+function foldsCards(twoColumns: boolean): boolean {
+  return chatLayout() === "flow-compact" && !twoColumns;
 }
 
 /** The first key the engagement gate holds back, by priority o > w > m > c (null = none). */

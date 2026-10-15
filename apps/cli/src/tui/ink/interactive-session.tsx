@@ -105,6 +105,7 @@ import {
 } from "../views/focus.js";
 import { clipboardSequence, copyTargets, copyThroughPbcopy } from "../views/clipboard.js";
 import { detailsPaneWidth, isQuestionTurn, paneWidths, renderCommittedTurn, renderLiveTurn, rowsBesideCard, turnMaySplit, type LiveTurnRender } from "../views/layout.js";
+import { chatLayout, isFlow } from "../views/chat-layout.js";
 import { besideWorkingTurn, workingTurnMessages, workingTurnSteps, type InfiniteTranscriptInput } from "../app/transcript-renderer.js";
 import {
   approvalRender,
@@ -298,7 +299,12 @@ export interface InkInteractiveSessionAppProps {
    * user having pressed `v`): the head card's documents open. Absent = the
    * default. A list's opening row is the view's own (`body.selected`).
    */
-  initialFocus?: { documentOpen?: boolean };
+  /**
+   * The focus the session opens in: a write card opened on its documents
+   * (`documentOpen`), or the keys already on the turn's view (`viewEngaged`,
+   * the screen after tab; in the V2 flow that opens its cards in place).
+   */
+  initialFocus?: { documentOpen?: boolean; viewEngaged?: boolean };
   onRememberInput?: (line: string) => void;
   /**
    * Run one submitted line. `signal` aborts when the user stops the turn (Esc,
@@ -622,7 +628,9 @@ export function InkInteractiveSessionApp({
   const [viewFocus, setViewFocus] = useState<ViewFocusState | null>(() => {
     const views = getTurnState().views;
     const cards = initialPendingConfirmations.flatMap((action) => (action.view ? [action.view] : []));
-    return views.length ? viewFocusAfterTurnDone(views.map((frame) => frame.view), viewCaps(), cards.slice(0, 1)) : null;
+    const start = views.length ? viewFocusAfterTurnDone(views.map((frame) => frame.view), viewCaps(), cards.slice(0, 1)) : null;
+    // `viewEngaged`: as after tab (the keys on a view that has some).
+    return start && initialFocus?.viewEngaged && start.focus !== "composer" ? { ...start, engaged: true } : start;
   });
   const viewFocusRef = useRef(viewFocus);
   viewFocusRef.current = viewFocus;
@@ -946,7 +954,11 @@ export function InkInteractiveSessionApp({
   // that, the Steps under it. It is drawn at the details pane's width.
   // A turn whose answer has a table of its own stays one column at any width,
   // so its card is drawn at the whole width, under the answer.
-  const turnSplits = useMemo(() => turnMaySplit(history, transcriptColumns(columns)), [columns, history]);
+  // The one-column flows (`INFINITE_CHAT_LAYOUT`, chat-layout.ts) split only a turn that asks for two columns.
+  const turnSplits = useMemo(
+    () => turnMaySplit(history, transcriptColumns(columns), turnViews.map((frame) => frame.view)),
+    [columns, history, turnViews]
+  );
   const cardPaneWidth = detailsPaneWidth(transcriptColumns(columns), turnSplits);
   splitTurnRef.current = turnSplits;
   // The rows the turn takes besides the card (its question, answer, rule,
@@ -1075,7 +1087,8 @@ export function InkInteractiveSessionApp({
   // A question with no view or card yet is drawn in the turn layout too once
   // the window is wide enough to split (r4 always splits): its details pane
   // is r4's `steps only`. Narrower, or a command's output, the transcript draws it.
-  const questionSplits = turnSplits && isQuestionTurn(history);
+  // The one-column flows draw every question in the turn layout (its calls as lines in the flow).
+  const questionSplits = (turnSplits || isFlow(chatLayout())) && isQuestionTurn(history);
   const renderTurnAt = useMemo(() => {
     if (!turnViews.length && !headCardLines && !liveKeptSteps && !questionSplits) {
       return null;
@@ -1150,7 +1163,7 @@ export function InkInteractiveSessionApp({
     const viewHints = !quiet
       ? []
       : facts && viewFocus
-        ? viewKeyHints(viewFocus, facts, turn?.focused?.render.keys ?? [])
+        ? viewKeyHints(viewFocus, facts, turn?.focused?.render.keys ?? [], turnSplits)
         : !facts && committedFocus
           ? viewKeyHints(committedFocus.state, committedFocus.facts)
           : [];
@@ -2179,6 +2192,10 @@ export function InkInteractiveSessionApp({
   // goes up with the turn, and only its calls that did not end clean print
   // under the answer (lane review MUST).
   const keptStripFitsAtRest = (): boolean => {
+    // The flow's calls are lines of the turn itself: they go up with it, in place.
+    if (isFlow(chatLayout())) {
+      return false;
+    }
     const steps = turnSteps.length ? turnSteps : keptSteps?.steps ?? [];
     if (!steps.length) {
       return false;
@@ -2418,7 +2435,7 @@ export function InkInteractiveSessionApp({
         theme={t}
         width={columns}
       />
-      <KeyBar hints={keyHints} commands={!modelPicker.state} sides={!modelPicker.state && (bootFrameDrawn || (Boolean(liveTurn?.details) && !finishedOverflow))} theme={t} width={columns} />
+      <KeyBar hints={keyHints} commands={!modelPicker.state} sides={!modelPicker.state && ((bootFrameDrawn && !isFlow(chatLayout())) || (Boolean(liveTurn?.details) && !finishedOverflow))} twoColumns={turnSplits} theme={t} width={columns} />
     </Box>
   );
 }

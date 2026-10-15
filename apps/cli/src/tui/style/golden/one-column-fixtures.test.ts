@@ -79,8 +79,8 @@ afterAll(() => {
 });
 
 describe("one-column sample turns", () => {
-  it("are the four sample turns, and every view decodes", () => {
-    expect(ids).toEqual(["01-plain-text", "02-ads-card", "03-funnel", "04-multi-step-job"]);
+  it("are the sample turns (four, and one that asks for two columns), and every view decodes", () => {
+    expect(ids).toEqual(["01-plain-text", "02-ads-card", "03-funnel", "04-multi-step-job", "05-side-by-side"]);
     for (const id of ids) {
       for (const view of loadOneColumnFixture(id).turn?.views ?? []) {
         expect(decodeAnswerView(view), `${id}: ${view.kind}`).not.toBeNull();

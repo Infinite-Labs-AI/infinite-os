@@ -13,6 +13,7 @@ import type { Key } from "ink";
 import { terminalText } from "../../desktop/terminal-text.js";
 import { paintSegments, segmentsWidth, truncSegments, type StyledSegment } from "../lib/styled-segments.js";
 import type { Theme } from "../theme.js";
+import { tabSideWords } from "../views/chat-layout.js";
 
 export type FocusKind = "composer" | "card" | "rows" | "document";
 
@@ -116,6 +117,8 @@ export interface KeyBarOptions {
    * went to scrollback.
    */
   sides?: boolean;
+  /** The turn on screen is drawn side by side: `tab` says `switch side` in every layout (chat-layout.ts). */
+  twoColumns?: boolean;
 }
 
 /** Keys with one meaning everywhere, so a card's verb can never claim them. */
@@ -294,10 +297,11 @@ export function keyBarShownHints(hints: readonly KeyHint[], options: KeyBarOptio
   }
   // A view's own `tab` words (`tab then o open`, focus.ts TJ-3) replace `switch side`
   // in its place, and show whether or not there is a side: tab engages the view.
-  const tabWords = hints.find((hint) => hint.key === "tab" && !hint.chipOnly && hint.label !== TAB_HINT.label);
+  const sideWords = tabSideWords(undefined, options.twoColumns === true);
+  const tabWords = hints.find((hint) => hint.key === "tab" && !hint.chipOnly && hint.label !== TAB_HINT.label && hint.label !== sideWords);
   return [
     ...shown,
-    ...ALWAYS_KEY_HINTS.filter(hint => hint.key !== "/" || options.commands !== false).flatMap((hint) => hint.key !== "tab" ? [hint] : tabWords ? [{ key: "tab", label: tabWords.label }] : options.sides !== false ? [hint] : [])
+    ...ALWAYS_KEY_HINTS.filter(hint => hint.key !== "/" || options.commands !== false).flatMap((hint) => hint.key !== "tab" ? [hint] : tabWords ? [{ key: "tab", label: tabWords.label }] : options.sides !== false ? [{ ...hint, label: sideWords }] : [])
   ];
 }
 

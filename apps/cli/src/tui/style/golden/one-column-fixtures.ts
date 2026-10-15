@@ -1,4 +1,4 @@
-// Four neutral sample turns for the one-column chat work (2026-10-15): a plain
+// Neutral sample turns for the one-column chat work (2026-10-15): a plain
 // text answer, an ads answer with a card, a funnel answer and a multi-step job.
 // Same shape as the r4 screen fixtures (`R4ScreenFixture`), so `renderR4Screen`
 // replays them through the REAL interactive session, at any width. They live

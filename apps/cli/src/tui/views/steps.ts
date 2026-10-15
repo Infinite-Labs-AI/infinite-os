@@ -709,6 +709,28 @@ export function stepRowLines(steps: readonly TurnStep[], options: StepStripOptio
 }
 
 /**
+ * The turn's calls as compact lines in the one-column flow (V1/V2,
+ * `chat-layout.ts`): one line per call, in call order, the mark first, then
+ * the label and, dim, its result (`  ✓ checking your Meta ads · 3 ad sets`).
+ * No Gantt bar, no header. The words, the marks and their tones are the Steps
+ * strip's own (`stepRowFacts`), so the two never disagree; a failed reason cut
+ * short prints whole under its line, as in the strip.
+ */
+export function stepFlowLines(steps: readonly TurnStep[], options: StepStripOptions): string[] {
+  const width = Math.max(1, Math.floor(options.width));
+  const paint = (text: string, tone: ThemeStyle) => (options.color && text ? ansi(options.theme, tone, text) : text);
+  return steps.flatMap((step) => {
+    const { status, mark, tone, label, result } = stepRowFacts(step, steps, options);
+    return rowWithReason([
+      ["  ", "text"],
+      [mark, tone],
+      [` ${label}`, "text"],
+      [result ? ` · ${result}` : "", "dim"]
+    ], status, result, width, paint);
+  });
+}
+
+/**
  * One row, cut to the width. Why a call failed must stay readable: a reason
  * cut short is printed whole on dim rows under the call, indented 4 (ok rows
  * stay one row, as r4).

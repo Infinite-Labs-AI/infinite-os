@@ -46,7 +46,7 @@ export interface R4Turn {
    * opened on its documents (`flow-email-02`, `v` pressed). A list's selected
    * row is the view's own (`body.selected`), never a fixture focus.
    */
-  focus?: { viewOpen?: boolean };
+  focus?: { viewOpen?: boolean; viewEngaged?: boolean };
 }
 
 export interface R4ScreenFixture {

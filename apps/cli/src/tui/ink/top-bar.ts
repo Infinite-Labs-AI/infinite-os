@@ -9,6 +9,7 @@ import type { AnswerViewV1 } from "@infinite-os/types";
 import { terminalText } from "../../desktop/terminal-text.js";
 import type { Theme } from "../theme.js";
 import { paneWidths } from "../views/layout.js";
+import { chatLayout, isFlow } from "../views/chat-layout.js";
 import {
   padSegments,
   paintSegments,
@@ -211,7 +212,8 @@ export function bootBodyLines(width: number, theme: Theme, rows: number = BOOT_B
  */
 function bootAnswerRow(width: number, theme: Theme): string {
   const panes = paneWidths(width);
-  if (!panes.wide) {
+  // The one-column flows (chat-layout.ts) open on one column too.
+  if (!panes.wide || isFlow(chatLayout())) {
     return " ";
   }
   return paintSegments([["", " ".repeat(panes.left + 1)], ["line", "│"]], theme);

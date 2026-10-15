@@ -1,0 +1,289 @@
+{
+  "screen": "05-side-by-side",
+  "session": {
+    "workspace": "Demo shop",
+    "connections": [
+      {
+        "name": "Shopify",
+        "status": "connected"
+      },
+      {
+        "name": "GA4",
+        "status": "connected"
+      },
+      {
+        "name": "Stripe",
+        "status": "connected"
+      },
+      {
+        "name": "Meta",
+        "status": "connected"
+      }
+    ]
+  },
+  "turn": {
+    "question": "show my meta ads and the signup funnel side by side",
+    "answer": "Here are last week's Meta ads next to this month's signup funnel. Retargeting got the cheapest clicks at $0.52, and the biggest funnel drop is from a visit to a registration.",
+    "views": [
+      {
+        "v": 1,
+        "kind": "numbers",
+        "tool": "get_meta_performance",
+        "title": "Meta ads last week",
+        "state": "ready",
+        "asOf": "2026-10-15",
+        "provenance": {
+          "source": "Meta Ads",
+          "via": "our_db"
+        },
+        "scope": {
+          "workspaceName": "Demo shop",
+          "crossWorkspace": false
+        },
+        "caveats": [],
+        "appLink": {
+          "place": "ads.meta",
+          "label": "Open in Meta Ads"
+        },
+        "body": {
+          "layout": "table",
+          "currency": "USD",
+          "rowLabel": "Ad set",
+          "columns": [
+            {
+              "key": "spend",
+              "label": "Spent",
+              "unit": "money",
+              "factGroup": "delivery"
+            },
+            {
+              "key": "impressions",
+              "label": "Impressions",
+              "unit": "count",
+              "factGroup": "delivery"
+            },
+            {
+              "key": "link_clicks",
+              "label": "Link clicks",
+              "unit": "count",
+              "factGroup": "delivery"
+            },
+            {
+              "key": "ctr",
+              "label": "CTR",
+              "unit": "percent",
+              "factGroup": "delivery"
+            },
+            {
+              "key": "cpc",
+              "label": "CPC",
+              "unit": "money",
+              "factGroup": "delivery"
+            }
+          ],
+          "legs": {
+            "settled": {
+              "window": {
+                "from": "2026-10-06",
+                "to": "2026-10-12",
+                "tz": "UTC",
+                "label": "last week"
+              },
+              "final": true,
+              "asOf": "2026-10-13",
+              "rows": [
+                {
+                  "id": "as1",
+                  "label": "Autumn sale · broad",
+                  "cells": {
+                    "spend": {
+                      "value": 210.4
+                    },
+                    "impressions": {
+                      "value": 18200
+                    },
+                    "link_clicks": {
+                      "value": 198
+                    },
+                    "ctr": {
+                      "value": 1.09
+                    },
+                    "cpc": {
+                      "value": 1.06
+                    }
+                  }
+                },
+                {
+                  "id": "as2",
+                  "label": "Autumn sale · lookalike",
+                  "cells": {
+                    "spend": {
+                      "value": 128.2
+                    },
+                    "impressions": {
+                      "value": 9400
+                    },
+                    "link_clicks": {
+                      "value": 146
+                    },
+                    "ctr": {
+                      "value": 1.55
+                    },
+                    "cpc": {
+                      "value": 0.88
+                    }
+                  }
+                },
+                {
+                  "id": "as3",
+                  "label": "Retargeting · 30 days",
+                  "cells": {
+                    "spend": {
+                      "value": 74
+                    },
+                    "impressions": {
+                      "value": 5100
+                    },
+                    "link_clicks": {
+                      "value": 142
+                    },
+                    "ctr": {
+                      "value": 2.78
+                    },
+                    "cpc": {
+                      "value": 0.52
+                    }
+                  }
+                }
+              ],
+              "totals": {
+                "spend": {
+                  "value": 412.6
+                },
+                "impressions": {
+                  "value": 32700
+                },
+                "link_clicks": {
+                  "value": 486
+                },
+                "ctr": {
+                  "value": 1.49
+                },
+                "cpc": {
+                  "value": 0.85
+                }
+              }
+            }
+          },
+          "warnings": []
+        }
+      },
+      {
+        "v": 1,
+        "kind": "numbers",
+        "tool": "read_funnel",
+        "title": "Signup funnel",
+        "state": "ready",
+        "asOf": "2026-10-15",
+        "provenance": {
+          "source": "Demo analytics",
+          "via": "our_db"
+        },
+        "scope": {
+          "workspaceName": "Demo shop",
+          "crossWorkspace": false
+        },
+        "caveats": [],
+        "body": {
+          "layout": "steps",
+          "currency": null,
+          "columns": [],
+          "legs": {
+            "settled": {
+              "window": {
+                "from": "2026-09-15",
+                "to": "2026-10-14",
+                "tz": "UTC",
+                "label": "last 30 days"
+              },
+              "final": true,
+              "asOf": "2026-10-14T23:00:00Z",
+              "rows": [],
+              "steps": [
+                {
+                  "key": "visits",
+                  "label": "Visits",
+                  "count": 2400
+                },
+                {
+                  "key": "registered",
+                  "label": "Registered",
+                  "count": 312,
+                  "ofPrevious": true
+                },
+                {
+                  "key": "app_signup",
+                  "label": "App signup",
+                  "count": 140,
+                  "ofPrevious": true
+                },
+                {
+                  "key": "trial",
+                  "label": "Started trial",
+                  "count": null,
+                  "reason": {
+                    "code": "not_measured",
+                    "words": "not counted before Oct 1",
+                    "show": "dash"
+                  },
+                  "countingSince": "2026-10-01",
+                  "ofPrevious": true
+                },
+                {
+                  "key": "paying",
+                  "label": "Paying",
+                  "count": 9,
+                  "ofPrevious": true
+                }
+              ]
+            }
+          },
+          "warnings": []
+        }
+      }
+    ],
+    "steps": [
+      {
+        "label": "checking your Meta ads",
+        "start": 0,
+        "end": 0.8,
+        "result": "3 ad sets",
+        "status": "ok"
+      },
+      {
+        "label": "reading site visits",
+        "start": 0.1,
+        "end": 0.5,
+        "result": "2,400 visits",
+        "status": "ok"
+      },
+      {
+        "label": "reading sign-ups",
+        "start": 0.2,
+        "end": 0.7,
+        "result": "312 registered",
+        "status": "ok"
+      },
+      {
+        "label": "reading Stripe trials",
+        "start": 0.30000000000000004,
+        "end": 1.1,
+        "result": "9 paying",
+        "status": "ok"
+      }
+    ]
+  },
+  "gaps": [
+    "An explicit request for two columns (its question says 'side by side'): the one-column flows (V1/V2) keep today's split for it. Same sample data as 02-ads-card and 03-funnel."
+  ]
+}
