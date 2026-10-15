@@ -139,7 +139,7 @@ describe("the session draws the latest turn's answer views (CI-runnable)", () =>
     expect(out.split("\n").every((line) => displayWidth(line) <= 60)).toBe(true);
   });
 
-  it("without views (an old desktop sends none) the turn is one column with its calls; asked side by side, r4's `steps only` on the right", () => {
+  it("without views (an old desktop sends none) the turn is one column with its calls, asked side by side or not", () => {
     const draw = (columns: number, question = SIDE_BY_SIDE) => {
       resetTurnState();
       patchTurnState((state) => ({
@@ -156,11 +156,13 @@ describe("the session draws the latest turn's answer views (CI-runnable)", () =>
     expect(one).toContain("  ✓ listing meta entities · 3 ads");
     expect(one.join("\n")).not.toContain(" │ ");
     expect(one.join("\n")).not.toContain("steps only");
+    // Asked side by side, but nothing for the right pane: one column, never a narrow answer beside an empty pane.
     const wide = draw(100);
-    expect(wide).toContain(`❯ ${SIDE_BY_SIDE}${" ".repeat(9)} │ steps only`);
-    expect(wide).toContain(`∞ Two are on.${" ".repeat(15)} │`);
-    expect(wide.filter((row) => row.includes("steps only"))).toHaveLength(1);
-    // Nothing on the right to switch to: the bar keeps `tab switch side` off.
+    expect(wide).toContain(`❯ ${SIDE_BY_SIDE}`);
+    expect(wide).toContain("  ✓ listing meta entities · 3 ads");
+    expect(wide).toContain("∞ Two are on.");
+    expect(wide.join("\n")).not.toContain(" │ ");
+    expect(wide.join("\n")).not.toContain("steps only");
     expect(wide.join("\n")).not.toContain("switch side");
     // Under 80 it is one column even when asked.
     const narrow = draw(79);
@@ -169,14 +171,16 @@ describe("the session draws the latest turn's answer views (CI-runnable)", () =>
     expect(narrow.join("\n")).toContain("Two are on.");
   });
 
-  it("a finished question asked side by side with no Steps keeps the split at 80, its details pane empty (no `steps only` over nothing)", () => {
+  it("a finished question asked side by side with no view and no Steps is one column at 80 (no empty pane)", () => {
     resetTurnState();
     const rows = stripAnsi(renderInkInteractiveSessionToString({
       columns: 80,
       initialMessages: [{ role: "user", text: SIDE_BY_SIDE }, { role: "assistant", text: "Two are on." }],
       onSubmitLine: async () => ({ messages: [] })
     })).split("\n").map((row) => row.trimEnd());
-    expect(rows).toContain(`❯ ${SIDE_BY_SIDE}${" ".repeat(7)} │`);
+    expect(rows).toContain(`❯ ${SIDE_BY_SIDE}`);
+    expect(rows).toContain("∞ Two are on.");
+    expect(rows.join("\n")).not.toContain(" │");
     expect(rows.join("\n")).not.toContain("steps only");
     expect(rows.join("\n")).not.toContain("─ Steps");
   });
@@ -184,7 +188,7 @@ describe("the session draws the latest turn's answer views (CI-runnable)", () =>
   it.each([
     ["stopped", "■ Stopped. Anything already running in the app may still finish."],
     ["failed", "error: the app did not answer"]
-  ])("a question asked side by side that %s stays side by side at 80 (it never jumps to one column)", (_name, text) => {
+  ])("a question asked side by side with no view that %s stays one column at 80, its note under the answer", (_name, text) => {
     resetTurnState();
     const rows = stripAnsi(renderInkInteractiveSessionToString({
       columns: 80,
@@ -195,9 +199,9 @@ describe("the session draws the latest turn's answer views (CI-runnable)", () =>
       ],
       onSubmitLine: async () => ({ messages: [] })
     })).split("\n").map((row) => row.trimEnd());
-    expect(rows).toContain(`❯ ${SIDE_BY_SIDE}${" ".repeat(7)} │`);
-    const noteRow = rows.find((row) => row.includes(text.slice(0, 9)));
-    expect(noteRow?.slice(26)).toMatch(/^ │/u);
+    expect(rows).toContain(`❯ ${SIDE_BY_SIDE}`);
+    expect(rows.find((row) => row.includes(text.slice(0, 9)))).toBeDefined();
+    expect(rows.join("\n")).not.toContain(" │");
     expect(rows.every((row) => displayWidth(row) <= 80)).toBe(true);
   });
 
@@ -524,7 +528,7 @@ describe("a running turn's views (r4 working frames)", () => {
 });
 
 describe("stopping a question at 80 columns (fake TTY; skipped on CI like the other PTY tests)", () => {
-  it.skipIf(process.env.CI === "true")("a question asked side by side with no view, stopped at 80, keeps the separator column", { timeout: 30_000 }, async () => {
+  it.skipIf(process.env.CI === "true")("a question asked side by side with no view, stopped at 80, stays one column (no empty pane)", { timeout: 30_000 }, async () => {
     resetTurnState();
     const input = ttyInput();
     const output = ttyOutput(80);
@@ -546,13 +550,13 @@ describe("stopping a question at 80 columns (fake TTY; skipped on CI like the ot
     const lastFrame = () => stripAnsi(output.text().split(`${ESC}[?2026h`).at(-1) ?? "");
     await waitFor(() => output.text().includes("Ask Infinite"), 4_000, output.text);
     await sendKeys(input, "ads, side by side\r");
-    await waitFor(() => /❯ ads, side by side +│ steps only/u.test(lastFrame()), 4_000, lastFrame);
+    await waitFor(() => /^∞ Two are/mu.test(lastFrame()), 4_000, lastFrame);
+    expect(lastFrame()).toMatch(/^❯ ads, side by side$/mu);
     input.write("\x1b");
     await waitFor(() => lastFrame().includes("■ Stopped."), 4_000, lastFrame);
-    // Still two columns: the question beside the separator, the stop line in the answer pane.
-    expect(lastFrame()).toMatch(/❯ ads, side by side +│/u);
-    const stopRow = lastFrame().split("\n").find((row) => row.includes("■ Stopped."))!;
-    expect(stopRow.slice(26)).toMatch(/^ │/u);
+    // Nothing for a right pane: one column before and after the stop, the stop line under the answer.
+    expect(lastFrame()).toMatch(/^❯ ads, side by side$/mu);
+    expect(lastFrame()).not.toMatch(/ │$|steps only/mu);
     await sendKeys(input, "/exit\r");
     await session;
   });

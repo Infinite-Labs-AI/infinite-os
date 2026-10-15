@@ -303,7 +303,8 @@ export interface InkInteractiveSessionAppProps {
    * Run one submitted line. `signal` aborts when the user stops the turn (Esc,
    * or Ctrl-C while a turn runs); only honoured when `turnStoppable` is set.
    * `onView` takes each answer view (`tool.view` frame) the turn produces; the
-   * finished turn then draws them beside its answer (terminal-r4 layout).
+   * finished turn then draws them under its answer (beside it, terminal-r4
+   * layout, on a turn that asks for two columns).
    * `onCreativeDraft` takes each image-draft frame, drawn as one progress line
    * per run ("Drawing 3 images · ~25 s"); never a picture or an image URL.
    */
@@ -906,12 +907,13 @@ export function InkInteractiveSessionApp({
     () => headConfirmAction ? confirmCardKeys(headConfirmAction, NO_KEY_CAPS) : null,
     [headConfirmAction]
   );
-  // The latest turn with answer views is drawn in the r4 layout (answer left,
-  // details right from 80 columns, Steps below) as the live region's latest
-  // lines, at the transcript's width; the transcript then carries only what
-  // the drawn turn does not show. A turn still running is drawn the same way
-  // (r4's working frames): the answer arriving (held open) beside the views
-  // that already came, its calls running in the Steps.
+  // The latest turn with answer views is drawn as the live region's latest
+  // lines, at the transcript's width: one column (the question, its calls as
+  // lines, the answer, then its cards), or side by side from 80 columns when
+  // it asks (`asksSideBySide`: answer left, details right, Steps below). The
+  // transcript then carries only what the drawn turn does not show. A turn
+  // still running is drawn the same way: the answer arriving (held open) with
+  // the views that already came, its calls running.
   //
   // The turn is drawn to the rows the live region has for it (`turnRowsAt`,
   // below, once the composer and the key bar are counted), so a document's
@@ -928,8 +930,8 @@ export function InkInteractiveSessionApp({
   // 80 columns with the Steps under it, drawn at the details pane's width. A
   // turn whose answer has a table of its own stays one column at any width.
   const turnSplits = useMemo(
-    () => turnMaySplit(history, transcriptColumns(columns), turnViews.map((frame) => frame.view)),
-    [columns, history, turnViews]
+    () => turnMaySplit(history, transcriptColumns(columns), turnViews.map((frame) => frame.view), headConfirmAction !== null),
+    [columns, headConfirmAction, history, turnViews]
   );
   const cardPaneWidth = detailsPaneWidth(transcriptColumns(columns), turnSplits);
   splitTurnRef.current = turnSplits;
@@ -1054,8 +1056,8 @@ export function InkInteractiveSessionApp({
     setCardPaneScroll(null);
   }, [columns, rows, headCardRowCount]);
   // Every question is drawn in the turn layout, with or without a view: its
-  // calls as lines in one column (side by side, r4's `steps only` pane). A
-  // command's output stays the transcript's.
+  // calls as lines above the answer (one column: a turn with no view never
+  // splits). A command's output stays the transcript's.
   const questionTurn = isQuestionTurn(history);
   const renderTurnAt = useMemo(() => {
     if (!turnViews.length && !headCardLines && !questionTurn) {

@@ -180,10 +180,8 @@ export function InkTranscriptApp({
     livePage,
     rows,
     showComposer,
-    theme: t,
-    transcriptLines,
-    width
-  }), [bootFrame, composerRows, emptyLive, keyBarRows, latest, livePage, rows, showComposer, t, transcriptLines, width]);
+    transcriptLines
+  }), [bootFrame, composerRows, emptyLive, keyBarRows, latest, livePage, rows, showComposer, transcriptLines]);
   const hint = livePageHint(live.window, { spacePages: livePageSpace });
   const header = useMemo(() => topBarLines(topBar, width, t, ruleMark), [ruleMark, t, topBar, width]);
   const rule = useMemo(() => ruleLine(width, t), [t, width]);
@@ -268,14 +266,12 @@ export function inkTranscriptLayout({
     livePage,
     rows,
     showComposer,
-    theme: t,
     transcriptLines: renderTranscriptLines(transcript ?? { state }, {
       busy,
       columns: width,
       nowMs,
       theme: t
-    }),
-    width
+    })
   });
   const liveRows = live.lines.length + (livePageHint(live.window) ? 1 : 0);
 
@@ -358,9 +354,7 @@ function liveLinesWindow({
   livePage,
   rows,
   showComposer,
-  theme,
-  transcriptLines,
-  width
+  transcriptLines
 }: {
   bootFrame: boolean;
   composerRows?: number;
@@ -370,9 +364,7 @@ function liveLinesWindow({
   livePage?: number | null;
   rows?: number;
   showComposer: boolean;
-  theme: Theme;
   transcriptLines: readonly string[];
-  width: number;
 }): { lines: readonly string[]; start: number; window: LiveWindow } {
   const lines = latest?.lines.length ? [...latest.lines, ...transcriptLines] : transcriptLines;
   const budget = liveBodyRows(rows, composerRows, keyBarRows, frameHeaderRows(showComposer), showComposer);
@@ -382,7 +374,7 @@ function liveLinesWindow({
   }
   // Nothing live: the boot frame (D4), one blank row, or no row; never paged.
   const empty = bootFrame
-    ? bootBodyLines(width, theme, Number.isFinite(budget) ? budget : BOOT_BODY_ROWS)
+    ? bootBodyLines(Number.isFinite(budget) ? budget : BOOT_BODY_ROWS)
     : emptyLive === "none" ? [] : [""];
   return { lines: empty, start: 0, window };
 }

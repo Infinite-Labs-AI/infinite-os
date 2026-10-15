@@ -377,14 +377,15 @@ describe("scrollback in a running session (fake TTY; skipped on CI like the othe
       title: "Infinite TUI"
     });
     await waitFor(() => output.text().includes("Ask Infinite"), 4_000, output.text);
-    // Asked side by side (80 columns): while it streams the answer pane follows the newest lines.
-    await sendKeys(input, "first, side by side\r");
+    // One column (80 columns, no view): while it streams the live region follows the newest lines.
+    await sendKeys(input, "first\r");
     await waitFor(() => output.text().includes("alpha line 119"), 4_000, output.text);
     expect(stripAnsi(output.text())).not.toContain("alpha line 50");
-    expect(stripAnsi(output.text())).toMatch(/alpha line 119 +│/u);
+    expect(stripAnsi(output.text())).not.toMatch(/alpha line 119 +│/u);
     finish();
-    // Finished, from 80 the turn keeps the split, its answer held to the window from the top (live L8).
-    await waitFor(() => /↓ \d+ more · tab, then ↓/u.test(stripAnsi(output.text()).split(`${ESC}[?2026h`).at(-1) ?? ""), 4_000, output.text);
+    const lastFrame = () => stripAnsi(output.text().split(`${ESC}[?2026h`).at(-1) ?? "");
+    // Finished, taller than the window: the whole turn goes to scrollback from its first line.
+    await waitFor(() => /^∞ alpha line 0$/mu.test(lastFrame()), 4_000, lastFrame);
     await sendKeys(input, "/exit\r");
     await session;
     // Leaving commits it: the tail's rows were erased and the whole turn printed once, in order, with no hint left.

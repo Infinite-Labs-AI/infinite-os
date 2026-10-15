@@ -143,7 +143,12 @@ describe("a finished tall turn keeps the split, both panes held to the window (l
   });
 
   it("a turn with no view keys but a cut answer: tab puts the keys on the answer, ↓ scrolls it", () => {
-    const drawn = renderLiveTurn({ messages: longAnswer, views: [], focus: null, width: 100, color: false, theme, rows: TURN_ROWS, steps });
+    // A quiet view: r4's `steps only` details pane, which has no keys of its own.
+    const quiet = decodeAnswerView({
+      v: 1, kind: "quiet", tool: "read_playbook", title: "", state: "ready", asOf: null,
+      scope: { workspaceName: "Demo", crossWorkspace: false }, caveats: [], body: { stepLine: "read the playbook" }
+    })!;
+    const drawn = renderLiveTurn({ messages: longAnswer, views: [quiet], focus: null, width: 100, color: false, theme, rows: TURN_ROWS, steps, captionOpen: true });
     expect(drawn.answerPane).not.toBeNull();
     const facts = answerOnlyFacts({ above: 0, below: drawn.answerPane!.below, page: drawn.answerPane!.shown });
     const start = viewFocusAfterTurnDone([], CAPS);

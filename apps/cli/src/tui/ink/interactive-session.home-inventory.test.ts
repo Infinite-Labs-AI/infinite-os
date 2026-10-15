@@ -56,7 +56,7 @@ function predictedComposerRow(columns: number, inventory: Parameters<typeof home
 }
 
 describe("the boot frame (D4: terminal-r4's frame, nothing else)", () => {
-  it("is the top bar, its rule, an empty answer area, the Steps rule, the composer's rule, the composer and the key bar (boot--c100)", () => {
+  it("is the top bar, its rule, an empty answer area (no Steps rule), the composer's rule, the composer and the key bar (boot--c100)", () => {
     const rows = stripAnsi(render({ topBar: { workspace: "Infinite workspace", sources: R4_SOURCES_OK, throughApp: true } }, 100))
       .replace(/\n+$/u, "")
       .split("\n")
@@ -65,9 +65,8 @@ describe("the boot frame (D4: terminal-r4's frame, nothing else)", () => {
     expect(rows).toEqual([
       " ∞ Infinite   Infinite workspace   ⊘ Shopify ● GA4 ● Stripe ● PostHog ● Google Ads ● Meta",
       "─".repeat(100),
-      // One column at every width (the one-column default): an empty answer area.
+      // One column at every width (the one-column default): an empty answer area, no Steps rule.
       ...Array.from({ length: 8 }, () => ""),
-      `─ Steps ${"─".repeat(92)}`,
       "─".repeat(100),
       "❯ Ask Infinite…",
       // Nothing to switch to before the first turn: `/ commands` alone.

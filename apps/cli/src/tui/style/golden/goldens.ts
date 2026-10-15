@@ -6,6 +6,10 @@
 // whose screen it changed from the CLI's own one-column renderer, the approved
 // design since (`drawn_by` on the file): r4 draws only the two-column layout,
 // which is now drawn on request. A re-export from r4 must keep those frames.
+// Re-draw them from this repo when the CLI's drawing changes on purpose:
+//   pnpm exec tsx --tsconfig tests/model-picker.tsconfig.json apps/cli/scripts/redraw-goldens.mts <id>... [--write]
+// (`--drawn` takes every drawn_by frame). What r4 draws there that the CLI does
+// not yet (the T12 app links and follow-up keys) is kept in `known-gaps.ts`.
 import { readdirSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 

@@ -31,6 +31,8 @@ const STEP_MARK: Record<string, { glyph: string; token: "gb" | "cb" | "dim" | "r
   failed: { glyph: "✗", token: "red" },
   held: { glyph: "◷", token: "amber" }
 };
+/** The running step's mark in scrollback, where a spinner's frame would never move: the Steps' still running mark. */
+const SCROLLBACK_NOW = { glyph: "⟳", token: "cb" } as const;
 /** The step label column (r4 `padEnd(14)`), wider for a longer label, never past this. */
 const STEP_LABEL_MIN = 12;
 const STEP_LABEL_MAX = 24;
@@ -150,7 +152,8 @@ function stepLines(
   const column = Math.min(STEP_LABEL_MAX, Math.max(STEP_LABEL_MIN, ...columned.map(displayWidth))) + 2;
   const room = Math.max(1, ctx.width - 2);
   return steps.flatMap((step, index) => {
-    const mark = STEP_MARK[String(step.state)] ?? { glyph: "?", token: "dim" as const };
+    // Printed into scrollback, the running step never moves again: a still `⟳`, not a spinner's frame.
+    const mark = step.state === "now" && ctx.scrollback ? SCROLLBACK_NOW : STEP_MARK[String(step.state)] ?? { glyph: "?", token: "dim" as const };
     const until = step.state === "held" ? formatAsOf(step.heldUntil, ctx.timeZone) : null;
     const own = [viewText(step.detail), until ? `until ${until}` : ""].filter(Boolean).join(" · ");
     const label = labels[index] ?? "—";

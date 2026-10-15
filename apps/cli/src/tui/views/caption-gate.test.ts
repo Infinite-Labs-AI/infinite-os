@@ -197,7 +197,8 @@ describe("the caption gate in the terminal's turn", () => {
     for (const [width, messages] of [[79, v1Turn], [100, v1Turn], [100, askedTurn]] as const) {
       const drawn = renderLiveTurn({ messages, views: [], focus: null, width, color: false, theme: DEFAULT_THEME, rows: 40 });
       expect(drawn.folded).toBe(false);
-      expect(words(drawn.lines, width, messages === askedTurn)).toContain(FOLDED);
+      // With no view, even a turn that asks for side by side is one column.
+      expect(words(drawn.lines, width)).toContain(FOLDED);
       expect(drawn.lines.some((line) => line.includes("more (?)"))).toBe(false);
     }
     const committed = renderCommittedTurn({ messages: v1Turn, views: [], focus: null, width: 100, color: false, theme: DEFAULT_THEME });

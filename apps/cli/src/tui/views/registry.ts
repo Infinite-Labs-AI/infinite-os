@@ -90,9 +90,9 @@ export function renderView(given: AnswerViewV1, ctx: ViewRenderCtx): ViewRender 
     // A quiet call that failed (the app's generic failure view: its title is
     // the tool's name, its reason a developer's error) draws nothing of its
     // own: its Steps row says it, with one plain reason (run-2 M6). In
-    // scrollback, where no Steps strip goes with it, a quiet view prints
-    // nothing either (no literal `steps only`).
-    if (shellCtx.scrollback || failedQuiet(view)) {
+    // scrollback and in a one-column turn, where no Steps strip goes with it,
+    // a quiet view prints nothing either (no literal `steps only`, run-2 M6).
+    if (shellCtx.scrollback || shellCtx.noStepsStrip || failedQuiet(view)) {
       return { head: "", source: null, detail: [], footnotes: [], keys: [], okKey: null, rowCount: 0, quiet: true };
     }
     // Steps only (r4 view-12): the details pane under a dim `steps only` head,

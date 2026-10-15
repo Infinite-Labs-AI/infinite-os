@@ -7,7 +7,9 @@
 //
 // Two columns (answer left, cards right, the Steps strip below: the r4
 // layout) are for a turn that asks for them (`asksSideBySide`): words in the
-// question that ask for a side-by-side view, or a `compare` card.
+// question that ask for a side-by-side view, or a `compare` card. Asking is not
+// enough on its own: a turn with nothing for the right pane (no view, no
+// waiting card) stays one column (`turnMaySplit`, layout.ts).
 import type { AnswerViewV1 } from "@infinite-os/types";
 
 import type { Msg } from "../types.js";
@@ -17,7 +19,7 @@ import type { Msg } from "../types.js";
  * alone is an everyday word ("compared to last week") and does not split a
  * turn; a `compare` card does.
  */
-const SIDE_BY_SIDE_WORDS = /\bside[\s-]by[\s-]side\b|\b(?:two|2)[\s-]col(?:umn)?s?\b|\bsplit[\s-]view\b|\bdashboard\b/iu;
+const SIDE_BY_SIDE_WORDS = /\bside[\s-]by[\s-]side\b|\b(?:two|2)[\s-]col(?:umn)?s?\b|\bsplit[\s-]view\b|\bdashboards?\b/iu;
 
 /** The latest question of the turn (the last user line that is not a `/` command). */
 function latestQuestion(messages: readonly Msg[]): string {
@@ -32,7 +34,7 @@ function latestQuestion(messages: readonly Msg[]): string {
 
 /**
  * Whether this turn asked for two columns: its question says so
- * (`side by side`, `two columns`, `split view`, `dashboard`), or one of its
+ * (`side by side`, `two columns`, `split view`, `dashboard(s)`), or one of its
  * cards is a `compare`.
  */
 export function asksSideBySide(messages: readonly Msg[], views: readonly Pick<AnswerViewV1, "kind">[] = []): boolean {

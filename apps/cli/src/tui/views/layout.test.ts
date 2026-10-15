@@ -137,11 +137,15 @@ describe("a committed turn in scrollback is the question, its calls and the answ
     expect(lines.some((line) => line.includes(" │ "))).toBe(false);
   });
 
-  it("the live turn draws the same lines; a turn that asks for two columns keeps its Steps strip", () => {
+  it("the live turn draws the same lines; a turn that asks for two columns keeps its Steps strip once it has a card", () => {
     const lines = renderLiveTurn({ messages: steps, views: [], focus: null, width: 100, color: false, theme }).lines;
     expect(lines).toEqual(["❯ site traffic", "", "  ✓ checking GA4 · 3 pages", "", "∞ Up 12% on the week."]);
     const twoColumns = [{ role: "user" as const, text: "site traffic, side by side" }, ...steps.slice(1)];
-    expect(renderLiveTurn({ messages: twoColumns, views: [], focus: null, width: 100, color: false, theme }).lines.some((line) => line.startsWith("─ Steps"))).toBe(true);
+    // Nothing for the right pane: one column, as if it had not asked.
+    expect(renderLiveTurn({ messages: twoColumns, views: [], focus: null, width: 100, color: false, theme }).lines)
+      .toEqual(["❯ site traffic, side by side", "", "  ✓ checking GA4 · 3 pages", "", "∞ Up 12% on the week."]);
+    const withCard = renderLiveTurn({ messages: twoColumns, views: [], focus: null, width: 100, color: false, theme, details: ["┌─ card ─┐"] }).lines;
+    expect(withCard.some((line) => line.startsWith("─ Steps"))).toBe(true);
   });
 });
 
@@ -322,11 +326,13 @@ describe("an answer with a table of its own takes the whole width (the split is 
     expect(lines.findIndex((line) => line.includes("Win-back sequence"))).toBeGreaterThan(tableAt);
     expect(turnMaySplit(withTable, 140)).toBe(false);
     expect(detailsPaneWidth(140, turnMaySplit(withTable, 140))).toBe(140);
-    expect(turnMaySplit(prose, 140)).toBe(true);
-    expect(turnMaySplit(prose, 80)).toBe(true);
-    expect(turnMaySplit(prose, 79)).toBe(false);
+    expect(turnMaySplit(prose, 140, [], true)).toBe(true);
+    expect(turnMaySplit(prose, 80, [], true)).toBe(true);
+    expect(turnMaySplit(prose, 79, [], true)).toBe(false);
+    // With nothing for the right pane (no view, no card) it stays one column.
+    expect(turnMaySplit(prose, 140)).toBe(false);
     // A question that does not ask is one column at any width.
-    expect(turnMaySplit([{ role: "user", text: "how did the ads do?" }, prose[1]!], 140)).toBe(false);
+    expect(turnMaySplit([{ role: "user", text: "how did the ads do?" }, prose[1]!], 140, [], true)).toBe(false);
   });
 
   it("only the answer's own markdown counts: the question, a tool's output and a diff never do; a table still arriving does", () => {
@@ -476,7 +482,7 @@ describe("a table that draws whole in the answer pane keeps the split (a turn th
   const card = ["┌─ card ─┐"];
 
   it.each([160, 200])("at %i a two-column table sits in the answer pane, bordered, left of the card", (width) => {
-    expect(turnMaySplit(small, width)).toBe(true);
+    expect(turnMaySplit(small, width, [], true)).toBe(true);
     const lines = renderLiveTurn({ messages: small, views: [], focus: null, width, color: false, theme, details: card }).lines;
     expect(lines[0]).toMatch(/^❯ which won, side by side\? + │ ┌─ card ─┐$/u);
     expect(lines.some((line) => /│ Ad\s+│\s+Spend │/u.test(line))).toBe(true);
@@ -486,8 +492,8 @@ describe("a table that draws whole in the answer pane keeps the split (a turn th
 
   it("a table too wide for the pane keeps the whole width, quoted or not", () => {
     const wideTable = "| Ad | Spend | Purchases | ROAS | CPA |\n| --- | ---: | ---: | ---: | ---: |\n| Spring demo, hook 3 | $1,284.50 | 42 | 3.41 | $30.58 |";
-    expect(turnMaySplit([{ role: "assistant", text: wideTable }], 160)).toBe(false);
-    expect(turnMaySplit([{ role: "assistant", text: wideTable.split("\n").map((line) => `> ${line}`).join("\n") }], 160)).toBe(false);
+    expect(turnMaySplit([{ role: "assistant", text: wideTable }], 160, [], true)).toBe(false);
+    expect(turnMaySplit([{ role: "assistant", text: wideTable.split("\n").map((line) => `> ${line}`).join("\n") }], 160, [], true)).toBe(false);
   });
 });
 

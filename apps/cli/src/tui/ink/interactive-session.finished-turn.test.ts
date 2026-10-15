@@ -147,7 +147,9 @@ describe("what fits is decided against the resting frame (fake TTY; skipped on C
     return bar >= 0 && rows.findIndex((row) => row.includes("❯ how are the ads?")) > bar;
   };
 
-  it.skipIf(process.env.CI === "true")("a long draft never sends a turn that fits to scrollback, and the turn is whole again once the draft is gone", { timeout: 30_000 }, async () => {
+  // 700 keystrokes, each drawn: about 4 s alone, but a whole apps/cli/src run
+  // under load has taken it past 30 s. Its own waits stay 4 s each.
+  it.skipIf(process.env.CI === "true")("a long draft never sends a turn that fits to scrollback, and the turn is whole again once the draft is gone", { timeout: 90_000 }, async () => {
     const { input, output, lines, session } = await start(100, 33);
     await waitFor(() => stripAnsi(lastFrame(output.text())).includes("j k  row"), 4_000, output.text);
     expect(getTurnState().views).toHaveLength(1);

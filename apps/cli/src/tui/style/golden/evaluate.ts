@@ -73,6 +73,9 @@ export function askingSideBySide(fixture: R4ScreenFixture): R4ScreenFixture {
     : fixture;
 }
 
+/** r4's quiet view (view-12): a view that takes the right pane of a turn asked side by side and says nothing of its own. */
+const QUIET_VIEWS = () => loadR4Fixture("view-12-quiet").turn!.views;
+
 /** Line regions as wide as the window: found at column 0 only (a card or a table may sit inside a pane). */
 const FULL_WIDTH_REGION = /^region-(topbar|rule|composer|keybar|steps)/u;
 
@@ -252,8 +255,9 @@ const DATA_CHECKS: Readonly<Record<string, DataCheck>> = {
     for (const item of cases) {
       const fixture: R4ScreenFixture = {
         ...SESSION_ONLY(`region-steps-${item.status}`),
+        // Asked side by side, with r4's quiet view for the right pane: the Steps strip is two-column chrome.
         turn: {
-          question: "q, side by side", answer: "a", views: [],
+          question: "q, side by side", answer: "a", views: QUIET_VIEWS(),
           steps: [{ label: "checking your campaigns", start: 0, end: 1, result: "result", status: item.status }]
         }
       };

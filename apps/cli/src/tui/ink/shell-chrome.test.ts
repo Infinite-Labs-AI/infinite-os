@@ -14,7 +14,8 @@ import {
   type GoldenLine
 } from "./__fixtures__/r4-chrome.js";
 import { composerLine } from "./composer-line.js";
-import { bootBodyLines, ruleLine, stepsRuleLine, topBarLines, type TopBarData } from "./top-bar.js";
+import { stepHeader } from "../views/steps.js";
+import { bootBodyLines, ruleLine, topBarLines, type TopBarData } from "./top-bar.js";
 
 const theme = (tier: Tier): Theme => resolveTheme({ INFINITE_COLOR: tier }, { isTTY: true });
 const TRUECOLOR = theme("truecolor");
@@ -155,20 +156,20 @@ describe("the top bar (terminal-r4 row 0, D1)", () => {
 });
 
 describe("the boot frame's body (D4)", () => {
-  it("is an empty answer area, one column at every width (the one-column default), and the Steps rule", () => {
-    for (const width of [60, 79, 80, 100, 160]) {
-      const body = bootBodyLines(width, TRUECOLOR);
-      expect(body).toHaveLength(9);
-      // Blank rows, one space each (Ink draws an empty text as no row at all): no pane, no separator.
-      expect(body.slice(0, 8).every((line) => line === " "), String(width)).toBe(true);
-      expect(body[8]).toBe(stepsRuleLine(width, TRUECOLOR));
-    }
-    expectGolden(bootBodyLines(100, TRUECOLOR)[8]!, GOLDEN.steps100);
+  it("is an empty answer area, one column at every width (the one-column default), with no Steps rule", () => {
+    const body = bootBodyLines();
+    expect(body).toHaveLength(8);
+    // Blank rows, one space each (Ink draws an empty text as no row at all): no pane, no separator, no Steps rule.
+    expect(body.every((line) => line === " ")).toBe(true);
   });
 
-  it("shrinks its answer area to the rows it has, keeping the Steps rule", () => {
-    expect(bootBodyLines(100, TRUECOLOR, 3)).toHaveLength(3);
-    expect(bootBodyLines(100, TRUECOLOR, 1)).toEqual([stepsRuleLine(100, TRUECOLOR)]);
+  it("shrinks its answer area to the rows it has", () => {
+    expect(bootBodyLines(3)).toEqual([" ", " ", " "]);
+    expect(bootBodyLines(0)).toEqual([]);
+  });
+
+  it("leaves the Steps rule to a turn drawn side by side (r4's rule, views/steps.ts)", () => {
+    expectGolden(stepHeader(100, { color: true, theme: TRUECOLOR }), GOLDEN.steps100);
   });
 });
 
