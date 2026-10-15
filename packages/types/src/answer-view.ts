@@ -5,7 +5,7 @@
  * Key rule: no key may end in "token", contain "credential", or equal a host-private key.
  */
 // ---- contract body (vendored verbatim into 1bu-1; edit only in infinite-os) ----
-export const ANSWER_VIEW_CONTRACT_REVISION = 6 as const;   // rev 6: the verdict-first card (AnswerViewEnvelopeV1.card); VerdictV1, AgeV1, DeltaV1, BenchmarkV1, QuietLineV1, LaneV1, RankChangeV1, PostV1, CardActionV1; ReasonV1.show "hide"; CellV1.delta/.benchmark; ColumnV1.polarity/.definition/.lane/.bar; row card extras; SectionV1.head; StepV1.lane/.rate/.note/.drop/.verdict/.definition; NumbersBodyV1.lanes/.rankBy/.endToEnd; ListBodyV1.rankBy/.sections; CreativeRefV1.reader/.ratio; DocumentBodyV1.post/.context; ChangeBodyV1.target extras (incl. group)/.context; rev 5: NumbersRowV1.creativeRef; NumbersBodyV1.face; rev 4: ImagesBodyV1.drawRunIds; rev 3: ChangeBodyV1.target.creativeRef + .path; ListBodyV1.nameLabel; RecordBodyV1.status; LeaderV1.detail; AnswerViewEnvelopeV1.scope.account; StateReasonV1.step
+export const ANSWER_VIEW_CONTRACT_REVISION = 7 as const;   // rev 7: CREATIVE_REF_READERS, CreativeRefReaderV1 (CreativeRefV1.reader names the host's own picture stores too); rev 6: the verdict-first card (AnswerViewEnvelopeV1.card); VerdictV1, AgeV1, DeltaV1, BenchmarkV1, QuietLineV1, LaneV1, RankChangeV1, PostV1, CardActionV1; ReasonV1.show "hide"; CellV1.delta/.benchmark; ColumnV1.polarity/.definition/.lane/.bar; row card extras; SectionV1.head; StepV1.lane/.rate/.note/.drop/.verdict/.definition; NumbersBodyV1.lanes/.rankBy/.endToEnd; ListBodyV1.rankBy/.sections; CreativeRefV1.reader/.ratio; DocumentBodyV1.post/.context; ChangeBodyV1.target extras (incl. group)/.context; rev 5: NumbersRowV1.creativeRef; NumbersBodyV1.face; rev 4: ImagesBodyV1.drawRunIds; rev 3: ChangeBodyV1.target.creativeRef + .path; ListBodyV1.nameLabel; RecordBodyV1.status; LeaderV1.detail; AnswerViewEnvelopeV1.scope.account; StateReasonV1.step
 export const RESULT_VIEW_CAPABILITY = "result.view.v1" as const;
 export const CONFIRM_FIELDS_CAPABILITY = "confirm.fields.v1" as const;
 export const CONFIRM_STREAM_CAPABILITY = "confirm.stream.v1" as const;
@@ -164,12 +164,25 @@ export interface RowCardExtrasV1 {
   action?: CardActionV1;       // one secondary action inside the expand ("Clone this ad", "Open on the desktop")
 }
 
+/** rev 7: the stores a CreativeRefV1 may name as its reader. rev 6 had the first four (ad archives, a video's still, a followed
+ *  brand's ad). rev 7 adds the host's own stores: creative_library (an image the host made or saved), brand_photo (the brand's
+ *  own photos), product_photo (a product's photo), video_library (a still of a video the host made), packaging_thumbnail (a
+ *  thumbnail a packaging test drew), social_media (a social post's media), inspiration (a saved inspiration post's media),
+ *  review_media (a creative review's media). The host resolves each by its archive id from its own stored copy. A renderer
+ *  that does not know a reader draws the empty box (never a guessed picture); the terminal ignores every reader. */
+export const CREATIVE_REF_READERS = [
+  "meta_archive", "reddit_ads", "youtube", "competitor",
+  "creative_library", "brand_photo", "product_photo", "video_library", "packaging_thumbnail", "social_media", "inspiration",
+  "review_media",
+] as const;
+export type CreativeRefReaderV1 = (typeof CREATIVE_REF_READERS)[number];
+
 /** A picture by reference only (Cmd+L's CreativeThumb reads our archive by id), never a URL. reader: which archive holds it
  *  (Cmd+L picks its reader by it; the MCP picture tool too). ratio: the fixed box it is drawn in (cover). The terminal ignores
- *  it. rev 6: reader, ratio. */
+ *  it. rev 6: reader, ratio. rev 7: more readers (CREATIVE_REF_READERS). */
 export interface CreativeRefV1 {
   archiveAssetId: string;      // an archive id (ARCHIVE_ASSET_ID_PATTERN): never a URL or path; rev 3
-  reader?: "meta_archive" | "reddit_ads" | "youtube" | "competitor";   // rev 6
+  reader?: CreativeRefReaderV1;   // rev 6; rev 7 widens it to CREATIVE_REF_READERS
   ratio?: "1:1" | "4:5" | "9:16" | "16:9" | "1.91:1";                  // rev 6
 }
 /** tone "bad": the host flags this value as the one to look at ("0 trials"); renderers draw it in the warn colour. rev 2 */

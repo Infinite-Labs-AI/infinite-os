@@ -2,9 +2,9 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import {
   ANSWER_VIEW_CONTRACT_REVISION, ANSWER_VIEW_KINDS, ANSWER_VIEW_LIMITS, ANSWER_VIEW_STATES, ARCHIVE_ASSET_ID_PATTERN,
-  CHANNEL_LOGOS, VERDICT_TONES,
+  CHANNEL_LOGOS, CREATIVE_REF_READERS, VERDICT_TONES,
   type AgeV1, type AnswerViewEnvelopeV1, type AnswerViewV1, type BenchmarkV1, type CardActionV1, type CardFaceV1, type ChangeBodyV1,
-  type ChannelLogoV1, type ColumnV1, type DeltaV1, type DocumentBodyV1, type ImagesBodyV1, type LaneV1, type LeaderV1, type ListBodyV1,
+  type ChannelLogoV1, type ColumnV1, type CreativeRefReaderV1, type CreativeRefV1, type DeltaV1, type DocumentBodyV1, type ImagesBodyV1, type LaneV1, type LeaderV1, type ListBodyV1,
   type ListRowV1, type NumbersBodyV1, type NumbersRowV1, type PostV1, type QuietLineV1, type RankChangeV1, type RecordBodyV1,
   type RowCardExtrasV1, type SectionHeadV1, type SectionV1, type StateReasonV1, type StepV1, type TodayLegV1, type VerdictToneV1,
   type VerdictV1
@@ -12,11 +12,38 @@ import {
 const stripped = (k: string) => { const n = k.toLowerCase().replace(/[^a-z0-9]/g, "");
   return n.endsWith("token") || n.includes("credential") || n === "confirmationid"; };
 describe("answer view contract v1", () => {
-  it("revision 6: the rev line names the verdict-first card and keeps every earlier revision", () => {
-    expect(ANSWER_VIEW_CONTRACT_REVISION).toBe(6);
+  it("revision 7: the rev line names the readers and keeps every earlier revision", () => {
+    expect(ANSWER_VIEW_CONTRACT_REVISION).toBe(7);
     const src = readFileSync(new URL("./answer-view.ts", import.meta.url), "utf8");
-    expect(src).toMatch(/ANSWER_VIEW_CONTRACT_REVISION = 6 as const;\s+\/\/ rev 6: the verdict-first card \(AnswerViewEnvelopeV1\.card\); VerdictV1, AgeV1, DeltaV1, BenchmarkV1, QuietLineV1, LaneV1, RankChangeV1, PostV1, CardActionV1; .*ChangeBodyV1\.target extras \(incl\. group\)\/\.context; rev 5: NumbersRowV1\.creativeRef; NumbersBodyV1\.face; rev 4: ImagesBodyV1\.drawRunIds; rev 3: /);
+    expect(src).toMatch(/ANSWER_VIEW_CONTRACT_REVISION = 7 as const;\s+\/\/ rev 7: .*; rev 6: the verdict-first card \(AnswerViewEnvelopeV1\.card\); VerdictV1, AgeV1, DeltaV1, BenchmarkV1, QuietLineV1, LaneV1, RankChangeV1, PostV1, CardActionV1; .*ChangeBodyV1\.target extras \(incl\. group\)\/\.context; rev 5: NumbersRowV1\.creativeRef; NumbersBodyV1\.face; rev 4: ImagesBodyV1\.drawRunIds; rev 3: /);
     expect(src).toMatch(/card\?: CardFaceV1;\s+\/\/ rev 6: present = drawn as a verdict-first card; absent = drawn as before$/m);
+  });
+  it("revision 7: the rev line opens with the readers", () => {
+    const src = readFileSync(new URL("./answer-view.ts", import.meta.url), "utf8");
+    expect(src).toMatch(/ANSWER_VIEW_CONTRACT_REVISION = 7 as const;\s+\/\/ rev 7: CREATIVE_REF_READERS, CreativeRefReaderV1 \(CreativeRefV1\.reader names the host's own picture stores too\); rev 6: the verdict-first card/);
+    expect(src).toMatch(/reader\?: CreativeRefReaderV1;\s+\/\/ rev 6; rev 7 widens it to CREATIVE_REF_READERS$/m);
+  });
+  it("revision 7: a picture names one of twelve readers; the rev 6 four keep their names and order", () => {
+    expect([...CREATIVE_REF_READERS]).toEqual([
+      "meta_archive", "reddit_ads", "youtube", "competitor",
+      "creative_library", "brand_photo", "product_photo", "video_library", "packaging_thumbnail", "social_media", "inspiration",
+      "review_media",
+    ]);
+    expect(new Set(CREATIVE_REF_READERS).size).toBe(CREATIVE_REF_READERS.length);
+    for (const reader of CREATIVE_REF_READERS) expect(reader, reader).toMatch(/^[a-z][a-z_]{1,30}$/);
+    const reader = "brand_photo" satisfies CreativeRefReaderV1;
+    // A rev 6 ref is still a valid ref, and so is one with no reader at all.
+    const rev6 = { archiveAssetId: "asset_1", reader: "meta_archive", ratio: "4:5" } satisfies CreativeRefV1;
+    const rev7 = { archiveAssetId: "0f8e2a4c-5b6d-4e7f-8a9b-0c1d2e3f4a5b", reader } satisfies CreativeRefV1;
+    const bare = { archiveAssetId: "asset_2" } satisfies CreativeRefV1;
+    expect([rev6.reader, rev7.reader, "reader" in bare]).toEqual(["meta_archive", "brand_photo", false]);
+    for (const ref of [rev6, rev7, bare]) expect(ARCHIVE_ASSET_ID_PATTERN.test(ref.archiveAssetId)).toBe(true);
+  });
+  it("revision 7: a store's compound id still passes the one archive id pattern", () => {
+    // Hosts name a picture inside a parent by joining the two with ':' (a job and its thumbnail, a post and its file).
+    for (const id of ["job_1:thumb_2", "post:0f8e2a4c-5b6d-4e7f-8a9b-0c1d2e3f4a5b:0", "screenshot:asset_1", "review-asset:asset_1"]) {
+      expect(ARCHIVE_ASSET_ID_PATTERN.test(id), id).toBe(true);
+    }
   });
   it("revision 6: channel logos and verdict tones are closed lists", () => {
     expect([...CHANNEL_LOGOS]).toEqual(["meta", "instagram", "reddit", "youtube", "google_ads", "google", "x", "tiktok", "linkedin",
@@ -137,18 +164,18 @@ describe("answer view contract v1", () => {
     expect("card" in rev5).toBe(false);
   });
   it("revision 5: a numbers row may name its picture by archive reference (optional; the terminal ignores it)", () => {
-    expect(ANSWER_VIEW_CONTRACT_REVISION).toBe(6);
+    expect(ANSWER_VIEW_CONTRACT_REVISION).toBe(7);
     const row: NumbersRowV1 = { id: "ad_1", label: "Demo B", cells: { spend: { value: 12.5 } }, creativeRef: { archiveAssetId: "asset_1" } };
     expect(row.creativeRef).toEqual({ archiveAssetId: "asset_1" });
     expect(ARCHIVE_ASSET_ID_PATTERN.test(row.creativeRef!.archiveAssetId)).toBe(true);
     const bare: NumbersRowV1 = { id: "ad_2", label: "Demo C", cells: {} };
     expect("creativeRef" in bare).toBe(false);
     const src = readFileSync(new URL("./answer-view.ts", import.meta.url), "utf8");
-    expect(src).toMatch(/ANSWER_VIEW_CONTRACT_REVISION = 6 as const;\s+\/\/ rev 6: the verdict-first card .*; rev 5: NumbersRowV1\.creativeRef; NumbersBodyV1\.face; rev 4: /);
+    expect(src).toMatch(/ANSWER_VIEW_CONTRACT_REVISION = 7 as const;\s+\/\/ rev 7: .*; rev 6: the verdict-first card .*; rev 5: NumbersRowV1\.creativeRef; NumbersBodyV1\.face; rev 4: /);
     expect(src).toMatch(/creativeRef\?: CreativeRefV1;.*the terminal ignores it; rev 5$/m);
   });
   it("revision 5: a numbers body may name its row face, the column keys a compact row shows (optional; the terminal ignores it)", () => {
-    expect(ANSWER_VIEW_CONTRACT_REVISION).toBe(6);
+    expect(ANSWER_VIEW_CONTRACT_REVISION).toBe(7);
     const body: NumbersBodyV1 = {
       layout: "table", currency: "USD", face: ["clicks", "ctr", "spend"],
       columns: [
@@ -164,18 +191,18 @@ describe("answer view contract v1", () => {
     expect(src).toMatch(/face\?: string\[\];.*the terminal ignores it; rev 5$/m);
   });
   it("revision 4: an images run made of other runs may name their run ids (optional; host-only)", () => {
-    expect(ANSWER_VIEW_CONTRACT_REVISION).toBe(6);
+    expect(ANSWER_VIEW_CONTRACT_REVISION).toBe(7);
     const body: ImagesBodyV1 = { runId: "clone-1", requested: 2, ready: 2, failed: 0, items: [], format: "png", aspectRatio: "4:5", model: "m", madeWith: "your_codex", drawRunIds: ["draw-1", "draw-2"] };
     expect(body.drawRunIds).toEqual(["draw-1", "draw-2"]);
     const src = readFileSync(new URL("./answer-view.ts", import.meta.url), "utf8");
-    expect(src).toMatch(/ANSWER_VIEW_CONTRACT_REVISION = 6 as const;\s+\/\/ rev 6: the verdict-first card .*; rev 5: NumbersRowV1\.creativeRef; NumbersBodyV1\.face; rev 4: ImagesBodyV1\.drawRunIds; rev 3: /);
+    expect(src).toMatch(/ANSWER_VIEW_CONTRACT_REVISION = 7 as const;\s+\/\/ rev 7: .*; rev 6: the verdict-first card .*; rev 5: NumbersRowV1\.creativeRef; NumbersBodyV1\.face; rev 4: ImagesBodyV1\.drawRunIds; rev 3: /);
     expect(src).toMatch(/drawRunIds\?: string\[\];.*host-only; the terminal ignores it; rev 4$/m);
   });
   it("has 12 kinds and 24 states", () => {
     expect(ANSWER_VIEW_KINDS).toHaveLength(12); expect(ANSWER_VIEW_STATES).toHaveLength(24);
   });
   it("revision 3: a change target may name its picture by reference and its parents (both optional)", () => {
-    expect(ANSWER_VIEW_CONTRACT_REVISION).toBe(6);
+    expect(ANSWER_VIEW_CONTRACT_REVISION).toBe(7);
     expect(ANSWER_VIEW_LIMITS.maxTargetPathParts).toBe(4);
     expect(ANSWER_VIEW_LIMITS.maxTargetPathPartChars).toBeGreaterThan(0);
     const rev3 = { target: { kind: "ad", id: "ad_1", label: "Demo B", creativeRef: { archiveAssetId: "asset_1" },
@@ -201,7 +228,7 @@ describe("answer view contract v1", () => {
     }
   });
   it("revision 3: a list may name its row-name column, a record its own status, a leader its context line", () => {
-    expect(ANSWER_VIEW_CONTRACT_REVISION).toBe(6);
+    expect(ANSWER_VIEW_CONTRACT_REVISION).toBe(7);
     expect(ANSWER_VIEW_LIMITS.maxShortTextChars).toBe(80);
     const list = { layout: "rows", nameLabel: "Ad", columns: [], rows: [], total: 0, shown: 0 } satisfies ListBodyV1;
     const record = { title: "Demo B", status: { word: "Paused", tone: "muted" }, fields: [] } satisfies RecordBodyV1;
@@ -216,13 +243,13 @@ describe("answer view contract v1", () => {
   });
   it("revision 3: the contract source documents the new fields and the short-text rule", () => {
     const src = readFileSync(new URL("./answer-view.ts", import.meta.url), "utf8");
-    expect(src).toMatch(/ANSWER_VIEW_CONTRACT_REVISION = 6 as const;.*ListBodyV1\.nameLabel; RecordBodyV1\.status; LeaderV1\.detail/);
+    expect(src).toMatch(/ANSWER_VIEW_CONTRACT_REVISION = 7 as const;.*ListBodyV1\.nameLabel; RecordBodyV1\.status; LeaderV1\.detail/);
     expect(src).toMatch(/nameLabel\?: string;.*rev 3/);
     expect(src).toMatch(/status\?: StatusWordV1;.*rev 3/);
     expect(src).toMatch(/detail\?: string;.*rev 3/);
   });
   it("revision 3: an answer may name its host's account handles and a state reason its step word (both optional)", () => {
-    expect(ANSWER_VIEW_CONTRACT_REVISION).toBe(6);
+    expect(ANSWER_VIEW_CONTRACT_REVISION).toBe(7);
     expect(ANSWER_VIEW_LIMITS.maxHostHandleChars).toBe(128);
     const scope = { workspaceName: "Demo", crossWorkspace: false,
       account: { project: "proj_demo", source: "src_demo" } } satisfies AnswerViewEnvelopeV1["scope"];
@@ -246,7 +273,7 @@ describe("answer view contract v1", () => {
   });
   it("revision 3: the contract source documents the account handles and the step word", () => {
     const src = readFileSync(new URL("./answer-view.ts", import.meta.url), "utf8");
-    expect(src).toMatch(/ANSWER_VIEW_CONTRACT_REVISION = 6 as const;.*AnswerViewEnvelopeV1\.scope\.account; StateReasonV1\.step/);
+    expect(src).toMatch(/ANSWER_VIEW_CONTRACT_REVISION = 7 as const;.*AnswerViewEnvelopeV1\.scope\.account; StateReasonV1\.step/);
     expect(src).toMatch(/account\?: \{ project: string; source: string \};.*host-only; the terminal ignores it.*rev 3$/m);
     expect(src).toMatch(/step\?: string;.*rev 3$/m);
     expect(src).toMatch(/maxHostHandleChars: 128/);
