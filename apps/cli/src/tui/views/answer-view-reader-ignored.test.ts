@@ -65,9 +65,9 @@ const ctx = (width: number): ViewRenderCtx => ({
 });
 
 describe("the terminal ignores every picture reader (rev 7)", () => {
-  it("rev 7 names twelve readers, the rev 6 four first", () => {
+  it("rev 7 names fifteen readers, the rev 6 four first", () => {
     expect(CREATIVE_REF_READERS.slice(0, 4)).toEqual(["meta_archive", "reddit_ads", "youtube", "competitor"]);
-    expect(CREATIVE_REF_READERS).toHaveLength(12);
+    expect(CREATIVE_REF_READERS).toHaveLength(15);
   });
   const plain = [list, record, change] as AnswerViewV1[];
   for (const reader of [...CREATIVE_REF_READERS, "a_reader_from_a_later_revision"]) {

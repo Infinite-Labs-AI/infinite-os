@@ -23,11 +23,11 @@ describe("answer view contract v1", () => {
     expect(src).toMatch(/ANSWER_VIEW_CONTRACT_REVISION = 7 as const;\s+\/\/ rev 7: CREATIVE_REF_READERS, CreativeRefReaderV1 \(CreativeRefV1\.reader names the host's own picture stores too\); rev 6: the verdict-first card/);
     expect(src).toMatch(/reader\?: CreativeRefReaderV1;\s+\/\/ rev 6; rev 7 widens it to CREATIVE_REF_READERS$/m);
   });
-  it("revision 7: a picture names one of twelve readers; the rev 6 four keep their names and order", () => {
+  it("revision 7: a picture names one of fifteen readers; the rev 6 four keep their names and order", () => {
     expect([...CREATIVE_REF_READERS]).toEqual([
       "meta_archive", "reddit_ads", "youtube", "competitor",
       "creative_library", "brand_photo", "product_photo", "video_library", "packaging_thumbnail", "social_media", "inspiration",
-      "review_media",
+      "review_media", "website_variant", "blog_cover", "attachment",
     ]);
     expect(new Set(CREATIVE_REF_READERS).size).toBe(CREATIVE_REF_READERS.length);
     for (const reader of CREATIVE_REF_READERS) expect(reader, reader).toMatch(/^[a-z][a-z_]{1,30}$/);
@@ -36,6 +36,9 @@ describe("answer view contract v1", () => {
     const rev6 = { archiveAssetId: "asset_1", reader: "meta_archive", ratio: "4:5" } satisfies CreativeRefV1;
     const rev7 = { archiveAssetId: "0f8e2a4c-5b6d-4e7f-8a9b-0c1d2e3f4a5b", reader } satisfies CreativeRefV1;
     const bare = { archiveAssetId: "asset_2" } satisfies CreativeRefV1;
+    // rev 7 also adds the 4:3 box (a Reddit thumbnail is 1200 × 900).
+    const wide43 = { archiveAssetId: "asset_3", reader: "reddit_ads", ratio: "4:3" } satisfies CreativeRefV1;
+    expect(wide43.ratio).toBe("4:3");
     expect([rev6.reader, rev7.reader, "reader" in bare]).toEqual(["meta_archive", "brand_photo", false]);
     for (const ref of [rev6, rev7, bare]) expect(ARCHIVE_ASSET_ID_PATTERN.test(ref.archiveAssetId)).toBe(true);
   });

@@ -168,22 +168,24 @@ export interface RowCardExtrasV1 {
  *  brand's ad). rev 7 adds the host's own stores: creative_library (an image the host made or saved), brand_photo (the brand's
  *  own photos), product_photo (a product's photo), video_library (a still of a video the host made), packaging_thumbnail (a
  *  thumbnail a packaging test drew), social_media (a social post's media), inspiration (a saved inspiration post's media),
- *  review_media (a creative review's media). The host resolves each by its archive id from its own stored copy. A renderer
- *  that does not know a reader draws the empty box (never a guessed picture); the terminal ignores every reader. */
+ *  review_media (a creative review's media), website_variant (a website test version's picture), blog_cover (a blog post's
+ *  cover), attachment (a file the person attached for a card, held by the host). The host resolves each by its archive id
+ *  from its own stored copy. A renderer that does not know a reader draws the empty box (never a guessed picture); the
+ *  terminal ignores every reader. */
 export const CREATIVE_REF_READERS = [
   "meta_archive", "reddit_ads", "youtube", "competitor",
   "creative_library", "brand_photo", "product_photo", "video_library", "packaging_thumbnail", "social_media", "inspiration",
-  "review_media",
+  "review_media", "website_variant", "blog_cover", "attachment",
 ] as const;
 export type CreativeRefReaderV1 = (typeof CREATIVE_REF_READERS)[number];
 
 /** A picture by reference only (Cmd+L's CreativeThumb reads our archive by id), never a URL. reader: which archive holds it
  *  (Cmd+L picks its reader by it; the MCP picture tool too). ratio: the fixed box it is drawn in (cover). The terminal ignores
- *  it. rev 6: reader, ratio. rev 7: more readers (CREATIVE_REF_READERS). */
+ *  it. rev 6: reader, ratio. rev 7: more readers (CREATIVE_REF_READERS), ratio 4:3. */
 export interface CreativeRefV1 {
   archiveAssetId: string;      // an archive id (ARCHIVE_ASSET_ID_PATTERN): never a URL or path; rev 3
   reader?: CreativeRefReaderV1;   // rev 6; rev 7 widens it to CREATIVE_REF_READERS
-  ratio?: "1:1" | "4:5" | "9:16" | "16:9" | "1.91:1";                  // rev 6
+  ratio?: "1:1" | "4:5" | "9:16" | "16:9" | "1.91:1" | "4:3";          // rev 6; rev 7 adds 4:3 (a Reddit thumbnail)
 }
 /** tone "bad": the host flags this value as the one to look at ("0 trials"); renderers draw it in the warn colour. rev 2 */
 export interface CellV1 {
