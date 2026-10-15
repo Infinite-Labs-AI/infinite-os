@@ -236,8 +236,8 @@ function workingLine(detail: string, ctx: RenderContext): string {
 }
 
 /**
- * The working line for a running turn drawn in the turn layout with nothing
- * in its details pane but r4's `steps only` (a question with no view yet):
+ * The working line for a running turn drawn in the turn layout (a question
+ * with no view yet):
  * while nothing has answered, the answer's place says `⠋ Working…`, as the
  * transcript does. What the turn says it is doing stays the transcript's note
  * under it (a turn drawn beside keeps its activity there). Empty once the

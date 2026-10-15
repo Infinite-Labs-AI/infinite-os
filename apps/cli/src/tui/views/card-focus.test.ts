@@ -2,8 +2,9 @@
 // W3L2-M2): the details pane is cut to the window, and the card is the pane's
 // last details. The pane opens on the card, so its title, rows and keys are on
 // screen while its OK key is offered; scrolled off, the layout says so
-// (`cardShown: false`) and the session takes the OK key off the bar. Synthetic
-// data only.
+// (`cardShown: false`) and the session takes the OK key off the bar. The pane
+// is the side-by-side layout's, which a turn gets when it asks for two
+// columns (one-column default, 2026-10-15). Synthetic data only.
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
@@ -34,7 +35,8 @@ const steps: TurnStep[] = [
   { id: "c1", name: "list_sample_entities", label: "checking your campaigns", status: "ok", startedAt: 0, endedAt: 500, result: "65 ads" },
   { id: "c2", name: "propose_pause_entity", label: "waiting for your OK", status: "wait", startedAt: 500, endedAt: 600, result: "pause 1 ad" }
 ];
-const turn: Msg[] = [{ role: "user", text: "pause my worst ad" }, { role: "assistant", text: "Ready. It stops spending once you say OK." }];
+// The pane is cut on a turn drawn side by side: its question asks for two columns.
+const turn: Msg[] = [{ role: "user", text: "pause my worst ad, side by side" }, { role: "assistant", text: "Ready. It stops spending once you say OK." }];
 /** A stand-in card: its title, a row, its keys. */
 const card = ["┌─ Pause ad “Demo A”? ─┐", "│ status   on → paused │", "│  p  Pause    n  dismiss │", "└──────────────────────┘"];
 
@@ -109,6 +111,20 @@ describe("a waiting card under a tall view opens on screen (W3L2-M2)", () => {
       // The Steps (header + 2 rows), the blank pane row over them, and the pane's `↑ N above` line.
       expect(beside, String(width)).toBe(5);
       expect(detailsPaneWidth(width)).toBeGreaterThan(40);
+    }
+  });
+
+  it("in one column (a turn that does not ask for two) the card's budget is the blank row over it and the views above it", () => {
+    const asked: Msg[] = [{ role: "user", text: "pause my worst ad" }, turn[1]!];
+    const status = { statusViews: [fixture("change-pause-card")] };
+    for (const width of [60, 100, 140]) {
+      const alone = rowsBesideCard({ messages: asked, views: [], focus: null, steps, width, color: false, theme, ...status });
+      expect(alone, String(width)).toBe(1);
+      const withView = rowsBesideCard({ messages: asked, views: [fixture("numbers-ads")], focus: null, steps, width, color: false, theme, ...status });
+      const drawn = renderLiveTurn({ messages: asked, views: [fixture("numbers-ads")], focus: null, steps, width, color: false, theme, ...status, nowMs: 600, details: card });
+      // Everything from the blank row over the first view down to the card, the card's own rows aside.
+      const viewAt = drawn.lines.findIndex((line) => line.includes("Ads since launch"));
+      expect(withView, String(width)).toBe(drawn.lines.length - card.length - (viewAt - 1));
     }
   });
 });

@@ -138,6 +138,14 @@ describe("how long it has run (W3-job-running)", () => {
     expect(lines(renderView(running({ etaMs: 240_000 }), ctx())).join("\n")).toContain("2:03 so far · usually about 4 min · keeps going while you chat");
   });
 
+  it("in scrollback the running step is a still ⟳, never a spinner's frame that will not move", () => {
+    const view = job({ steps: [{ id: "a", label: "Outline", state: "done" }, { id: "b", label: "Draft", state: "now", detail: "section 2" }] });
+    const live = lines(renderView(view, ctx())).find((line) => line.includes("Draft"));
+    const kept = lines(renderView(view, ctx({ scrollback: true }))).find((line) => line.includes("Draft"));
+    expect(live).toMatch(/^⠋ Draft/u);
+    expect(kept).toMatch(/^⟳ Draft/u);
+  });
+
   it("no start time, no clock", () => {
     expect(lines(renderView(running({ startedAt: null }), ctx())).join("\n")).not.toContain("so far");
   });

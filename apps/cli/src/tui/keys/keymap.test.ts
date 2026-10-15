@@ -185,33 +185,33 @@ describe("keyBarHints", () => {
     ]);
     // terminal-r4's bar names the action in one lower-case word; the card's chip keeps the whole label.
     expect(keyBarText(keyBarHints(card({ okKey: "l", okLabel: "Launch 3 ads" }))))
-      .toBe(" l  launch    n  dismiss    tab  switch side    /  commands");
+      .toBe(" l  launch    n  dismiss    tab  to card    /  commands");
     expect(keyBarText(keyBarHints(card({ okKey: "g", okLabel: "Generate · ~$0.52" }))))
-      .toBe(" g  generate    n  dismiss    tab  switch side    /  commands");
+      .toBe(" g  generate    n  dismiss    tab  to card    /  commands");
     // A card that names its own short verb keeps it ("check again").
     expect(keyBarText(keyBarHints(card({ okLabel: "Pause", okVerb: "check again" }))))
-      .toBe(" p  check again    n  dismiss    tab  switch side    /  commands");
+      .toBe(" p  check again    n  dismiss    tab  to card    /  commands");
   });
 
   it("the bar never carries ? on a card: the card shows `? what it does` inside it (run-2 M4)", () => {
     const hints = keyBarHints(card({ okLabel: "Pause", explain: true }));
     expect(hints.map((h) => h.key)).toContain("?");
-    expect(keyBarText(hints)).toBe(" p  pause    n  dismiss    tab  switch side    /  commands");
+    expect(keyBarText(hints)).toBe(" p  pause    n  dismiss    tab  to card    /  commands");
     expect(formatKeyBar(hints)).toBe("p pause   n dismiss");
   });
 
   it("a view's `? what it does` is a key bar key, not a line in the answer (run-2 N12); a card's stays inside the card", () => {
-    const viewHints = [{ key: "j k", label: "row" }, { key: "?", label: "what it does" }, { key: "tab", label: "switch side" }];
-    expect(keyBarText(viewHints)).toBe(" j k  row    ?  what it does    tab  switch side    /  commands");
-    expect(keyBarText([{ key: "?", label: "hide" }, { key: "tab", label: "switch side" }])).toBe(" ?  hide    tab  switch side    /  commands");
+    const viewHints = [{ key: "j k", label: "row" }, { key: "?", label: "what it does" }, { key: "tab", label: "to card" }];
+    expect(keyBarText(viewHints)).toBe(" j k  row    ?  what it does    tab  to card    /  commands");
+    expect(keyBarText([{ key: "?", label: "hide" }, { key: "tab", label: "to card" }])).toBe(" ?  hide    tab  to card    /  commands");
     // A card's ? is a chip inside the card only.
-    expect(keyBarText([{ key: "?", label: "what it does", chipOnly: true }, { key: "tab", label: "switch side" }])).toBe(" tab  switch side    /  commands");
+    expect(keyBarText([{ key: "?", label: "what it does", chipOnly: true }, { key: "tab", label: "to card" }])).toBe(" tab  to card    /  commands");
   });
 
   it("a card whose yes already went out offers only its OK key: no `n dismiss` (r4 flow-pause-07, run-r2 MUST 2)", () => {
     const sent = card({ okLabel: "check again (won't pause twice)", okVerb: "check again", card: { decided: true } });
     expect(keyBarHints(sent).map((h) => h.key)).toEqual(["p"]);
-    expect(keyBarText(keyBarHints(sent))).toBe(" p  check again    tab  switch side    /  commands");
+    expect(keyBarText(keyBarHints(sent))).toBe(" p  check again    tab  to card    /  commands");
     // `n` still closes the card (never a decline: nothing is left to decline), so the user is never stuck on it.
     expect(resolveKey("n", {} as Key, sent)).toEqual({ type: "dismiss" });
   });
@@ -251,7 +251,7 @@ describe("keyBarHints", () => {
     })))).toBe("s send   1-3 email");
     // The drawn bar: chips, then always tab and / (terminal-r4 region-keybar-approval-email).
     expect(keyBarText(keyBarHints(card({ okKey: "s", okLabel: "Send to 200 people", card: { view: true } }))))
-      .toBe(" v  view    s  send    n  dismiss    tab  switch side    /  commands");
+      .toBe(" v  view    s  send    n  dismiss    tab  to card    /  commands");
   });
 
   it("e and c show only when the card says they work", () => {
@@ -272,22 +272,25 @@ describe("keyBarHints", () => {
     expect(formatKeyBar(keyBarHints({ focus: "composer", busy: true, okKey: null, caps: NO_CAPS })))
       .toBe("esc stop");
     expect(keyBarText(keyBarHints({ focus: "composer", busy: true, okKey: null, caps: NO_CAPS })))
-      .toBe(" esc  stop    tab  switch side    /  commands");
+      .toBe(" esc  stop    tab  to card    /  commands");
   });
 
   it("the idle composer has no keys of its own; the bar still ends with tab and /", () => {
     expect(keyBarHints({ focus: "composer", busy: false, okKey: null, caps: NO_CAPS })).toEqual([]);
-    expect(keyBarText([])).toBe(" tab  switch side    /  commands");
+    expect(keyBarText([])).toBe(" tab  to card    /  commands");
     // With no details on screen there is no side to switch to: `/ commands` alone.
     expect(keyBarText([], { sides: false })).toBe(" /  commands");
-    expect(keyBarText([{ key: "esc", label: "stop" }, { key: "tab", label: "switch side" }], { sides: false })).toBe(" esc  stop    /  commands");
-    expect(keyBarText([{ key: "j k", label: "row" }], { sides: true })).toBe(" j k  row    tab  switch side    /  commands");
+    expect(keyBarText([{ key: "esc", label: "stop" }, { key: "tab", label: "to card" }], { sides: false })).toBe(" esc  stop    /  commands");
+    expect(keyBarText([{ key: "j k", label: "row" }], { sides: true })).toBe(" j k  row    tab  to card    /  commands");
+    // A turn drawn side by side (it asked for two columns): tab switches sides.
+    expect(keyBarText([{ key: "j k", label: "row" }], { sides: true, twoColumns: true })).toBe(" j k  row    tab  switch side    /  commands");
+    expect(keyBarText([{ key: "j k", label: "row" }, { key: "tab", label: "switch side" }], { twoColumns: true })).toBe(" j k  row    tab  switch side    /  commands");
   });
 
   it("formats and scrubs the bar, which is one row at every width (cut, never wrapped)", () => {
     const hints = keyBarHints(card({ okLabel: "Pause\u001b[2J‮", explain: true }));
     expect(formatKeyBar(hints)).toBe("p pause   n dismiss");
-    expect(keyBarText(hints)).toBe(" p  pause    n  dismiss    tab  switch side    /  commands");
+    expect(keyBarText(hints)).toBe(" p  pause    n  dismiss    tab  to card    /  commands");
     expect(keyBarRowCount(hints, 80)).toBe(1);
     expect(keyBarRowCount([], 80)).toBe(1);
     expect(keyBarRowCount(hints, 10)).toBe(1);
@@ -365,7 +368,7 @@ describe("a card scrolled off screen (W3L2-M2): no key approves what the user ca
     expect(hints.map((hint) => hint.key)).not.toContain("r");
     expect(hints.map((hint) => hint.key)).toContain("n");
     expect(keyBarText(keyBarHints(cardKeysOffScreen(card({ okLabel: "Pause" })))))
-      .toBe(" n  dismiss    tab  switch side    /  commands");
+      .toBe(" n  dismiss    tab  to card    /  commands");
   });
 
   it("leaves the context it was given untouched", () => {

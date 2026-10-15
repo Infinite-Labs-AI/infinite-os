@@ -48,6 +48,7 @@ import { ansiToSegmentLines } from "./ansi-to-segments.js";
 import { firstProblem, GoldenEvaluator, REGION_SCREENS, type Evaluation, type EvaluatorTier } from "./evaluate.js";
 import { loadR4Fixture, r4FixtureIds } from "./fixtures.js";
 import { GOLDENS_DIR, goldenIds, loadGolden, screenOf } from "./goldens.js";
+import { T12_GAPS } from "./known-gaps.js";
 import { cellsOf, textOf } from "./normalize.js";
 import { ENTRY_SESSION_PROPS } from "./feed-chrome.js";
 import { recordedViews, renderR4Screen, turnMessages } from "./screen.js";
@@ -197,6 +198,27 @@ describe.each(TIERS)("r4 goldens: every frame's chrome matches, expected to fail
       expect(
         bad.map((result) => `${result.region}: ${JSON.stringify(result.diffs[0]?.golden ?? "")} vs ${JSON.stringify(result.diffs[0]?.actual ?? "")}`)
       ).toEqual([]);
+    });
+  }
+});
+
+// T12 on the re-drawn frames (known-gaps.ts): the one-column default re-drew
+// these frames from the CLI, so they match and the ratchet no longer tracks
+// the app links and follow-up keys r4 draws on them. Each text r4 draws there
+// must still be missing; one that appears is T12 landing on that frame.
+describe("r4 goldens: the T12 gaps on re-drawn frames are still gaps (known-gaps.ts)", () => {
+  const collapse = (text: string) => text.replace(/\s+/gu, " ").trim();
+  it("names only re-drawn frame goldens", () => {
+    expect(Object.keys(T12_GAPS).filter((id) => !ids.includes(id) || !loadGolden(id).drawn_by)).toEqual([]);
+  });
+  for (const [id, gap] of Object.entries(T12_GAPS)) {
+    it(id, () => {
+      const { screen, cols } = screenOf(id, loadGolden(id));
+      const rows = evaluator.screen(loadR4Fixture(screen), cols).map(textOf);
+      const keybar = rows.at(-1)!.trim().split(/\s{4,}/u).map(collapse);
+      const body = collapse(rows.slice(2, -3).join(" "));
+      const landed = [...gap.keybar.filter((hint) => keybar.includes(hint)), ...gap.body.filter((text) => body.includes(text))];
+      expect(landed, `${id}: T12 draws ${JSON.stringify(landed)} now: re-draw the golden (apps/cli/scripts/redraw-goldens.mts) and drop it from known-gaps.ts`).toEqual([]);
     });
   }
 });

@@ -14,7 +14,8 @@ import {
   type GoldenLine
 } from "./__fixtures__/r4-chrome.js";
 import { composerLine } from "./composer-line.js";
-import { bootBodyLines, ruleLine, stepsRuleLine, topBarLines, type TopBarData } from "./top-bar.js";
+import { stepHeader } from "../views/steps.js";
+import { bootBodyLines, ruleLine, topBarLines, type TopBarData } from "./top-bar.js";
 
 const theme = (tier: Tier): Theme => resolveTheme({ INFINITE_COLOR: tier }, { isTTY: true });
 const TRUECOLOR = theme("truecolor");
@@ -155,34 +156,20 @@ describe("the top bar (terminal-r4 row 0, D1)", () => {
 });
 
 describe("the boot frame's body (D4)", () => {
-  it("is an empty answer area and the Steps rule", () => {
-    const body = bootBodyLines(100, TRUECOLOR);
-    expect(body).toHaveLength(9);
-    // From 80 columns the answer area is the split's empty answer pane and its separator (boot--c100).
-    expect(body.slice(0, 8).every((line) => stripAnsi(line) === `${" ".repeat(29)}│`)).toBe(true);
-    // One column: blank rows, one space each (Ink draws an empty text as no row at all).
-    expect(bootBodyLines(79, TRUECOLOR).slice(0, 8).every((line) => line === " ")).toBe(true);
-    expectGolden(body[8]!, GOLDEN.steps100);
-    expect(stepsRuleLine(100, TRUECOLOR)).toBe(body[8]);
+  it("is an empty answer area, one column at every width (the one-column default), with no Steps rule", () => {
+    const body = bootBodyLines();
+    expect(body).toHaveLength(8);
+    // Blank rows, one space each (Ink draws an empty text as no row at all): no pane, no separator, no Steps rule.
+    expect(body.every((line) => line === " ")).toBe(true);
   });
 
-  it("draws the split's empty answer pane and its separator at 80 columns and up (boot--c160)", () => {
-    const body = bootBodyLines(160, TRUECOLOR);
-    expect(body).toHaveLength(9);
-    for (const line of body.slice(0, 8)) {
-      expect(renderedCells(line)).toEqual(goldenCells(GOLDEN.bootPane160, "truecolor"));
-    }
-    expect(body[8]).toBe(stepsRuleLine(160, TRUECOLOR));
-    // Under the split (one column) the answer area stays blank rows.
-    expect(bootBodyLines(79, TRUECOLOR).slice(0, 8).every((line) => line === " ")).toBe(true);
-    // The pane follows the layout's 28%, clamped to 26–40 columns.
-    expect(stripAnsi(bootBodyLines(80, TRUECOLOR)[0]!)).toBe(`${" ".repeat(27)}│`);
-    expect(stripAnsi(bootBodyLines(120, TRUECOLOR)[0]!)).toBe(`${" ".repeat(34)}│`);
+  it("shrinks its answer area to the rows it has", () => {
+    expect(bootBodyLines(3)).toEqual([" ", " ", " "]);
+    expect(bootBodyLines(0)).toEqual([]);
   });
 
-  it("shrinks its answer area to the rows it has, keeping the Steps rule", () => {
-    expect(bootBodyLines(100, TRUECOLOR, 3)).toHaveLength(3);
-    expect(bootBodyLines(100, TRUECOLOR, 1)).toEqual([stepsRuleLine(100, TRUECOLOR)]);
+  it("leaves the Steps rule to a turn drawn side by side (r4's rule, views/steps.ts)", () => {
+    expectGolden(stepHeader(100, { color: true, theme: TRUECOLOR }), GOLDEN.steps100);
   });
 });
 
@@ -201,42 +188,62 @@ describe("the composer row (region-composer-*)", () => {
   });
 });
 
-describe("the key bar (region-keybar-*, the last row)", () => {
+describe("the key bar in one column (the default): tab moves the keys to the card", () => {
+  it("ends with tab to card and / commands while the turn has details, / commands alone otherwise", () => {
+    expect(stripAnsi(keyBarLine([], 100, TRUECOLOR)).trimEnd()).toBe(" tab  to card    /  commands");
+    expect(stripAnsi(keyBarLine([], 100, TRUECOLOR, { sides: false })).trimEnd()).toBe(" /  commands");
+    expect(stripAnsi(keyBarLine([{ key: "j k", label: "row" }, { key: "tab", label: "back to chat" }], 100, TRUECOLOR)).trimEnd())
+      .toBe(" j k  row    tab  back to chat    /  commands");
+  });
+
+  it("puts esc stop first while a turn runs, once (D6)", () => {
+    const busy = keyBarHints({ focus: "composer", busy: true, okKey: null, caps: { open: false, watch: false, retry: false } });
+    expect(stripAnsi(keyBarLine(busy, 100, TRUECOLOR)).startsWith(" esc  stop    tab  to card")).toBe(true);
+  });
+
+  it("prints chips as same-width brackets when plain", () => {
+    expect(keyBarLine([], 100, theme("plain"))).toBe("[tab] to card   [/] commands");
+  });
+});
+
+// r4's key bars are the bars of a turn drawn side by side (it asked for two columns): `tab switch side`.
+describe("the key bar side by side (region-keybar-*, the last row)", () => {
   const card = (okKey: string, okLabel: string, extra: Partial<Parameters<typeof keyBarHints>[0]> = {}) =>
     keyBarHints({ focus: "card", busy: false, okKey, okLabel, caps: { open: false, watch: false, retry: false }, ...extra });
+  const TWO = { twoColumns: true };
 
   it("always ends with tab switch side and / commands (region-keybar-quiet)", () => {
-    expectGolden(keyBarLine([], 100, TRUECOLOR), GOLDEN.keybarQuiet);
+    expectGolden(keyBarLine([], 100, TRUECOLOR, TWO), GOLDEN.keybarQuiet);
   });
 
   it("draws the state's keys as chips first (region-keybar-numbers)", () => {
     const hints: KeyHint[] = [{ key: "j k", label: "row" }, { key: "→", label: "columns" }, { key: "o", label: "open" }];
-    expectGolden(keyBarLine(hints, 100, TRUECOLOR), GOLDEN.keybarNumbers);
+    expectGolden(keyBarLine(hints, 100, TRUECOLOR, TWO), GOLDEN.keybarNumbers);
   });
 
   it("leads with the card's OK key as an amber chip and a bold label (region-keybar-approval-pause)", () => {
-    expectGolden(keyBarLine(card("p", "pause"), 100, TRUECOLOR), GOLDEN.keybarApprovalPause);
+    expectGolden(keyBarLine(card("p", "pause"), 100, TRUECOLOR, TWO), GOLDEN.keybarApprovalPause);
   });
 
   it("keeps v view before the OK key on a send card (region-keybar-approval-email)", () => {
-    expectGolden(keyBarLine(card("s", "send", { card: { view: true } }), 100, TRUECOLOR), GOLDEN.keybarApprovalEmail);
+    expectGolden(keyBarLine(card("s", "send", { card: { view: true } }), 100, TRUECOLOR, TWO), GOLDEN.keybarApprovalEmail);
   });
 
   it("shows tab and / once even when the state's keys already offer them", () => {
-    const line = stripAnsi(keyBarLine([{ key: "j k", label: "move" }, { key: "tab", label: "switch side" }], 100, TRUECOLOR));
+    const line = stripAnsi(keyBarLine([{ key: "j k", label: "move" }, { key: "tab", label: "switch side" }], 100, TRUECOLOR, TWO));
     expect(line.match(/ tab /gu)).toHaveLength(1);
     expect(line.trimEnd().endsWith(" tab  switch side    /  commands")).toBe(true);
   });
 
   it("puts esc stop first while a turn runs, once (D6)", () => {
     const busy = keyBarHints({ focus: "composer", busy: true, okKey: null, caps: { open: false, watch: false, retry: false } });
-    const line = stripAnsi(keyBarLine(busy, 100, TRUECOLOR));
+    const line = stripAnsi(keyBarLine(busy, 100, TRUECOLOR, TWO));
     expect(line.startsWith(" esc  stop    tab  switch side")).toBe(true);
     expect(line.match(/esc/gu)).toHaveLength(1);
   });
 
   it("is cut to the width with … on the key that does not fit", () => {
-    const line = stripAnsi(keyBarLine(card("p", "Pause", { explain: true }), 30, TRUECOLOR));
+    const line = stripAnsi(keyBarLine(card("p", "Pause", { explain: true }), 30, TRUECOLOR, TWO));
     expect(line).toHaveLength(30);
     expect(line.endsWith("…")).toBe(true);
   });
@@ -253,7 +260,7 @@ describe("the key bar (region-keybar-*, the last row)", () => {
   ];
 
   it("drops lower keys first so o open and tab switch side stay whole at 80 (S2)", () => {
-    const line = stripAnsi(keyBarLine(composite, 80, TRUECOLOR));
+    const line = stripAnsi(keyBarLine(composite, 80, TRUECOLOR, TWO));
     expect([...line].length).toBeLessThanOrEqual(80);
     expect(line).toContain(" tab  switch side");
     expect(line).toContain(" o  open in Meta Ads");
@@ -265,26 +272,26 @@ describe("the key bar (region-keybar-*, the last row)", () => {
   });
 
   it("keeps the order of the keys that stay", () => {
-    const line = stripAnsi(keyBarLine(composite, 80, TRUECOLOR));
+    const line = stripAnsi(keyBarLine(composite, 80, TRUECOLOR, TWO));
     const order = [" j k ", " ↑ ↓ ", " o ", " tab "].map((key) => line.indexOf(key));
     expect(order.every((at) => at >= 0)).toBe(true);
     expect(order).toEqual([...order].sort((a, b) => a - b));
   });
 
   it("still cuts only the tail when every kept key fits (the r4 c60 bars keep their `/` chip)", () => {
-    const line = stripAnsi(keyBarLine(card("p", "pause", { caps: { open: true, watch: false, retry: false } }), 60, TRUECOLOR));
+    const line = stripAnsi(keyBarLine(card("p", "pause", { caps: { open: true, watch: false, retry: false } }), 60, TRUECOLOR, TWO));
     expect(line).toBe(" p  pause    n  dismiss    o  open    tab  switch side    / ");
-    const cut = stripAnsi(keyBarLine([{ key: "j k", label: "row" }, { key: "→", label: "columns" }, { key: "o", label: "open" }], 60, TRUECOLOR));
+    const cut = stripAnsi(keyBarLine([{ key: "j k", label: "row" }, { key: "→", label: "columns" }, { key: "o", label: "open" }], 60, TRUECOLOR, TWO));
     // r4 view-01-numbers--c60, as drawn.
     expect(cut).toBe(" j k  row    →  columns    o  open    tab  switch side    / ");
   });
 
   it("drops nothing when the bar fits", () => {
-    const line = stripAnsi(keyBarLine(composite, 140, TRUECOLOR));
+    const line = stripAnsi(keyBarLine(composite, 140, TRUECOLOR, TWO));
     expect(line.trimEnd().endsWith(" ?  what it does    tab  switch side    /  commands")).toBe(true);
   });
 
   it("prints chips as same-width brackets when plain", () => {
-    expect(keyBarLine([], 100, theme("plain"))).toBe("[tab] switch side   [/] commands");
+    expect(keyBarLine([], 100, theme("plain"), TWO)).toBe("[tab] switch side   [/] commands");
   });
 });

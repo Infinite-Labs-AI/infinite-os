@@ -1,14 +1,12 @@
 // The session's chrome above and below the answer (terminal-r4 `frame()`):
 // the top bar (` ∞ Infinite ` chip · workspace · connection dots · `through
-// the Infinite app`), the thin rules, and the boot frame's empty answer area
-// with its Steps rule. Pure: the session draws these lines through `AnsiLine`,
+// the Infinite app`), the thin rules, and the boot frame's empty answer area. Pure: the session draws these lines through `AnsiLine`,
 // and the golden tests call the same functions.
 
 import type { AnswerViewV1 } from "@infinite-os/types";
 
 import { terminalText } from "../../desktop/terminal-text.js";
 import type { Theme } from "../theme.js";
-import { paneWidths } from "../views/layout.js";
 import {
   padSegments,
   paintSegments,
@@ -46,11 +44,12 @@ export interface TopBarData {
 /** Rows `topBarLines` draws: the bar and its rule. */
 export const TOP_BAR_ROWS = 2;
 
-/** Rows of empty answer area the boot frame draws above its Steps rule (r4's boot frame). */
-export const BOOT_ANSWER_ROWS = 8;
-
-/** Rows the boot frame draws between the top bar and the composer's rule: the answer area and the Steps rule. */
-export const BOOT_BODY_ROWS = BOOT_ANSWER_ROWS + 1;
+/**
+ * Rows the boot frame draws between the top bar and the composer's rule: an
+ * empty answer area. No Steps rule: a turn draws its calls as lines in one
+ * column (the default), so there is no strip for the rule to hang over.
+ */
+export const BOOT_BODY_ROWS = 8;
 
 const BRAND_CHIP: StyledSegment = ["inv", " ∞ Infinite "];
 const THROUGH_APP: StyledSegment = ["dim", "through the Infinite app "];
@@ -186,33 +185,11 @@ export function topBarLines(data: TopBarData | undefined, width: number, theme: 
   return [paintSegments(topBarSegments(data, width), theme), ruleLine(width, theme, mark)];
 }
 
-/** `─ Steps ─────`: the rule the Steps strip hangs from (the boot frame draws it with no steps). */
-export function stepsRuleLine(width: number, theme: Theme): string {
-  const total = Math.max(8, Math.floor(width));
-  return paintSegments([["line", "─"], ["", " "], ["b", "Steps"], ["", " "], ["line", "─".repeat(total - 8)]], theme);
-}
-
 /**
- * The boot frame's body (D4): an empty answer area, then the Steps rule, at
- * most `rows` rows. An empty row is a single space: Ink draws an empty text
- * as no row at all.
+ * The boot frame's body (D4): an empty answer area, one column at every width
+ * (as every turn that does not ask for two), at most `rows` rows. An empty row
+ * is a single space: Ink draws an empty text as no row at all.
  */
-export function bootBodyLines(width: number, theme: Theme, rows: number = BOOT_BODY_ROWS): string[] {
-  const answerRows = Math.max(0, Math.min(BOOT_ANSWER_ROWS, Math.floor(rows) - 1));
-  const row = bootAnswerRow(width, theme);
-  return [...Array.from({ length: answerRows }, () => row), stepsRuleLine(width, theme)];
-}
-
-/**
- * One row of the boot frame's empty answer area. In the split layout (from
- * 80 columns, as r4's `frame()` and the turn layout's `paneWidths`) it is the
- * empty answer pane (28% of the width, clamped to 26–40 columns) and the
- * separator's `│`; one column, a blank row.
- */
-function bootAnswerRow(width: number, theme: Theme): string {
-  const panes = paneWidths(width);
-  if (!panes.wide) {
-    return " ";
-  }
-  return paintSegments([["", " ".repeat(panes.left + 1)], ["line", "│"]], theme);
+export function bootBodyLines(rows: number = BOOT_BODY_ROWS): string[] {
+  return Array.from({ length: Math.max(0, Math.min(BOOT_BODY_ROWS, Math.floor(rows))) }, () => " ");
 }

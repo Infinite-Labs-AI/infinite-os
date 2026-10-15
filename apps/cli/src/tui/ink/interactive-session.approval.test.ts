@@ -8,6 +8,7 @@ import { decodeAnswerView } from "../../desktop/answer-view-decode.js";
 import type { InSessionConfirmationAction } from "../../desktop/confirm-in-session.js";
 import { recordCreativeDraft, resetTurnState } from "../app/turn-store.js";
 import { displayWidth } from "../lib/display-width.js";
+import type { Msg } from "../types.js";
 import {
   renderInkInteractiveSessionToString,
   runInkInteractiveSession,
@@ -118,19 +119,34 @@ describe("the write card draws its approval view (CI-runnable)", () => {
 
 describe("the waiting card is the turn's details (run-2 M1: r4 Needs your OK)", () => {
   const messages = [{ role: "user" as const, text: "pause demo a" }, { role: "assistant" as const, text: "Ready. It stops spending once you say OK." }];
-  const rowsOf = (columns: number, pending: InSessionConfirmationAction) => stripAnsi(renderInkInteractiveSessionToString({
+  /** The same turn, its question asking for two columns (r4's split). */
+  const asked = [{ role: "user" as const, text: "pause demo a, side by side" }, messages[1]!];
+  const rowsOf = (columns: number, pending: InSessionConfirmationAction, turn: readonly Msg[] = messages) => stripAnsi(renderInkInteractiveSessionToString({
     columns,
-    initialMessages: messages,
+    initialMessages: [...turn],
     initialPendingConfirmations: [pending],
     onSubmitLine: async () => ({ messages: [] })
   })).split("\n");
 
-  it("from 80 columns: the head and the card take the right pane, beside the answer, and the Steps come after", () => {
-    const rows = rowsOf(160, card("change-pause-card"));
+  it.each([79, 160])("at %i, one column: the answer, a blank, then the head and the card at the whole width", (columns) => {
+    const rows = rowsOf(columns, card("change-pause-card"));
+    const answer = rows.findIndex((row) => row.startsWith("∞ Ready."));
+    expect(rows[answer + 1]).toBe("");
+    expect(rows[answer + 2]).toContain("Pause");
+    const top = rows.findIndex((row) => row.includes("┌─ Pause ad “Demo A”?"));
+    expect(top).toBeGreaterThan(answer + 2);
+    expect(rows[top]!.indexOf("┌")).toBe(0);
+    expect(rows.some((row) => row.includes(" │ ") && !row.startsWith("│"))).toBe(false);
+    const ruleUnderTurn = rows.findIndex((row, index) => index > top && row === "─".repeat(columns));
+    expect(ruleUnderTurn).toBeGreaterThan(top);
+  });
+
+  it("asked side by side, from 80 columns: the head and the card take the right pane, beside the answer, and the Steps come after", () => {
+    const rows = rowsOf(160, card("change-pause-card"), asked);
     const question = rows.findIndex((row) => row.startsWith("❯ pause demo a"));
     expect(question).toBeGreaterThan(0);
     // The question row carries the separator and the card's head on its right.
-    expect(rows[question]).toMatch(/^❯ pause demo a +│ /u);
+    expect(rows[question]).toMatch(/^❯ pause demo a, side by side +│ /u);
     const top = rows.findIndex((row) => row.includes("┌─ Pause ad “Demo A”?"));
     // Right of the 40-column answer pane and its ` │ ` separator.
     expect(rows[top]!.indexOf("┌")).toBe(43);
@@ -141,40 +157,33 @@ describe("the waiting card is the turn's details (run-2 M1: r4 Needs your OK)", 
     if (steps >= 0) expect(steps).toBeGreaterThan(bottom);
   });
 
-  it("under 80 columns: the answer, a blank and a rule, then the head and the card, then the Steps", () => {
-    const rows = rowsOf(79, card("change-pause-card"));
-    const answer = rows.findIndex((row) => row.startsWith("∞ Ready."));
-    expect(rows[answer + 1]).toBe("");
-    expect(rows[answer + 2]).toBe("─".repeat(79));
-    expect(rows[answer + 3]).toContain("Pause");
-    const top = rows.findIndex((row) => row.includes("┌─ Pause ad “Demo A”?"));
-    expect(top).toBeGreaterThan(answer + 2);
-    const ruleUnderTurn = rows.findIndex((row, index) => index > top && row === "─".repeat(79));
-    expect(ruleUnderTurn).toBeGreaterThan(top);
-  });
-
   it("an old desktop's card (no view) takes the same place", () => {
     const old = card("change-pause-card", { view: undefined });
-    const rows = rowsOf(160, old);
+    expect(rowsOf(160, old).find((row) => row.includes("┌─ Pause ad Demo A"))!.indexOf("┌")).toBe(0);
+    const rows = rowsOf(160, old, asked);
     const top = rows.findIndex((row) => row.includes("┌─ Pause ad Demo A"));
     expect(top).toBeGreaterThanOrEqual(0);
     expect(rows[top]!.indexOf("┌")).toBe(43);
   });
 
-  it("the call waiting for the OK is ▣ in the Steps, from the card's view", () => {
-    const start = Date.now();
-    const out = renderInkInteractiveSessionToString({
-      columns: 100,
-      initialMessages: [
-        messages[0]!,
-        { kind: "trail", role: "system", text: "", tools: ["Propose Pause Entity (0.1s) :: pause 1 ad ✓"] },
-        messages[1]!
-      ],
-      initialPendingConfirmations: [card("change-pause-card", { view: { ...card("change-pause-card").view!, tool: "propose_pause_entity" } })],
-      onSubmitLine: async () => ({ messages: [] })
-    });
-    expect(Date.now() - start).toBeLessThan(5_000);
-    const row = stripAnsi(out).split("\n").find((line) => line.includes("pause 1 ad") && line.includes("━"));
+  it("the call waiting for the OK is ▣, from the card's view: its line in one column, its Steps row side by side", () => {
+    const draw = (question: string) => {
+      const start = Date.now();
+      const out = renderInkInteractiveSessionToString({
+        columns: 100,
+        initialMessages: [
+          { role: "user", text: question },
+          { kind: "trail", role: "system", text: "", tools: ["Propose Pause Entity (0.1s) :: pause 1 ad ✓"] },
+          messages[1]!
+        ],
+        initialPendingConfirmations: [card("change-pause-card", { view: { ...card("change-pause-card").view!, tool: "propose_pause_entity" } })],
+        onSubmitLine: async () => ({ messages: [] })
+      });
+      expect(Date.now() - start).toBeLessThan(5_000);
+      return stripAnsi(out).split("\n");
+    };
+    expect(draw("pause demo a").some((line) => /^ {2}▣ .* · pause 1 ad$/u.test(line))).toBe(true);
+    const row = draw("pause demo a, side by side").find((line) => line.includes("pause 1 ad") && line.includes("━"));
     expect(row).toMatch(/▣ pause 1 ad$/u);
   });
 });

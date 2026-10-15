@@ -46,11 +46,13 @@ const messages: Msg[] = [
   { role: "user", text: "how are my ads this week?" },
   { role: "assistant", text: "Spend is up; clicks are down." }
 ];
-const liveTurn = (views: AnswerViewV1[], width: number) =>
-  renderLiveTurn({ messages, views, focus: viewFocusAfterTurnDone(views), width, color: false, theme, timeZone: "UTC" }).lines;
+/** The same turn, its question asking for two columns (r4's split). */
+const asked: Msg[] = [{ role: "user", text: "my ads this week, side by side?" }, messages[1]!];
+const liveTurn = (views: AnswerViewV1[], width: number, turn: readonly Msg[] = messages) =>
+  renderLiveTurn({ messages: turn, views, focus: viewFocusAfterTurnDone(views), width, color: false, theme, timeZone: "UTC" }).lines;
 const committedTurn = (views: AnswerViewV1[], width: number) =>
   renderCommittedTurn({ messages, views, focus: null, width, color: false, theme, timeZone: "UTC" });
-/** At 80 and up the details pane is right of ` │ `: its own lines. */
+/** Side by side (from 80, a turn that asks), the details pane is right of ` │ `: its own lines. */
 const detailsOf = (lines: readonly string[], width: number, split = true) => {
   const panes = paneWidths(width);
   return panes.wide && split ? lines.map((line) => line.slice(panes.left + 3)) : [...lines];
@@ -60,8 +62,8 @@ const detailsOf = (lines: readonly string[], width: number, split = true) => {
 const RECORD = /^\s*(?:Status|Spent|Day|Impressions|Link clicks|CTR \(link\)|CPC \(link\)|CPM|Results|Cost per result|ROAS|Result): /u;
 
 describe("numbers, the live shape: one bordered table per block, never records (run-2 M7)", () => {
-  it.each([60, 100, 140])("at %i, live and committed, every block is a table and nothing prints as label: value records", (width) => {
-    for (const [lines, split] of [[liveTurn([live()], width), true], [committedTurn([live()], width), false]] as const) {
+  it.each([60, 100, 140])("at %i, live (one column and side by side) and committed, every block is a table and nothing prints as label: value records", (width) => {
+    for (const [lines, split] of [[liveTurn([live()], width), false], [liveTurn([live()], width, asked), true], [committedTurn([live()], width), false]] as const) {
       const details = detailsOf(lines, width, split);
       expect(details.filter((line) => RECORD.test(line))).toEqual([]);
       // The main table, by day, the prior period, sign-ups, billing trials: five tables.
@@ -101,8 +103,8 @@ describe("numbers, the live shape: one bordered table per block, never records (
     ]);
   });
 
-  it("the r4 look at 140: the details pane draws the by-day table whole, with no Day column", () => {
-    const details = detailsOf(liveTurn([live()], 140), 140);
+  it("the r4 look at 140, side by side: the details pane draws the by-day table whole, with no Day column", () => {
+    const details = detailsOf(liveTurn([live()], 140, asked), 140);
     const at = details.indexOf("By day");
     expect(details.slice(at, at + 9)).toEqual([
       "By day",
@@ -304,8 +306,8 @@ describe("numbers: a long row name is one line, cut with … (run-3 N18)", () =>
     return line.startsWith("│") && cells.length > 1 && cells[0] !== "" && cells.slice(1).every((cell) => cell === "");
   };
 
-  it.each([60, 100, 140])("at %i, live and committed, no table row takes a second line, and the cut name ends in …", (width) => {
-    for (const [lines, split] of [[liveTurn([live()], width), true], [committedTurn([live()], width), false]] as const) {
+  it.each([60, 100, 140])("at %i, live (one column and side by side) and committed, no table row takes a second line, and the cut name ends in …", (width) => {
+    for (const [lines, split] of [[liveTurn([live()], width), false], [liveTurn([live()], width, asked), true], [committedTurn([live()], width), false]] as const) {
       const details = detailsOf(lines, width, split);
       expect(details.filter(wrapped)).toEqual([]);
       const row = details.find((line) => line.startsWith("│ Sample"));

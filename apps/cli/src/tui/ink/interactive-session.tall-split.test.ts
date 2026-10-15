@@ -3,7 +3,8 @@
 // columns, a 60-row view stays beside its question: the details pane is cut
 // to the window with `↓ N more · tab, then ↓`, tab then ↓ scrolls it, and the
 // next line commits the turn whole, in one column, into scrollback. Fake TTY,
-// real Ink, read back through a small terminal emulator. Synthetic data only.
+// real Ink, read back through a small terminal emulator. The typed question
+// asks for two columns (one-column default, 2026-10-15). Synthetic data only.
 import { readFileSync } from "node:fs";
 import { PassThrough } from "node:stream";
 import { fileURLToPath } from "node:url";
@@ -47,7 +48,7 @@ describe("a tall turn keeps the split in a 44-row window (fake TTY; skipped on C
         input,
         async onSubmitLine(line, _onProgress, _signal, onView) {
           if (line === "/exit") return { exit: true, messages: [] };
-          if (line === "show me every row") {
+          if (line === "show me every row, side by side") {
             onView?.(tallListFrame());
             return { messages: [{ role: "assistant", text: "Here they are, newest first." }] };
           }
@@ -58,7 +59,7 @@ describe("a tall turn keeps the split in a 44-row window (fake TTY; skipped on C
       });
 
       await waitFor(() => output.text().includes("Ask Infinite"), 4_000, output.text);
-      await sendKeys(input, "show me every row\r");
+      await sendKeys(input, "show me every row, side by side\r");
       await waitFor(() => vt.screenText().some((row) => /↓ \d+ more · tab, then ↓/u.test(row)), 4_000, () => vt.screenText().join("\n"));
 
       const screen = vt.screenText();

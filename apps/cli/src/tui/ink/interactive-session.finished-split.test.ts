@@ -8,6 +8,8 @@
 // to scrollback in one column, and its view stays focusable there: tab, then
 // o still opens its place until the next question. 80x24, 100x40 and 140x44,
 // with the list_sources health view and the get_meta_performance composite.
+// Since the one-column default (2026-10-15) the split is a turn that asks for
+// two columns, as the typed question here does.
 // Fake TTY, real Ink, read back through a small terminal emulator. Synthetic data only.
 import { readFileSync } from "node:fs";
 import { PassThrough } from "node:stream";
@@ -59,7 +61,7 @@ async function start(cols: number, rows: number, view: () => ToolViewFrameV1) {
     },
     async onSubmitLine(line, _onProgress, _signal, onView) {
       if (line === "/exit") return { exit: true, messages: [] };
-      if (line === "how are my sources?") {
+      if (line === "how are my sources? side by side") {
         onView?.(view());
         return { messages: [{ role: "assistant", text: ANSWER }] };
       }
@@ -79,7 +81,7 @@ describe("a finished tall turn keeps the split and its keys (live L8; fake TTY, 
       it.skipIf(process.env.CI === "true")(`${cols}x${rows}, ${name}: split kept, tab then o opens, tab again scrolls the answer, next commits whole`, { timeout: 30_000 }, async () => {
         const left = paneWidths(cols).left;
         const { input, vt, opened, session } = await start(cols, rows, view);
-        await sendKeys(input, "how are my sources?\r");
+        await sendKeys(input, "how are my sources? side by side\r");
         // The caption gate folds the answer to two sentences beside the view; `?` opens the rest (round 4).
         await waitFor(() => vt.screenText().some((row) => row.slice(0, left).trim() === "… more (?)"), 4_000, () => vt.screenText().join("\n"));
         expect(keyBar(vt)).toMatch(/^\s*\?\s+more/u);
@@ -137,7 +139,7 @@ describe("a finished tall turn keeps the split and its keys (live L8; fake TTY, 
   for (const [name, view] of Object.entries(FIXTURES)) {
     it.skipIf(process.env.CI === "true")(`79x24, ${name}: one column, the turn goes up, tab then o still opens its place`, { timeout: 30_000 }, async () => {
       const { input, vt, opened, session } = await start(79, 24, view);
-      await sendKeys(input, "how are my sources?\r");
+      await sendKeys(input, "how are my sources? side by side\r");
       // A view that does not fit goes up at once (its folded rest under it); one that fits shows the fold: `?` opens it, and then it does not fit.
       await waitFor(() => vt.allText().some((row) => row.includes(`Line ${LINES} of the answer.`) || row.trim() === "… more (?)"), 4_000, () => vt.allText().join("\n"));
       if (!vt.allText().some((row) => row.includes(`Line ${LINES} of the answer.`))) await sendKeys(input, "?");

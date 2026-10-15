@@ -56,7 +56,7 @@ function predictedComposerRow(columns: number, inventory: Parameters<typeof home
 }
 
 describe("the boot frame (D4: terminal-r4's frame, nothing else)", () => {
-  it("is the top bar, its rule, an empty answer area, the Steps rule, the composer's rule, the composer and the key bar (boot--c100)", () => {
+  it("is the top bar, its rule, an empty answer area (no Steps rule), the composer's rule, the composer and the key bar (boot--c100)", () => {
     const rows = stripAnsi(render({ topBar: { workspace: "Infinite workspace", sources: R4_SOURCES_OK, throughApp: true } }, 100))
       .replace(/\n+$/u, "")
       .split("\n")
@@ -65,13 +65,12 @@ describe("the boot frame (D4: terminal-r4's frame, nothing else)", () => {
     expect(rows).toEqual([
       " ∞ Infinite   Infinite workspace   ⊘ Shopify ● GA4 ● Stripe ● PostHog ● Google Ads ● Meta",
       "─".repeat(100),
-      // From 80 columns: the split's empty answer pane and its separator (r4 boot--c100).
-      ...Array.from({ length: 8 }, () => `${" ".repeat(29)}│`),
-      `─ Steps ${"─".repeat(92)}`,
+      // One column at every width (the one-column default): an empty answer area, no Steps rule.
+      ...Array.from({ length: 8 }, () => ""),
       "─".repeat(100),
       "❯ Ask Infinite…",
-      // r4's boot key bar, as drawn: `tab switch side`, then `/ commands`.
-      " tab  switch side    /  commands"
+      // Nothing to switch to before the first turn: `/ commands` alone.
+      " /  commands"
     ]);
   });
 

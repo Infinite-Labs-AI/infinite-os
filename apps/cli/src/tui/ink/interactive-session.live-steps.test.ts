@@ -41,7 +41,7 @@ describe("a live turn's working line and Steps (fake TTY; skipped on CI like the
       }
     });
 
-    // The boot key bar is r4's: `tab switch side`, then `/ commands`.
+    // The boot key bar: `/ commands` (one column: no side to switch to).
     await waitFor(() => lastLineWith(output.text(), "commands") !== "", 4_000, output.text);
     await sendKeys(input, "how are the sample rows?\r");
 
@@ -49,21 +49,21 @@ describe("a live turn's working line and Steps (fake TTY; skipped on CI like the
     await waitFor(() => /[⠀-⣿] Working…/u.test(stripAnsi(output.text())), 4_000, output.text);
     expect(stripAnsi(output.text())).not.toMatch(KAOMOJI);
 
-    // Worded frames (step.words.v1): the row is the app's label and result.
+    // Worded frames (step.words.v1): the call's line is the app's label and result (one column: no bar).
     progress({ type: "tool.start", stage: "tool", message: RAW_LIST, toolId: "call-1", name: RAW_LIST, context: '{"level":"row"}', words: { label: "checking the catalog" } } as never);
     await waitFor(() => lastLineWith(output.text(), "checking the catalog") !== "", 4_000, output.text);
     progress({ type: "tool.complete", stage: "tool", message: RAW_LIST, toolId: "call-1", name: RAW_LIST, status: "ok", words: { label: "checking the catalog", result: "3 rows" } } as never);
-    await waitFor(() => /checking the catalog\s+━+\s+✓ 3 rows/u.test(lastLineWith(output.text(), "checking the catalog")), 4_000, output.text);
+    await waitFor(() => /✓ checking the catalog · 3 rows/u.test(lastLineWith(output.text(), "checking the catalog")), 4_000, output.text);
 
     // A proposal's step waits for the person's OK: pending (▣), never a tick.
     progress({ type: "tool.complete", stage: "tool", message: RAW_PROPOSE, toolId: "call-2", name: RAW_PROPOSE, status: "requires_confirmation", words: { label: "waiting for your OK", result: "pause 1 item" } } as never);
-    await waitFor(() => /waiting for your OK\s+━+\s+▣ pause 1 item/u.test(lastLineWith(output.text(), "waiting for your OK")), 4_000, output.text);
+    await waitFor(() => /▣ waiting for your OK · pause 1 item/u.test(lastLineWith(output.text(), "waiting for your OK")), 4_000, output.text);
     expect(lastLineWith(output.text(), "waiting for your OK")).not.toContain("✓");
 
     // An older desktop's frame: no words, no call id. Generic words, its own row.
     progress({ type: "tool.complete", stage: "tool", message: RAW_LIST, toolId: "", name: RAW_LIST, status: "ok" } as never);
     await waitFor(() => lastLineWith(output.text(), "listing sample rows") !== "", 4_000, output.text);
-    expect(lastLineWith(output.text(), "checking the catalog")).toMatch(/✓ 3 rows/u);
+    expect(lastLineWith(output.text(), "checking the catalog")).toMatch(/✓ checking the catalog · 3 rows/u);
 
     const drawn = stripAnsi(output.text());
     expect(drawn).not.toMatch(/mcp__|sample_app|"level"/u);

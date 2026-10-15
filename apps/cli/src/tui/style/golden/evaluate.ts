@@ -37,25 +37,44 @@ export type ScreenRenderer = (fixture: R4ScreenFixture, cols: number) => string;
  * goldens are 69 wide (r4's details pane at 100 cols, as drawn). They are
  * drawn at 69 cols, where the one column is 69 wide, so a card r4 draws wider
  * than its pane (N2) is not cut by the 100-col frame.
+ *
+ * `sideBySide`: the region is r4's two-column chrome (the key bar's `tab
+ * switch side`, the Steps strip). Since the one-column default (2026-10-15) a
+ * turn is two columns only when it asks, so the screen is drawn with its
+ * question asking for side by side (`askingSideBySide`).
  */
-export const REGION_SCREENS: Readonly<Record<string, { screen: string; cols: number }>> = {
+export const REGION_SCREENS: Readonly<Record<string, { screen: string; cols: number; sideBySide?: true }>> = {
   "region-topbar-ok": { screen: "boot", cols: 100 },
   "region-topbar-narrow-60": { screen: "boot", cols: 60 },
   "region-topbar-not-connected": { screen: "flow-numbers-05-not-connected", cols: 100 },
   "region-rule": { screen: "boot", cols: 100 },
   "region-composer-idle": { screen: "boot", cols: 100 },
   "region-composer-busy": { screen: "flow-pause-02-working", cols: 100 },
-  "region-keybar-numbers": { screen: "view-01-numbers", cols: 100 },
-  "region-keybar-busy": { screen: "flow-pause-02-working", cols: 100 },
-  "region-keybar-approval-pause": { screen: "flow-pause-01-needs-your-ok", cols: 100 },
-  "region-keybar-approval-email": { screen: "flow-email-01-needs-your-ok", cols: 100 },
-  "region-keybar-done-pause": { screen: "flow-pause-03-done", cols: 100 },
-  "region-keybar-quiet": { screen: "view-12-quiet", cols: 100 },
-  "region-steps-two": { screen: "view-06-change", cols: 100 },
+  "region-keybar-numbers": { screen: "view-01-numbers", cols: 100, sideBySide: true },
+  "region-keybar-busy": { screen: "flow-pause-02-working", cols: 100, sideBySide: true },
+  "region-keybar-approval-pause": { screen: "flow-pause-01-needs-your-ok", cols: 100, sideBySide: true },
+  "region-keybar-approval-email": { screen: "flow-email-01-needs-your-ok", cols: 100, sideBySide: true },
+  "region-keybar-done-pause": { screen: "flow-pause-03-done", cols: 100, sideBySide: true },
+  "region-keybar-quiet": { screen: "view-12-quiet", cols: 100, sideBySide: true },
+  "region-steps-two": { screen: "view-06-change", cols: 100, sideBySide: true },
   "region-card-needs-ok": { screen: "flow-pause-01-needs-your-ok", cols: 69 },
   "region-card-done-green": { screen: "flow-pause-03-done", cols: 69 },
   "region-table-numbers-100": { screen: "view-01-numbers", cols: 100 }
 };
+
+/**
+ * The fixture with its question asking for two columns (`chat-layout.ts`
+ * `asksSideBySide`): r4's two-column layout, drawn on request since the
+ * one-column default. Its own screen id, so it never shares a cached draw.
+ */
+export function askingSideBySide(fixture: R4ScreenFixture): R4ScreenFixture {
+  return fixture.turn
+    ? { ...fixture, screen: `${fixture.screen}+side-by-side`, turn: { ...fixture.turn, question: `${fixture.turn.question}, side by side` } }
+    : fixture;
+}
+
+/** r4's quiet view (view-12): a view that takes the right pane of a turn asked side by side and says nothing of its own. */
+const QUIET_VIEWS = () => loadR4Fixture("view-12-quiet").turn!.views;
 
 /** Line regions as wide as the window: found at column 0 only (a card or a table may sit inside a pane). */
 const FULL_WIDTH_REGION = /^region-(topbar|rule|composer|keybar|steps)/u;
@@ -130,7 +149,8 @@ export class GoldenEvaluator {
       out.problems.push(where ? "golden has no rows and no data assertion" : `no screen is mapped for ${id} (REGION_SCREENS)`);
       return out;
     }
-    const screen = this.screen(loadR4Fixture(where.screen), where.cols);
+    const fixture = loadR4Fixture(where.screen);
+    const screen = this.screen(where.sideBySide ? askingSideBySide(fixture) : fixture, where.cols);
     out.regions.push(compareRegion(screen, golden.lines, id.replace(/^region-/u, ""), { anchored: FULL_WIDTH_REGION.test(id) }));
     out.pass = out.regions.every((result) => result.verdict === "MATCH");
     return out;
@@ -228,15 +248,16 @@ function containsCells(screen: readonly SegmentLine[], needle: SegmentLine): boo
 const show = (line: SegmentLine | undefined) => JSON.stringify(line ?? []);
 
 const DATA_CHECKS: Readonly<Record<string, DataCheck>> = {
-  /** One Steps row per status, at 100 cols: the header and the row, exactly. */
+  /** One Steps row per status, at 100 cols: the header and the row, exactly (the strip of a turn that asks for two columns). */
   "region-steps": (golden, evaluator) => {
     const cases = golden.data as { status: R4Step["status"]; header: SegmentLine; line: SegmentLine }[];
     const problems: string[] = [];
     for (const item of cases) {
       const fixture: R4ScreenFixture = {
         ...SESSION_ONLY(`region-steps-${item.status}`),
+        // Asked side by side, with r4's quiet view for the right pane: the Steps strip is two-column chrome.
         turn: {
-          question: "q", answer: "a", views: [],
+          question: "q, side by side", answer: "a", views: QUIET_VIEWS(),
           steps: [{ label: "checking your campaigns", start: 0, end: 1, result: "result", status: item.status }]
         }
       };

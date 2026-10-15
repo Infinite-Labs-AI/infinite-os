@@ -25,6 +25,8 @@ export interface GoldenFile {
   state: string | null;
   cols: number;
   derived?: boolean;
+  /** Absent: r4 as drawn. Set on a frame re-drawn from the CLI's own renderer (the one-column default, 2026-10-15). */
+  drawn_by?: string;
   flow_kind?: string;
   flow_step?: number;
   layout?: { wide: boolean; answer_w: number; separator: string; details_w: number };

@@ -5,8 +5,9 @@
 // session builds it when the app answers the no: the card of
 // flow-pause-01 (Needs your OK), the decline's answer as /v1/confirm sends it
 // (the receipt view plus the app's two lines), through `settleConfirmOutcome`
-// and `messagesAfterDecline`. That frame must BE r4's dismissed golden at 60,
-// 100 and 160 columns, and say the app's words at 140.
+// and `messagesAfterDecline`. That frame must BE the dismissed golden at 60,
+// 100 and 160 columns (drawn in one column since 2026-10-15), and say the
+// app's words at 140.
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
 const pinnedEnv = vi.hoisted(() => {
@@ -108,7 +109,7 @@ describe("after n, the line over the dismissed card is the app's words after a n
   });
 
   for (const cols of [60, 100, 160]) {
-    it(`matches r4 ${DISMISSED_SCREEN} at ${cols} columns`, () => {
+    it(`matches ${DISMISSED_SCREEN} at ${cols} columns`, () => {
       const evaluation = evaluator.evaluate(loadGolden(`${DISMISSED_SCREEN}--c${cols}`));
       expect(evaluation.pass, firstProblem(evaluation)).toBe(true);
     });
@@ -117,13 +118,12 @@ describe("after n, the line over the dismissed card is the app's words after a n
   for (const cols of [60, 100, 140]) {
     it(`at ${cols} columns the line reads "${LEFT_RUNNING}" in the same frame as the dismissed card`, () => {
       const lines = ansiToSegmentLines(draw(loadR4Fixture(DISMISSED_SCREEN), cols)).map((line) => textOf(line).trimEnd());
-      // From 80 columns the card sits right of the answer (`│`), on the same rows.
-      const caption = lines.findIndex((line) => line.split("│")[0]!.trimEnd() === `∞ ${LEFT_RUNNING}`);
+      // One column at every width (the one-column default): the card under the answer.
+      const caption = lines.indexOf(`∞ ${LEFT_RUNNING}`);
       const card = lines.findIndex((line) => line.includes(`✕ ${DISMISSED_WORDS}`));
       expect(caption, lines.join("\n")).toBeGreaterThan(-1);
-      expect(card, lines.join("\n")).toBeGreaterThan(-1);
-      expect(lines.some((line) => line.includes("│")), `${cols} columns is drawn ${cols >= 80 ? "side by side" : "in one column"}`)
-        .toBe(cols >= 80);
+      expect(card, lines.join("\n")).toBeGreaterThan(caption);
+      expect(lines.some((line) => line.includes(" │ ") && !line.trimStart().startsWith("│")), `${cols} columns is one column`).toBe(false);
       expect(lines.join("\n")).not.toContain("once you say OK");
     });
   }
