@@ -25,13 +25,12 @@ Install through npm:
 npx infinite-os@latest
 ```
 
-The currently published npm bootstrap (`infinite-os@1.0.1`) downloads and verifies the signed and
-notarized macOS Desktop app served by `infinite.fast/download`, then installs or updates
-`Infinite.app` in `/Applications`. The source branch contains the reviewed onboarding URI and
-Terminal wait handoff, but that behavior is release-gated until the matching Desktop and npm
-releases are live.
+The installer (`infinite-os@1.0.2`, release-gated until it is published) opens
+[infinite.fast/get-started](https://infinite.fast/get-started) in your browser: the signed and
+notarized macOS Desktop app downloads right after you sign up there. If `Infinite.app` is already
+installed, it starts the bundled `infinite` command instead (the app updates itself).
 
-You can also **[download the signed DMG directly](https://infinite.fast/download)**.
+You can also **[sign up and download the signed app in your browser](https://infinite.fast/get-started)**.
 
 Finish setup in the app: sign in with an email code, tell Infinite about your business, create or
 connect your workspace, and connect Codex or Claude. The app owns setup and installs its bundled
@@ -44,20 +43,11 @@ After setup, use the same agent in both places:
 
 Same account. Same workspace. Same agent.
 
-The installer verifies the production bundle identity, Developer ID team, signature, and
-notarization before placing `Infinite.app` in `/Applications`. It keeps the same or a newer verified
-app, upgrades an older verified app, and restores the prior app if an upgrade cannot finish safely.
-
 ### Installer safety
 
-- The Desktop download is an ordinary `GET` through `infinite.fast/download` and follows the public
-  signed-release redirect.
-- Installation happens through a unique same-volume staging directory and becomes visible only after
-  the staged app passes verification again.
-- An existing app that does not match Infinite's production signature is never overwritten.
-- Existing `~/.local/bin/infinite` commands—including the exact legacy wrapper—are preserved. The
-  launcher-safe Desktop release owns their atomic migration without clobbering unrelated commands.
-- Temporary mounts, downloads, and staging directories are cleaned up on success or failure.
+- The installer downloads and installs nothing itself: it only opens the sign-up page (or prints its
+  link when there is no interactive terminal, or with `--no-open`).
+- The app comes from the browser download after sign-up: the Apple-signed, notarized release.
 
 ## What ships in Desktop
 

@@ -180,6 +180,11 @@ export async function main(args = process.argv.slice(2), deps = {}) {
   const isRegularFile = deps.isRegularFile ?? defaultIsRegularFile;
   const isExecutableFile = deps.isExecutableFile ?? defaultIsExecutableFile;
 
+  // 2026-10-16: the installer no longer downloads the app; it opens infinite.fast/get-started, where the
+  // download starts after sign-up. No Infinite.app yet is therefore the normal first run: nothing to start.
+  if (!isRegularFile(paths.executable) && !isRegularFile(paths.cli)) {
+    return installerStatus;
+  }
   if (
     !isRegularFile(paths.executable) ||
     !isRegularFile(paths.cli) ||

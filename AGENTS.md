@@ -72,8 +72,9 @@ secret-gated check can't run.
 `npx infinite-os@latest`. That zero-dependency `packages/desktop-installer` package is the sole
 customer install command we advertise, and it delegates to the bundled copy of `scripts/install.sh`.
 `scripts/install.sh` is the canonical internal shell implementation and package payload, not a
-second customer entrypoint. It downloads the signed/notarized app through
-`GET https://infinite.fast/download`. Desktop bundles the daemon, embedded database, and CLI. Never
+second customer entrypoint. Since 2026-10-16 the download sits behind sign-up, so it opens
+`https://infinite.fast/get-started?cta=cli` in the browser and the signed/notarized app downloads
+there after sign-up (it never curls a DMG). Desktop bundles the daemon, embedded database, and CLI. Never
 turn the public installer back into a source checkout, Docker bootstrap, or Linux lane.
 `infinite-tag` remains a separate website instrumentation package.
 
