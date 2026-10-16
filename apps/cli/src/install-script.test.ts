@@ -36,16 +36,20 @@ describe("scripts/install.sh (Infinite Desktop installer)", () => {
   const script = readFileSync(installShPath, "utf8");
   const bundledInstaller = readFileSync(join(packageRoot, "install.sh"), "utf8");
 
-  it("downloads the canonical Desktop product through an analytics-counted GET", () => {
-    expect(script).toContain('DOWNLOAD_URL="https://infinite.fast/download"');
+  // 2026-10-16: the Mac download sits behind sign-up (infinite.fast/download serves the app only to a browser
+  // that just signed up), so the installer opens the sign-up page instead of downloading a DMG. Behaviour is
+  // proven end to end by scripts/ci/install-smoke.sh; these pin the contract in the source.
+  it("opens the sign-up page and never downloads or installs anything itself", () => {
+    expect(script).toContain(
+      'SIGNUP_URL="https://infinite.fast/get-started?cta=cli&utm_source=${UTM_SOURCE}&utm_medium=cli&utm_campaign=infinite_os_install"'
+    );
+    expect(script).toContain('printf "Sign up to download Infinite: opening infinite.fast/get-started…\\n"');
+    expect(script).toContain('open "$SIGNUP_URL"');
+    expect(script).toContain('printf "Sign up to download Infinite: %s\\n" "$SIGNUP_URL"');
     expect(script).toContain(`INSTALLER_VERSION="${installerVersion}"`);
-    expect(script).toContain('INSTALLER_USER_AGENT="Infinite-Installer/${INSTALLER_VERSION}"');
-    expect(script).toContain('--user-agent "$INSTALLER_USER_AGENT"');
-    expect(script).toContain('--output "$DMG_PATH" "$DOWNLOAD_REQUEST_URL"');
-    expect(script).toContain('INFINITE_ONBOARDING_URI="infinite://onboarding"');
     expect(bundledInstaller).toBe(script);
-    expect(script).not.toMatch(/curl[^\n]+(?:--head|\s-I(?:\s|$))/);
-    expect(script).not.toMatch(/Content-Length|content-length|sleep[^\n]+%/i);
+    expect(script).not.toMatch(/\bcurl\b|hdiutil|codesign|spctl|ditto|Infinite-Installer|DMG_PATH/);
+    expect(script).not.toMatch(/https:\/\/infinite\.fast\/download/);
   });
 
   it("classifies the npm caller before Bash stdin turns into the installer pipe", () => {
@@ -53,89 +57,22 @@ describe("scripts/install.sh (Infinite Desktop installer)", () => {
     expect(script).toContain('case "${INFINITE_INSTALL_INTERACTIVE:-}" in');
     expect(script).toContain("INTERACTIVE_OUTPUT=true");
     expect(script).toContain("INTERACTIVE_OUTPUT=false");
-    expect(script).toContain('OPEN_APP=false');
+    expect(script).toContain('[ "$INTERACTIVE_OUTPUT" = true ] || OPEN_BROWSER=false');
     expect(script).toContain('[ -t 0 ] && [ -t 1 ] && [ -t 2 ]');
   });
 
-  it("shows truthful download education, receipts, and the exact onboarding handoff", () => {
-    expect(script).toContain("print_download_education()");
-    expect(script).toContain("While Infinite downloads");
-    expect(script).toContain("Tell Infinite about your business");
-    expect(script).toContain("Sign in with an email code");
-    expect(script).toContain("Create or connect your workspace");
-    expect(script).toContain("Connect Codex or Claude");
-    expect(script).toContain('APP       Press ⌘L');
-    expect(script).toContain('TERMINAL  Run infinite "…"');
-    expect(script).toContain("Same account. Same workspace. Same agent.");
-    expect(script).toContain("download_release()");
-    expect(script).toContain('log_success "Download complete"');
-    expect(script).toContain('log_success "Apple signature verified"');
-    expect(script).toContain('log_success "Notarization verified"');
-    expect(script).toContain('log_success "Infinite installed in Applications"');
-    expect(script).toContain("supports_osc8()");
-    expect(script).toContain("print_onboarding_handoff()");
-    expect(script).toContain("Finish setup in the Infinite app");
-    expect(script).toContain("Open Infinite");
-    expect(script).toContain("Opening Infinite automatically");
-    expect(script).toContain("Open it when you are ready.");
-    expect(script).toContain("open 'infinite://onboarding'");
-    expect(script).toContain('open -a "$TARGET_APP" "$INFINITE_ONBOARDING_URI"');
-    expect(script).not.toMatch(/trial|self[- ]host|infinite local|local engine|Docker/i);
+  it("attributes the npm and GitHub entry points, and keeps --app-dir / --no-open / --help", () => {
+    expect(script).toContain('npm) UTM_SOURCE="npm" ;;');
+    expect(script).toContain('*) UTM_SOURCE="github" ;;');
+    expect(script).toContain("--app-dir PATH");
+    expect(script).toContain("--no-open) OPEN_BROWSER=false; shift ;;");
+    expect(script).toContain("Infinite for macOS installer");
   });
 
-  it("keeps interactive progress on the foreground GET and non-interactive output quiet", () => {
-    expect(script).toMatch(/if \[ "\$INTERACTIVE_OUTPUT" = true \]; then[\s\S]*curl --fail --location --retry 3/);
-    expect(script).toMatch(/else[\s\S]*curl --fail --location --silent --show-error --retry 3/);
-    expect(script).not.toContain("& curl");
-    expect(script).not.toContain("curl &");
-  });
-
-  it("is macOS-only and does not bootstrap the retired Docker lane", () => {
-    expect(script).toContain('OS="$(uname -s)"');
-    expect(script).toContain('if [ "$OS" != "Darwin" ]');
-    expect(script).not.toContain("Linux)");
-    expect(script).not.toContain("docker");
-    expect(script).not.toContain("infinite local setup");
-  });
-
-  it("verifies the signed, notarized production app identity before installing", () => {
-    expect(script).toContain(
-      'EXPECTED_BUNDLE_ID="inc.ultima.infiniteos-desktop"'
-    );
-    expect(script).toContain('EXPECTED_TEAM_ID="4659K3678P"');
-    expect(script).toMatch(/codesign.*--verify.*--deep.*--strict/);
-    expect(script).toMatch(/spctl.*--assess.*--type execute/);
-    expect(script).toContain('hdiutil verify "$DMG_PATH"');
-    expect(script).toContain("--proto '=https'");
-    expect(script).toContain("--proto-redir '=https'");
-  });
-
-  it("only migrates the legacy installer-owned CLI wrapper", () => {
-    expect(script).toContain(
-      "# Infinite launcher shim — installed by scripts/install.sh."
-    );
-    expect(script).toContain("legacy installer-owned");
-    expect(script).toContain("preserving it");
-  });
-
-  it("upgrades only older verified apps with no-clobber commit and rollback", () => {
-    expect(script).toContain('MIN_SAFE_DESKTOP_VERSION="');
-    expect(script).toContain("CFBundleShortVersionString");
-    expect(script).toContain('mv -n "$STAGED_APP" "$APP_DIR/"');
-    expect(script).toContain("rollback_upgrade");
-    expect(script).toContain("quit_running_infinite_apps");
-    expect(script).toContain("Contents/Resources/daemon/daemon.mjs");
-    expect(script).toContain(
-      'if [ "$UPGRADE" = true ]; then quit_running_infinite_apps; fi'
-    );
-  });
-
-  it("rejects source and destination symlinks and cleans up on every terminating signal", () => {
-    expect(script).toContain('[ -L "$SOURCE_APP" ]');
-    expect(script).toContain('[ -L "$TARGET_APP" ]');
-    expect(script).toContain("trap 'exit 129' HUP");
-    expect(script).toContain("trap 'exit 130' INT");
-    expect(script).toContain("trap 'exit 143' TERM");
+  it("leaves an installed app alone so the npm wrapper can start its bundled CLI", () => {
+    expect(script).toContain('if [ -d "$APP_DIR/Infinite.app" ] && [ ! -L "$APP_DIR/Infinite.app" ]; then');
+    expect(script).toContain("Infinite is already installed at");
+    expect(script).not.toMatch(/trial|self[- ]host|infinite local|local engine|Docker|docker/i);
   });
 
   it("documents npx as the sole customer install command in public repo surfaces", () => {
@@ -147,10 +84,11 @@ describe("scripts/install.sh (Infinite Desktop installer)", () => {
 
     expect(commandBlocks).toEqual(["npx infinite-os@latest"]);
     expect(installSection).toContain(
-      "[download the signed DMG directly](https://infinite.fast/download)"
+      "[sign up and download the signed app in your browser](https://infinite.fast/get-started)"
     );
+    expect(installSection).not.toContain("infinite.fast/download");
     expect(installSection).toMatch(/signed(?:\s+and\s+notarized)?\s+(?:Mac|macOS|Desktop)/i);
-    expect(installSection).toContain("infinite-os@1.0.1");
+    expect(installSection).toContain("infinite-os@1.0.2");
     expect(installSection).toContain("release-gated");
     expect(installSection).not.toContain("then opens");
     expect(installSection).toMatch(/sign in/i);
@@ -255,7 +193,8 @@ describe("infinite-os npm bootstrap package", () => {
   it("documents setup through the app without trial, local-engine, or Docker fallback copy", () => {
     const readme = readFileSync(join(packageRoot, "README.md"), "utf8");
     expect(readme).toContain("npx infinite-os@latest");
-    expect(readme).toContain("infinite-os@1.0.1");
+    expect(readme).toContain("infinite-os@1.0.2");
+    expect(readme).toContain("https://infinite.fast/get-started");
     expect(readme).toContain("not promised by `@latest`");
     expect(readme).not.toContain("open 'infinite://onboarding'");
     expect(readme).toContain("Press `⌘L`");

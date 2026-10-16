@@ -240,6 +240,27 @@ describe("infinite-os npm wrapper handoff", () => {
     expect(childArgs).toEqual([[]]);
   });
 
+  // 2026-10-16: the installer only opens the sign-up page; the app arrives later from the browser download.
+  // No Infinite.app at all is the normal first run, not a broken install: exit with the installer's status.
+  it("returns the installer's status quietly when no Infinite.app is installed yet (first run)", async () => {
+    const { main } = await loadWrapperModule();
+    const errors: string[] = [];
+    const start = vi.fn(async () => ({ code: 0, signal: null }));
+
+    const code = await main(
+      [],
+      deps({
+        isRegularFile: () => false,
+        runEmbeddedCli: start,
+        writeErr: (text) => errors.push(text)
+      })
+    );
+
+    expect(code).toBe(0);
+    expect(start).not.toHaveBeenCalled();
+    expect(errors).toEqual([]);
+  });
+
   it("prints canonical npx recovery and skips the CLI when the embedded executable is missing", async () => {
     const { main } = await loadWrapperModule();
     const errors: string[] = [];

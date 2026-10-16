@@ -9,12 +9,12 @@ npx infinite-os@latest
 Infinite is an Apple-silicon macOS app. The Desktop download includes its signed runtime,
 database, and `infinite` CLI.
 
-The currently published npm artifact (`infinite-os@1.0.1`) includes the exact reviewed installer
-published from the [`Infinite-Labs-AI/infinite-os`](https://github.com/Infinite-Labs-AI/infinite-os)
-repository. It downloads the Desktop release through `https://infinite.fast/download`, verifies the
-production bundle identifier, Developer ID team, signature, and notarization, then installs or
-updates `Infinite.app`. The reviewed onboarding URI and Terminal wait handoff in this source branch
-are not promised by `@latest` until the matching Desktop and npm releases are live.
+The npm artifact (`infinite-os@1.0.2`) includes the exact reviewed installer published from the
+[`Infinite-Labs-AI/infinite-os`](https://github.com/Infinite-Labs-AI/infinite-os) repository. The
+Infinite download sits behind sign-up, so the installer opens `https://infinite.fast/get-started` in
+your browser; the signed and notarized app downloads right after you sign up. With `Infinite.app`
+already installed it starts the app's bundled `infinite` command. This behavior is
+not promised by `@latest` until `1.0.2` is published.
 
 Finish setup in the app: tell Infinite about your business, sign in with an email code, create or
 connect your workspace, and connect Codex or Claude.

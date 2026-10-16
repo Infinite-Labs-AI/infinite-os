@@ -18,7 +18,8 @@ const PACKAGE_NAME = "infinite-os";
 const REGISTRY_ORIGIN = "https://registry.npmjs.org";
 const REPOSITORY_URL = "https://github.com/Infinite-Labs-AI/infinite-os";
 const PUBLISH_WORKFLOW_PATH = ".github/workflows/publish-infinite-os.yml";
-const EXPECTED_INSTALLER_URL = "DOWNLOAD_URL=\"https://infinite.fast/download\"";
+// 2026-10-16: the installer opens the sign-up page (the download sits behind sign-up) instead of fetching a DMG.
+const EXPECTED_INSTALLER_URL = "SIGNUP_URL=\"https://infinite.fast/get-started?cta=cli&";
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(scriptDir, "..", "..");
@@ -208,12 +209,8 @@ function runNpmSignatureAudit(version) {
 }
 
 function validateInstallerVersion(installer, version) {
-  const literalUserAgent = `INSTALLER_USER_AGENT="Infinite-Installer/${version}"`;
-  const derivedUserAgent =
-    installer.includes(`INSTALLER_VERSION="${version}"`) &&
-    installer.includes('INSTALLER_USER_AGENT="Infinite-Installer/${INSTALLER_VERSION}"');
-  if (!installer.includes(literalUserAgent) && !derivedUserAgent) {
-    reject("installer User-Agent does not match the registry package version");
+  if (!installer.includes(`INSTALLER_VERSION="${version}"`)) {
+    reject("installer version does not match the registry package version");
   }
 }
 
@@ -270,7 +267,7 @@ function packAndValidate(version, expectedIntegrity) {
     const binPath = join(packageRoot, "bin", "infinite-os.mjs");
     const installer = readFileSync(installerPath, "utf8");
     if (!installer.includes(EXPECTED_INSTALLER_URL)) {
-      reject("installer download URL changed");
+      reject("installer sign-up URL changed");
     }
     validateInstallerVersion(installer, version);
     validateInstallerHelp(installerPath);
