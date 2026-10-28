@@ -1,16 +1,15 @@
--- Two retention functions for the cloud engine's daily posthog-raw-retention run (approved by River,
--- 2026-10-28): delete the PostHog raw copies the 90-day rule already retired, and the
--- sync_batch_records bookkeeping of syncs that finished. Nothing is deleted when this file runs;
--- the 1bu-1 Trigger task calls both functions in bounded batches. Local engines have no retention
--- job and are unaffected.
+-- Two retention functions for the cloud engine's daily raw-retention job: delete the PostHog raw
+-- copies the 90-day rule already retired, and the sync_batch_records bookkeeping of syncs that
+-- finished. Nothing is deleted when this file runs; the retention job calls both functions in
+-- bounded batches. Local engines have no retention job and are unaffected.
 --
 -- ── 1. prune_posthog_raw_copies(workspace, source, limit) ───────────────────────────────────────
 -- prune_posthog_raw (0064/0065) deletes posthog_event_truth rows below the retention floor and
 -- records where raw ends in posthog_prune_watermarks. It never touched raw_records, where every
--- PostHog event keeps its full payload copy forever: on 2026-10-28 the cloud held 1.15M of them
--- (1.47 GB of payload), 169k already without a truth row. Nothing reads a PostHog raw copy: the
--- rollups and every PostHog view read posthog_event_truth / the 0063 rollups, and the 1bu-1 readers
--- of raw_records are Meta- and Stripe-only.
+-- PostHog event keeps its full payload copy forever, including the events whose truth row the
+-- prune already deleted. Nothing reads a PostHog raw copy: the rollups and every PostHog view read
+-- posthog_event_truth / the 0063 rollups, and the known raw_records readers (Meta entity history,
+-- Stripe MRR movements) never read a PostHog row.
 --
 -- The rule is the truth rule, applied to the copies: delete a source's PostHog raw rows whose event
 -- UTC day is below the source's prune watermark — the days whose truth is already deleted and whose
@@ -40,9 +39,9 @@
 -- foreign-key check; the call then rolls back whole and the next one retries.
 --
 -- ── 2. prune_finished_sync_batch_records(limit) ─────────────────────────────────────────────────
--- One sync_batch_records row per synced record, never deleted: 2.59M rows, 0.9 GB on the cloud on
--- 2026-10-28, growing about 0.5 GB a month. Every reader is scoped to the batch or run that is
--- still in progress (infinite-os packages/connectors/src/index.ts, 2026-10-28):
+-- One sync_batch_records row per synced record, never deleted, so the table grows with every sync
+-- forever. Every reader is scoped to the batch or run that is still in progress
+-- (packages/connectors/src/index.ts):
 --   - the per-chunk status flip in syncExtractedBatch: its own batch_id, while it loads;
 --   - the GA4 snapshot replacement (pruneGa4FactWindow): its own sync_run_id, inside that run's
 --     CLOSE transaction, which is the one that marks the batch finished;

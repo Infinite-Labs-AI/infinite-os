@@ -4,14 +4,14 @@
 -- floor). Deleting a referenced row makes Postgres check EVERY referencing table for a row that
 -- still points at it, once per deleted row. 34 tables reference raw_records(id), and only
 -- sync_batch_records had an index on its column (0074). Without these, each deleted raw row is a
--- full scan of each of the other 33 tables: on the shared cloud engine that includes
--- posthog_event_truth (1.3 GB, about 950k rows) and ga4_report_snapshot_fact (53 MB), so deleting
--- even a few thousand raw rows would read terabytes. With them, each check is one index probe.
+-- full scan of each of the other 33 tables, including posthog_event_truth and the GA4 fact tables,
+-- which on a busy engine are the largest tables after raw_records itself; deleting a few thousand
+-- raw rows would read each of them a few thousand times. With them, each check is one index probe.
 --
 -- One index per foreign key, on the referencing column alone, named <table>_raw_record_id_idx.
 -- Most of these tables are small or empty (Stripe, Meta, Shopify, X); their indexes cost a page or
--- two. The two that cost real space on the cloud engine are posthog_event_truth (about 50 MB) and
--- the PostHog day index below.
+-- two. The two that cost real space are posthog_event_truth's (one entry per event) and the PostHog
+-- day index below (one entry per PostHog raw row).
 --
 -- raw_records_posthog_event_day_idx: how 0088 finds the raw copies to delete. A PostHog raw row's
 -- event time is in its payload (payload->>'occurredAt', always the connector's toISOString(), so
