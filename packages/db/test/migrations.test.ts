@@ -100,7 +100,9 @@ describe("Infinite OS migration stack", () => {
       "0083_remove_dead_x_metrics.sql",
       "0084_meta_local_publishing.sql",
       "0085_meta_ads_daily_breakdowns_and_hourly.sql",
-      "0086_meta_ads_ad_hourly.sql"
+      "0086_meta_ads_ad_hourly.sql",
+      "0087_raw_records_foreign_key_indexes.sql",
+      "0088_posthog_raw_copies_and_batch_records_retention.sql"
     ]);
   });
 
@@ -1114,7 +1116,9 @@ describe("Infinite OS migration stack", () => {
       "0083_remove_dead_x_metrics.sql",
       "0084_meta_local_publishing.sql",
       "0085_meta_ads_daily_breakdowns_and_hourly.sql",
-      "0086_meta_ads_ad_hourly.sql"
+      "0086_meta_ads_ad_hourly.sql",
+      "0087_raw_records_foreign_key_indexes.sql",
+      "0088_posthog_raw_copies_and_batch_records_retention.sql"
     ]);
   });
 
@@ -1288,6 +1292,38 @@ describe("Infinite OS migration stack", () => {
     expect(sql).not.toContain("drop ");
     expect(sql).not.toContain("alter ");
     expect(sql).not.toContain("delete from");
+  });
+
+  it("indexes every raw_records foreign key and the PostHog raw copies by event day, transaction-safe (0087)", () => {
+    const migration = loadMigrations().find((candidate) => candidate.id === "0087_raw_records_foreign_key_indexes.sql");
+    const sql = (migration?.sql ?? "").toLowerCase().replace(/--[^\n]*/g, "").replace(/\s+/g, " ").trim();
+    expect(sql.match(/create index if not exists \w+_raw_record_id_idx on \w+ \(raw_record_id\);/g)).toHaveLength(33);
+    expect(sql).toContain(
+      "create index if not exists raw_records_posthog_event_day_idx on raw_records (source_id, (left(payload ->> 'occurredat', 10))) include (id) where object_type = 'posthog_event';"
+    );
+    // The runner wraps each file in a transaction: concurrently would be an error there.
+    expect(sql).not.toContain("concurrently");
+    expect(sql).not.toMatch(/drop |alter |delete from|update /);
+  });
+
+  it("deletes PostHog raw copies only below the prune watermark and batch records only of finished batches, bounded (0088)", () => {
+    const migration = loadMigrations().find(
+      (candidate) => candidate.id === "0088_posthog_raw_copies_and_batch_records_retention.sql"
+    );
+    const sql = (migration?.sql ?? "").toLowerCase().replace(/--[^\n]*/g, "").replace(/\s+/g, " ").trim();
+    expect(sql).toContain("create or replace function prune_posthog_raw_copies( p_workspace_id text, p_source_id text, p_limit integer ) returns bigint");
+    expect(sql).toContain("create or replace function prune_finished_sync_batch_records(p_limit integer) returns bigint");
+    // Bound by the watermark (what prune_posthog_raw already retired), compared as YYYY-MM-DD text.
+    expect(sql).toContain("from posthog_prune_watermarks");
+    expect(sql).toContain("left(r.payload ->> 'occurredat', 10) < to_char(v_before, 'yyyy-mm-dd')");
+    expect(sql).toContain("limit p_limit");
+    expect(sql).toContain("if p_limit < 1 or p_limit > 10000 then");
+    expect(sql).toContain("p_limit < 1 or p_limit > 50000");
+    expect(sql).toContain("sb.finished_at < now() - interval '1 day'");
+    // The existing truth prune (0065) is not redefined.
+    expect(sql).not.toContain("function prune_posthog_raw(");
+    expect(sql).not.toContain("refresh_posthog_daily_rollups");
+    expect(sql).not.toMatch(/drop |alter |truncate/);
   });
 
   it("adds ad hourly delivery with actions and a per-day receipt, idempotently, touching nothing else (0086)", () => {

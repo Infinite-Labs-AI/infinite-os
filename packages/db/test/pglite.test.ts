@@ -88,9 +88,9 @@ describe("pglite migration + query path (real WASM Postgres)", () => {
     rmSync(dataDir, { recursive: true, force: true });
   });
 
-  it("applied ALL 86 migrations on first boot and is idempotent on a re-run", async () => {
-    expect(loadMigrations().length).toBe(86);
-    expect(firstRun).toHaveLength(86);
+  it("applied ALL 88 migrations on first boot and is idempotent on a re-run", async () => {
+    expect(loadMigrations().length).toBe(88);
+    expect(firstRun).toHaveLength(88);
     expect(firstRun).toContain("0001_control_plane.sql");
     expect(firstRun).toContain("0006_security_roles.sql");
     expect(firstRun).toContain("0036_chat_sessions_desktop_surface.sql");
@@ -139,19 +139,21 @@ describe("pglite migration + query path (real WASM Postgres)", () => {
     expect(firstRun).toContain("0081_meta_ads_window_total_dimension.sql");
     expect(firstRun).toContain("0082_stripe_checkout_sessions.sql");
     expect(firstRun).toContain("0083_remove_dead_x_metrics.sql");
+    expect(firstRun).toContain("0087_raw_records_foreign_key_indexes.sql");
+    expect(firstRun).toContain("0088_posthog_raw_copies_and_batch_records_retention.sql");
 
     // Idempotent: a second boot re-applies zero from the applied-ID snapshot.
     const secondRun = await runMigrations(url);
     expect(secondRun).toEqual([]);
   });
 
-  it("created the schema_migrations ledger with all 86 rows", async () => {
+  it("created the schema_migrations ledger with all 88 rows", async () => {
     const ledger = await db.query<{ id: string }>(
       "select id from schema_migrations order by id"
     );
-    expect(ledger).toHaveLength(86);
+    expect(ledger).toHaveLength(88);
     expect(ledger[0]?.id).toBe("0001_control_plane.sql");
-    expect(ledger.at(-1)?.id).toBe("0086_meta_ads_ad_hourly.sql");
+    expect(ledger.at(-1)?.id).toBe("0088_posthog_raw_copies_and_batch_records_retention.sql");
   });
 
   it("0083 leaves no X metric or view advertised, keeps the X tables, and re-applies as a no-op", async () => {
@@ -864,6 +866,287 @@ describe("pglite migration + query path (real WASM Postgres)", () => {
       { source_id: "src_ph_skip_empty", pruned_before: pBefore },
       { source_id: "src_ph_skip_retained", pruned_before: pBefore }
     ]);
+  });
+
+  it("0087 indexes every foreign key into raw_records, so deleting a raw row is one probe per table", async () => {
+    // A raw_records delete checks every referencing table for a row still pointing at it. Without
+    // an index on the referencing column, that check is a full scan of the table per deleted row.
+    // Generic on purpose: a future table that references raw_records without an index fails here.
+    const unindexed = await db.query<{ fk: string }>(
+      `select c.conrelid::regclass::text || '.' || a.attname as fk
+         from pg_constraint c
+         join pg_attribute a on a.attrelid = c.conrelid and a.attnum = c.conkey[1]
+        where c.contype = 'f'
+          and c.confrelid = 'raw_records'::regclass
+          and not exists (
+            select 1 from pg_index i where i.indrelid = c.conrelid and i.indkey[0] = c.conkey[1]
+          )
+        order by 1`
+    );
+    expect(unindexed).toEqual([]);
+    const referencing = await db.query<{ n: string }>(
+      `select count(*)::text as n from pg_constraint
+        where contype = 'f' and confrelid = 'raw_records'::regclass`
+    );
+    expect(referencing[0]?.n).toBe("34");
+
+    const dayIndex = await db.query<{ indexdef: string }>(
+      `select indexdef from pg_indexes where indexname = 'raw_records_posthog_event_day_idx'`
+    );
+    expect(dayIndex).toHaveLength(1);
+    expect(dayIndex[0]!.indexdef).toMatch(/\(source_id, "left"\(\(payload ->> 'occurredAt'::text\), 10\)\) INCLUDE \(id\)/);
+    expect(dayIndex[0]!.indexdef).toMatch(/WHERE \(object_type = 'posthog_event'::text\)/);
+  });
+
+  it("0088 prunes PostHog raw copies below the watermark, in bounded batches, keeping every row still pointed at", async () => {
+    const WS = "ws_ph_rawcopy";
+    const SRC = "src_ph_rawcopy";
+    const GA4 = "src_ph_rawcopy_ga4";
+    await db.withTransaction(async (tx) => {
+      await tx.ensureWorkspace(WS, "PostHog Raw Copy WS");
+      await tx.ensureFirstPhaseDatasets(WS);
+    });
+    const ds = await db.query<{ id: string }>(
+      `select id from datasets where workspace_id = '${WS}' and key = 'web'`
+    );
+    for (const [id, provider] of [[SRC, "posthog"], [GA4, "google_analytics_4"]] as const) {
+      await db.query(
+        `insert into sources (id, workspace_id, dataset_id, provider, connection_name, account_external_id, status)
+         values ($2, '${WS}', $1, $3, 'conn', $2 || '_acct', 'connected')`,
+        [ds[0]?.id, id, provider]
+      );
+    }
+    const dbDay = async (daysAgo: number) =>
+      (
+        await db.query<{ d: string }>(
+          `select ((now() at time zone 'utc')::date - ${daysAgo})::text as d`
+        )
+      )[0]!.d;
+    const dOld = await dbDay(120);
+    const dLastPruned = await dbDay(91); // the last day below the 90-day watermark
+    const dFloor = await dbDay(90); // the watermark itself: retained
+    const dNew = await dbDay(10);
+
+    // One run, three batches: finished two days ago, finished an hour ago, still running.
+    await db.query(
+      `insert into sync_runs (id, workspace_id, source_id, status) values ('run_rc', '${WS}', '${SRC}', 'succeeded')`
+    );
+    for (const [id, finishedAt] of [
+      ["batch_rc_old", "now() - interval '2 days'"],
+      ["batch_rc_recent", "now() - interval '1 hour'"],
+      ["batch_rc_running", "null"]
+    ] as const) {
+      await db.query(
+        `insert into sync_batches (id, sync_run_id, workspace_id, source_id, status, batch_type, finished_at)
+         values ($1, 'run_rc', '${WS}', '${SRC}', $2, 'posthog_event', ${finishedAt})`,
+        [id, finishedAt === "null" ? "running" : "succeeded"]
+      );
+    }
+    const insertRaw = async (id: string, occurredAt: string, batch = "batch_rc_old", source = SRC) => {
+      await db.query(
+        `insert into raw_records (id, workspace_id, source_id, sync_batch_id, provider, object_type, external_id, payload, source_record_hash)
+         values ($1, '${WS}', $2, 'batch_rc_old', 'posthog', 'posthog_event', 'posthog:' || $1, $3::jsonb, $1)`,
+        [id, source, JSON.stringify({ eventId: id, occurredAt })]
+      );
+      await db.query(
+        `insert into sync_batch_records (id, sync_batch_id, raw_record_id, record_status)
+         values ('sbr_' || $1, $2, $1, 'provider_truth_written')`,
+        [id, batch]
+      );
+    };
+    await insertRaw("rc_old_a", `${dOld}T08:00:00.000Z`);
+    await insertRaw("rc_old_b", `${dOld}T09:00:00.000Z`);
+    await insertRaw("rc_old_c", `${dLastPruned}T23:59:59.999Z`);
+    await insertRaw("rc_old_truth", `${dOld}T10:00:00.000Z`); // its truth row is deleted by the truth prune
+    await insertRaw("rc_old_session", `${dOld}T11:00:00.000Z`);
+    await insertRaw("rc_old_person", `${dOld}T12:00:00.000Z`);
+    await insertRaw("rc_old_late", `${dOld}T13:00:00.000Z`); // a late truth row re-lands on it
+    await insertRaw("rc_old_recent_batch", `${dOld}T14:00:00.000Z`, "batch_rc_recent");
+    await insertRaw("rc_old_running_batch", `${dOld}T15:00:00.000Z`, "batch_rc_running");
+    await insertRaw("rc_floor", `${dFloor}T00:00:00.000Z`);
+    await insertRaw("rc_new", `${dNew}T12:00:00.000Z`);
+
+    await db.query(
+      `insert into posthog_event_truth (id, workspace_id, source_id, raw_record_id, event_id, event_name, occurred_at, properties)
+       values ('phe_rc_old', '${WS}', '${SRC}', 'rc_old_truth', 'rc_old_truth', '$pageview', $1, '{}'::jsonb),
+              ('phe_rc_new', '${WS}', '${SRC}', 'rc_new', 'rc_new', '$pageview', $2, '{}'::jsonb)`,
+      [`${dOld}T10:00:00Z`, `${dNew}T12:00:00Z`]
+    );
+    await db.query(
+      `insert into posthog_session_fact (id, workspace_id, source_id, raw_record_id, session_id)
+       values ('phs_rc', '${WS}', '${SRC}', 'rc_old_session', 'sess_rc')`
+    );
+    await db.query(
+      `insert into posthog_person_current (id, workspace_id, source_id, raw_record_id, person_id)
+       values ('php_rc', '${WS}', '${SRC}', 'rc_old_person', 'person_rc')`
+    );
+
+    const pruneCopies = async (limit: number, source = SRC, workspace = WS) =>
+      (
+        await db.query<{ pruned: string }>(
+          `select prune_posthog_raw_copies($1, $2, $3)::text as pruned`,
+          [workspace, source, limit]
+        )
+      )[0]!.pruned;
+    const rawLeft = async () =>
+      (
+        await db.query<{ id: string }>(
+          `select id from raw_records where workspace_id = '${WS}' order by id`
+        )
+      ).map((row) => row.id);
+    const everyRaw = await rawLeft();
+
+    // Never pruned (no watermark): its truth is all there, so nothing of its raw goes.
+    expect(await pruneCopies(100)).toBe("0");
+    expect(await rawLeft()).toEqual(everyRaw);
+
+    // The truth prune sets the watermark (today - 90). A late event then re-lands below it.
+    await db.query(`select prune_posthog_raw('${WS}', '${SRC}', $1::date)`, [dFloor]);
+    await db.query(
+      `insert into posthog_event_truth (id, workspace_id, source_id, raw_record_id, event_id, event_name, occurred_at, properties)
+       values ('phe_rc_late', '${WS}', '${SRC}', 'rc_old_late', 'rc_old_late', '$pageview', $1, '{}'::jsonb)`,
+      [`${dOld}T13:00:00Z`]
+    );
+
+    // Bounded: 2 per call, then the rest, then nothing.
+    expect(await pruneCopies(2)).toBe("2");
+    expect(await pruneCopies(2)).toBe("2");
+    expect(await pruneCopies(2)).toBe("0");
+    expect(await rawLeft()).toEqual([
+      "rc_floor",
+      "rc_new",
+      "rc_old_late",
+      "rc_old_person",
+      "rc_old_recent_batch",
+      "rc_old_running_batch",
+      "rc_old_session"
+    ]);
+    // The deleted copies' bookkeeping went with them; the batches that still need theirs keep it.
+    expect(
+      (
+        await db.query<{ id: string }>(
+          `select id from sync_batch_records where sync_batch_id like 'batch_rc_%' order by id`
+        )
+      ).map((row) => row.id)
+    ).toEqual([
+      "sbr_rc_floor",
+      "sbr_rc_new",
+      "sbr_rc_old_late",
+      "sbr_rc_old_person",
+      "sbr_rc_old_recent_batch",
+      "sbr_rc_old_running_batch",
+      "sbr_rc_old_session"
+    ]);
+    // Truth and rollups are not this function's business: untouched.
+    expect(
+      (await db.query<{ id: string }>(`select id from posthog_event_truth where workspace_id = '${WS}' order by id`))
+        .map((row) => row.id)
+    ).toEqual(["phe_rc_late", "phe_rc_new"]);
+
+    // Same answer whatever the session DateStyle (the day is compared as YYYY-MM-DD text).
+    await db.query("set datestyle = 'SQL, DMY'");
+    try {
+      expect(await pruneCopies(100)).toBe("0");
+    } finally {
+      await db.query("reset datestyle");
+    }
+
+    // Guards: never another provider's raw, never another workspace's source, never an unbounded call.
+    await expect(pruneCopies(100, GA4)).rejects.toThrow(/not a PostHog source/);
+    await expect(pruneCopies(100, SRC, "ws_someone_else")).rejects.toThrow(/not a PostHog source/);
+    await expect(pruneCopies(0)).rejects.toThrow(/outside 1\.\.10000/);
+    await expect(pruneCopies(10001)).rejects.toThrow(/outside 1\.\.10000/);
+  });
+
+  it("0088 prunes sync_batch_records only of batches that finished more than a day ago, in bounded batches", async () => {
+    const WS = "ws_sbr_prune";
+    const SRC = "src_sbr_prune";
+    await db.withTransaction(async (tx) => {
+      await tx.ensureWorkspace(WS, "Batch Records WS");
+      await tx.ensureFirstPhaseDatasets(WS);
+    });
+    const ds = await db.query<{ id: string }>(
+      `select id from datasets where workspace_id = '${WS}' and key = 'web'`
+    );
+    await db.query(
+      `insert into sources (id, workspace_id, dataset_id, provider, connection_name, account_external_id, status)
+       values ('${SRC}', '${WS}', $1, 'google_analytics_4', 'conn', '${SRC}_acct', 'connected')`,
+      [ds[0]?.id]
+    );
+    await db.query(
+      `insert into sync_runs (id, workspace_id, source_id, status) values ('run_sbr', '${WS}', '${SRC}', 'succeeded')`
+    );
+    const batches = [
+      // Far older than anything else in the shared test database, so they are the first to go.
+      ["batch_sbr_old", "succeeded", "now() - interval '400 days'", 3],
+      ["batch_sbr_failed", "failed", "now() - interval '399 days'", 2],
+      ["batch_sbr_recent", "succeeded", "now() - interval '2 hours'", 1],
+      ["batch_sbr_running", "running", "null", 1]
+    ] as const;
+    for (const [id, status, finishedAt, rows] of batches) {
+      await db.query(
+        `insert into sync_batches (id, sync_run_id, workspace_id, source_id, status, batch_type, finished_at)
+         values ($1, 'run_sbr', '${WS}', '${SRC}', $2, 'ga4_run_report', ${finishedAt})`,
+        [id, status]
+      );
+      for (let index = 0; index < rows; index += 1) {
+        const raw = `raw_${id}_${index}`;
+        await db.query(
+          `insert into raw_records (id, workspace_id, source_id, sync_batch_id, provider, object_type, external_id, payload, source_record_hash)
+           values ($1, '${WS}', '${SRC}', $2, 'google_analytics_4', 'ga4_run_report', $1, '{}'::jsonb, $1)`,
+          [raw, id]
+        );
+        await db.query(
+          `insert into sync_batch_records (id, sync_batch_id, raw_record_id, record_status)
+           values ('sbr_' || $2, $1, $2, 'provider_truth_written')`,
+          [id, raw]
+        );
+      }
+    }
+    const prune = async (limit: number) =>
+      Number(
+        (
+          await db.query<{ pruned: string }>(
+            `select prune_finished_sync_batch_records($1)::text as pruned`,
+            [limit]
+          )
+        )[0]!.pruned
+      );
+    const left = async () =>
+      (
+        await db.query<{ sync_batch_id: string; n: string }>(
+          `select sync_batch_id, count(*)::text as n from sync_batch_records
+            where sync_batch_id like 'batch_sbr_%' group by 1 order by 1`
+        )
+      ).map((row) => `${row.sync_batch_id}:${row.n}`);
+
+    // Oldest finished batch first, at most `limit` rows, across batch boundaries.
+    expect(await prune(2)).toBe(2);
+    expect(await left()).toEqual([
+      "batch_sbr_failed:2",
+      "batch_sbr_old:1",
+      "batch_sbr_recent:1",
+      "batch_sbr_running:1"
+    ]);
+    expect(await prune(2)).toBe(2);
+    expect(await left()).toEqual(["batch_sbr_failed:1", "batch_sbr_recent:1", "batch_sbr_running:1"]);
+    // Drain (the shared test database may hold other finished batches), then nothing is left to do.
+    while ((await prune(50000)) > 0) {
+      // keep draining
+    }
+    expect(await prune(50000)).toBe(0);
+    // A batch that finished under a day ago, and one that never finished, keep their rows.
+    expect(await left()).toEqual(["batch_sbr_recent:1", "batch_sbr_running:1"]);
+    // The batches and raw rows themselves are kept.
+    expect(
+      (await db.query<{ n: string }>(`select count(*)::text as n from sync_batches where id like 'batch_sbr_%'`))[0]!.n
+    ).toBe("4");
+    expect(
+      (await db.query<{ n: string }>(`select count(*)::text as n from raw_records where workspace_id = '${WS}'`))[0]!.n
+    ).toBe("7");
+
+    await expect(prune(0)).rejects.toThrow(/outside 1\.\.50000/);
+    await expect(prune(50001)).rejects.toThrow(/outside 1\.\.50000/);
   });
 
   it("materialized the GA4 event grain + snapshot-replacement grants (0061)", async () => {
@@ -4601,6 +4884,37 @@ describe("0085 re-applied (the cloud engine's one-call execute_sql recipe can ru
       await pg.close();
     }
   });
+});
+
+describe("0087 + 0088 re-applied (the cloud engine's one-call execute_sql recipe can run a file twice)", () => {
+  it("re-runs both files on a fully migrated database as no-ops", async () => {
+    const { PGlite } = (await import("@electric-sql/pglite")) as unknown as {
+      PGlite: new () => { exec(sql: string): Promise<unknown>; query<T>(sql: string): Promise<{ rows: T[] }>; close(): Promise<void> };
+    };
+    const pg = new PGlite();
+    try {
+      for (const migration of loadMigrations()) {
+        await pg.exec(migration.sql);
+      }
+      const indexCount = async () =>
+        (await pg.query<{ n: string }>("select count(*)::text as n from pg_indexes where indexname like '%raw_record_id_idx' or indexname = 'raw_records_posthog_event_day_idx'")).rows[0]!.n;
+      const before = await indexCount();
+      for (const id of ["0087_raw_records_foreign_key_indexes.sql", "0088_posthog_raw_copies_and_batch_records_retention.sql"]) {
+        const sql = loadMigrations().find((m) => m.id === id)?.sql ?? "";
+        expect(sql).not.toBe("");
+        await pg.exec(sql);
+      }
+      // 33 from 0087 + sync_batch_records_raw_record_id_idx (0074) + the PostHog day index.
+      expect(before).toBe("35");
+      expect(await indexCount()).toBe("35");
+      const fns = await pg.query<{ proname: string }>(
+        "select proname from pg_proc where proname in ('prune_posthog_raw_copies', 'prune_finished_sync_batch_records') order by 1"
+      );
+      expect(fns.rows.map((row) => row.proname)).toEqual(["prune_finished_sync_batch_records", "prune_posthog_raw_copies"]);
+    } finally {
+      await pg.close();
+    }
+  }, 60_000);
 });
 
 describe("0086 re-applied (the cloud engine's one-call execute_sql recipe can run a file twice)", () => {
