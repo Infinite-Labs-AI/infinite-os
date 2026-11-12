@@ -2255,6 +2255,62 @@ describe("PostHog CLOSE hook refreshes the day-grain rollups against real PGlite
     expect(await viewTotal(workspaceId)).toBe("2");
   });
 
+  it("a re-sync after the slim step (0090) lands on the same raw rows: no new copy, truth keeps its raw ids, the rollup is unchanged", async () => {
+    const workspaceId = "ws_ph_slim_resync";
+    const sourceId = "src_ph_slim_resync";
+    await seedFixturePosthogSource(workspaceId, sourceId);
+    await connectorFor("posthog").sync(db, posthogRequest(workspaceId, sourceId));
+
+    // Age the copies past the slim step's week, then slim them.
+    await db.query("update raw_records set extracted_at = now() - interval '8 days' where source_id = $1", [sourceId]);
+    const slimmed = await db.query<{ n: string }>("select slim_posthog_raw_copies($1, $2, 100)::text as n", [
+      workspaceId,
+      sourceId
+    ]);
+    expect(slimmed[0]?.n).toBe("2");
+
+    const snapshot = async () => ({
+      raw: await db.query<{ id: string; source_record_hash: string; payload: Record<string, unknown> }>(
+        // Ids are random (raw_<uuid>): order by the event time, which the slim keeps.
+        "select id, source_record_hash, payload from raw_records where source_id = $1 order by payload ->> 'occurredAt', id",
+        [sourceId]
+      ),
+      truth: await db.query(
+        "select event_id, raw_record_id, occurred_at::text as occurred_at, properties from posthog_event_truth where source_id = $1 order by event_id",
+        [sourceId]
+      ),
+      sessions: await db.query(
+        "select session_id, raw_record_id from posthog_session_fact where source_id = $1 order by session_id",
+        [sourceId]
+      ),
+      persons: await db.query(
+        "select person_id, raw_record_id from posthog_person_current where source_id = $1 order by person_id",
+        [sourceId]
+      ),
+      rollups: await rollupRows(sourceId)
+    });
+    const before = await snapshot();
+    expect(before.raw).toHaveLength(2);
+    expect(before.raw.map((row) => row.payload)).toEqual([
+      { occurredAt: "2026-06-01T10:00:00.000Z", slimmed: true },
+      { occurredAt: "2026-06-02T11:00:00.000Z", slimmed: true }
+    ]);
+    expect(before.rollups).toHaveLength(2);
+
+    // The same two events again, over a backfill window that covers both fixture days (a plain
+    // incremental re-sync starts at the stored cursor and would never reach June). The connector
+    // hashes the fresh payload, which matches the stored hash, so the upsert finds each existing
+    // row and keeps it as it is.
+    await connectorFor("posthog").sync(
+      db,
+      posthogRequest(workspaceId, sourceId, {
+        since: "2026-06-01T00:00:00.000Z",
+        until: "2026-06-30T00:00:00.000Z"
+      })
+    );
+    expect(await snapshot()).toEqual(before);
+  });
+
   it("a windowed (backfill child) sync refreshes exactly its [since, until] days", async () => {
     const workspaceId = "ws_ph_rollup_window";
     const sourceId = "src_ph_rollup_window";

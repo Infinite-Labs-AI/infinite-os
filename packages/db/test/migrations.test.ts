@@ -102,7 +102,9 @@ describe("Infinite OS migration stack", () => {
       "0085_meta_ads_daily_breakdowns_and_hourly.sql",
       "0086_meta_ads_ad_hourly.sql",
       "0087_raw_records_foreign_key_indexes.sql",
-      "0088_posthog_raw_copies_and_batch_records_retention.sql"
+      "0088_posthog_raw_copies_and_batch_records_retention.sql",
+      "0089_raw_records_drop_unused_indexes.sql",
+      "0090_posthog_raw_copies_slim.sql"
     ]);
   });
 
@@ -1118,7 +1120,9 @@ describe("Infinite OS migration stack", () => {
       "0085_meta_ads_daily_breakdowns_and_hourly.sql",
       "0086_meta_ads_ad_hourly.sql",
       "0087_raw_records_foreign_key_indexes.sql",
-      "0088_posthog_raw_copies_and_batch_records_retention.sql"
+      "0088_posthog_raw_copies_and_batch_records_retention.sql",
+      "0089_raw_records_drop_unused_indexes.sql",
+      "0090_posthog_raw_copies_slim.sql"
     ]);
   });
 
@@ -1324,6 +1328,49 @@ describe("Infinite OS migration stack", () => {
     expect(sql).not.toContain("function prune_posthog_raw(");
     expect(sql).not.toContain("refresh_posthog_daily_rollups");
     expect(sql).not.toMatch(/drop |alter |truncate/);
+  });
+
+  it("drops exactly the three unused 0002 raw_records indexes and nothing else, transaction-safe (0089)", () => {
+    const migration = loadMigrations().find((candidate) => candidate.id === "0089_raw_records_drop_unused_indexes.sql");
+    const sql = (migration?.sql ?? "").toLowerCase().replace(/--[^\n]*/g, "").replace(/\s+/g, " ").trim();
+    expect(sql.match(/drop index if exists \w+;/g)).toEqual([
+      "drop index if exists raw_records_source_object_external_idx;",
+      "drop index if exists raw_records_workspace_source_extracted_at_idx;",
+      "drop index if exists raw_records_provider_object_type_idx;"
+    ]);
+    // Nothing else: the unique key that covers the prefix lookups, the primary key, and every
+    // other index stay; no table, row or function is touched.
+    expect(sql.replace(/drop index if exists \w+;/g, "").trim()).toBe("");
+    // The runner wraps each file in a transaction: concurrently would be an error there.
+    expect(sql).not.toContain("concurrently");
+  });
+
+  it("slims week-old PostHog raw copies to their event time, bounded, never touching truth or the dedupe key (0090)", () => {
+    const migration = loadMigrations().find((candidate) => candidate.id === "0090_posthog_raw_copies_slim.sql");
+    const sql = (migration?.sql ?? "").toLowerCase().replace(/--[^\n]*/g, "").replace(/\s+/g, " ").trim();
+    // The work queue: only PostHog raw rows not yet slimmed, by source and extraction time.
+    expect(sql).toContain(
+      "create index if not exists raw_records_posthog_unslimmed_idx on raw_records (source_id, extracted_at) where object_type = 'posthog_event' and not (payload ? 'slimmed');"
+    );
+    expect(sql).toContain(
+      "create or replace function slim_posthog_raw_copies( p_workspace_id text, p_source_id text, p_limit integer ) returns bigint"
+    );
+    expect(sql).toContain("if p_limit < 1 or p_limit > 10000 then");
+    // A week after the copy was written (truth was written in the same transaction), newest first.
+    expect(sql).toContain("r.extracted_at < now() - interval '7 days'");
+    expect(sql).toContain("order by r.extracted_at desc");
+    expect(sql).toContain("for update skip locked");
+    // The update finds its rows by primary key from the locked id list (0088's shape), so no plan can
+    // turn it into a join over the whole table.
+    expect(sql).toContain("where r.id = any(v_ids)");
+    // The new payload keeps the event time the day index and the prune read, plus the marker.
+    expect(sql).toContain("set payload = jsonb_build_object('occurredat', r.payload -> 'occurredat', 'slimmed', true)");
+    // Only the payload changes: the dedupe key, ids and every other table are left alone.
+    expect(sql).not.toMatch(/set [^;]*source_record_hash/);
+    expect(sql).not.toMatch(/update (posthog_|sync_|sources)/);
+    expect(sql).not.toContain("refresh_posthog_daily_rollups");
+    expect(sql).not.toMatch(/drop |alter |truncate|delete from/);
+    expect(sql).not.toContain("concurrently");
   });
 
   it("adds ad hourly delivery with actions and a per-day receipt, idempotently, touching nothing else (0086)", () => {

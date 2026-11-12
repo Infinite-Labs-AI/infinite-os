@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { createHash } from "node:crypto";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -88,9 +89,9 @@ describe("pglite migration + query path (real WASM Postgres)", () => {
     rmSync(dataDir, { recursive: true, force: true });
   });
 
-  it("applied ALL 88 migrations on first boot and is idempotent on a re-run", async () => {
-    expect(loadMigrations().length).toBe(88);
-    expect(firstRun).toHaveLength(88);
+  it("applied ALL 90 migrations on first boot and is idempotent on a re-run", async () => {
+    expect(loadMigrations().length).toBe(90);
+    expect(firstRun).toHaveLength(90);
     expect(firstRun).toContain("0001_control_plane.sql");
     expect(firstRun).toContain("0006_security_roles.sql");
     expect(firstRun).toContain("0036_chat_sessions_desktop_surface.sql");
@@ -141,19 +142,21 @@ describe("pglite migration + query path (real WASM Postgres)", () => {
     expect(firstRun).toContain("0083_remove_dead_x_metrics.sql");
     expect(firstRun).toContain("0087_raw_records_foreign_key_indexes.sql");
     expect(firstRun).toContain("0088_posthog_raw_copies_and_batch_records_retention.sql");
+    expect(firstRun).toContain("0089_raw_records_drop_unused_indexes.sql");
+    expect(firstRun).toContain("0090_posthog_raw_copies_slim.sql");
 
     // Idempotent: a second boot re-applies zero from the applied-ID snapshot.
     const secondRun = await runMigrations(url);
     expect(secondRun).toEqual([]);
   });
 
-  it("created the schema_migrations ledger with all 88 rows", async () => {
+  it("created the schema_migrations ledger with all 90 rows", async () => {
     const ledger = await db.query<{ id: string }>(
       "select id from schema_migrations order by id"
     );
-    expect(ledger).toHaveLength(88);
+    expect(ledger).toHaveLength(90);
     expect(ledger[0]?.id).toBe("0001_control_plane.sql");
-    expect(ledger.at(-1)?.id).toBe("0088_posthog_raw_copies_and_batch_records_retention.sql");
+    expect(ledger.at(-1)?.id).toBe("0090_posthog_raw_copies_slim.sql");
   });
 
   it("0083 leaves no X metric or view advertised, keeps the X tables, and re-applies as a no-op", async () => {
@@ -1147,6 +1150,239 @@ describe("pglite migration + query path (real WASM Postgres)", () => {
 
     await expect(prune(0)).rejects.toThrow(/outside 1\.\.50000/);
     await expect(prune(50001)).rejects.toThrow(/outside 1\.\.50000/);
+  });
+
+  it("0089 leaves raw_records with its primary key, its unique key and the two PostHog indexes", async () => {
+    const indexes = await db.query<{ indexname: string }>(
+      `select indexname from pg_indexes where tablename = 'raw_records' order by indexname`
+    );
+    expect(indexes.map((row) => row.indexname)).toEqual([
+      "raw_records_pkey",
+      "raw_records_posthog_event_day_idx",
+      "raw_records_posthog_unslimmed_idx",
+      // The unique key's leading (source_id, object_type, external_id) is the whole of the
+      // dropped raw_records_source_object_external_idx.
+      "raw_records_source_id_object_type_external_id_source_record_key"
+    ]);
+  });
+
+  it("0090 slims PostHog raw copies a week after they were written, newest first, keeping ids, the dedupe key and the event time", async () => {
+    const WS = "ws_ph_slim";
+    const SRC = "src_ph_slim";
+    const SRC2 = "src_ph_slim_other";
+    const GA4 = "src_ph_slim_ga4";
+    await db.withTransaction(async (tx) => {
+      await tx.ensureWorkspace(WS, "PostHog Slim WS");
+      await tx.ensureFirstPhaseDatasets(WS);
+    });
+    const ds = await db.query<{ id: string }>(
+      `select id from datasets where workspace_id = '${WS}' and key = 'web'`
+    );
+    for (const [id, provider] of [[SRC, "posthog"], [SRC2, "posthog"], [GA4, "google_analytics_4"]] as const) {
+      await db.query(
+        `insert into sources (id, workspace_id, dataset_id, provider, connection_name, account_external_id, status)
+         values ($2, '${WS}', $1, $3, 'conn', $2 || '_acct', 'connected')`,
+        [ds[0]?.id, id, provider]
+      );
+    }
+    await db.query(
+      `insert into sync_runs (id, workspace_id, source_id, status) values ('run_slim', '${WS}', '${SRC}', 'succeeded')`
+    );
+    await db.query(
+      `insert into sync_batches (id, sync_run_id, workspace_id, source_id, status, batch_type, finished_at)
+       values ('batch_slim', 'run_slim', '${WS}', '${SRC}', 'succeeded', 'posthog_event', now())`
+    );
+
+    const DAY_MS = 24 * 60 * 60 * 1000;
+    const occurredDaysAgo = (days: number) => new Date(Date.now() - days * DAY_MS).toISOString();
+    // The connector's PostHog raw payload (PostHogEventRow) and its dedupe hash (hashRecord).
+    const fullPayload = (id: string, occurredAt: string) => ({
+      externalId: `posthog:${id}`,
+      eventId: id,
+      eventName: "$pageview",
+      distinctId: "distinct_slim",
+      personId: "person_slim",
+      sessionId: "session_slim",
+      email: null,
+      occurredAt,
+      landingPage: "https://example.com/",
+      referrer: null,
+      utmSource: null,
+      utmMedium: null,
+      utmCampaign: null,
+      properties: { $current_url: "https://example.com/", $browser: "Chrome", padding: "x".repeat(1500) }
+    });
+    const hashOf = (payload: unknown) => createHash("sha256").update(JSON.stringify(payload)).digest("hex");
+    const insertRaw = async (
+      id: string,
+      extractedHoursAgo: number,
+      occurredAt: string,
+      source: string = SRC,
+      provider = "posthog",
+      objectType = "posthog_event"
+    ) => {
+      const payload = fullPayload(id, occurredAt);
+      await db.query(
+        `insert into raw_records (id, workspace_id, source_id, sync_batch_id, provider, object_type, external_id,
+                                  payload, payload_version, source_record_hash, extracted_at)
+         values ($1, '${WS}', $2, $3, $4, $5, $6, $7::jsonb, 'live-v1', $8, now() - make_interval(hours => $9))`,
+        [
+          id,
+          source,
+          source === SRC ? "batch_slim" : null,
+          provider,
+          objectType,
+          `posthog:${id}`,
+          JSON.stringify(payload),
+          hashOf(payload),
+          extractedHoursAgo
+        ]
+      );
+    };
+    await insertRaw("slim_8d", 8 * 24, occurredDaysAgo(8));
+    await insertRaw("slim_10d", 10 * 24, occurredDaysAgo(10));
+    await insertRaw("slim_truth", 20 * 24, occurredDaysAgo(20)); // a truth row points at it
+    await insertRaw("slim_session", 25 * 24, occurredDaysAgo(25)); // a session's last event
+    await insertRaw("slim_person", 30 * 24, occurredDaysAgo(30)); // a person's first event
+    await insertRaw("keep_young", 7 * 24 - 1, occurredDaysAgo(7)); // written an hour short of a week ago
+    await insertRaw("keep_new", 1, occurredDaysAgo(0));
+    await insertRaw("keep_other_source", 10 * 24, occurredDaysAgo(10), SRC2);
+    await insertRaw("keep_ga4", 10 * 24, occurredDaysAgo(10), GA4, "google_analytics_4", "ga4_run_report");
+
+    await db.query(
+      `insert into posthog_event_truth (id, workspace_id, source_id, raw_record_id, event_id, event_name, occurred_at, properties)
+       values ('phe_slim', '${WS}', '${SRC}', 'slim_truth', 'slim_truth', '$pageview', $1, '{"$browser": "Chrome"}'::jsonb)`,
+      [occurredDaysAgo(20)]
+    );
+    await db.query(
+      `insert into posthog_session_fact (id, workspace_id, source_id, raw_record_id, session_id)
+       values ('phs_slim', '${WS}', '${SRC}', 'slim_session', 'sess_slim')`
+    );
+    await db.query(
+      `insert into posthog_person_current (id, workspace_id, source_id, raw_record_id, person_id)
+       values ('php_slim', '${WS}', '${SRC}', 'slim_person', 'person_slim_current')`
+    );
+
+    type RawRow = {
+      id: string;
+      source_id: string;
+      object_type: string;
+      external_id: string;
+      sync_batch_id: string | null;
+      source_record_hash: string;
+      extracted_at: string;
+      day: string;
+      payload: Record<string, unknown>;
+    };
+    const rawRows = async () =>
+      db.query<RawRow>(
+        `select id, source_id, object_type, external_id, sync_batch_id, source_record_hash, extracted_at::text as extracted_at,
+                left(payload ->> 'occurredAt', 10) as day, payload
+           from raw_records where workspace_id = '${WS}' order by id`
+      );
+    const pointers = async () =>
+      db.query<{ t: string; id: string; raw_record_id: string; properties: unknown }>(
+        `select 'truth' as t, id, raw_record_id, properties from posthog_event_truth where workspace_id = '${WS}'
+         union all select 'session', id, raw_record_id, null from posthog_session_fact where workspace_id = '${WS}'
+         union all select 'person', id, raw_record_id, properties from posthog_person_current where workspace_id = '${WS}'
+         order by 1, 2`
+      );
+    const slim = async (limit: number, source = SRC, workspace = WS) =>
+      (
+        await db.query<{ slimmed: string }>(
+          `select slim_posthog_raw_copies($1, $2, $3)::text as slimmed`,
+          [workspace, source, limit]
+        )
+      )[0]!.slimmed;
+    const slimmedIds = async () =>
+      (
+        await db.query<{ id: string }>(
+          `select id from raw_records where workspace_id = '${WS}' and payload ? 'slimmed' order by id`
+        )
+      ).map((row) => row.id);
+
+    const before = await rawRows();
+    const pointersBefore = await pointers();
+
+    // Bounded, newest first: the copies written 8 and 10 days ago, then 20 and 25, then 30, then done.
+    expect(await slim(2)).toBe("2");
+    expect(await slimmedIds()).toEqual(["slim_10d", "slim_8d"]);
+    expect(await slim(2)).toBe("2");
+    expect(await slimmedIds()).toEqual(["slim_10d", "slim_8d", "slim_session", "slim_truth"]);
+    expect(await slim(2)).toBe("1");
+    expect(await slim(2)).toBe("0");
+    const slimmed = ["slim_10d", "slim_8d", "slim_person", "slim_session", "slim_truth"];
+    expect(await slimmedIds()).toEqual(slimmed);
+
+    // Only the payload changed, and only on those five: it keeps the event time (the day index key
+    // and the 0088 prune both read it) and says it was slimmed. Ids, the dedupe hash, the extraction
+    // time and the batch are the same, so every pointer and every re-sync still finds the row.
+    const after = await rawRows();
+    expect(after.map(({ payload: _payload, ...rest }) => rest)).toEqual(
+      before.map(({ payload: _payload, ...rest }) => rest)
+    );
+    for (const row of after) {
+      const original = before.find((candidate) => candidate.id === row.id)!;
+      if (slimmed.includes(row.id)) {
+        expect(row.payload).toEqual({ occurredAt: original.payload.occurredAt, slimmed: true });
+      } else {
+        expect(row.payload).toEqual(original.payload);
+      }
+    }
+    // Truth, sessions and persons are untouched, and still point at the same raw rows.
+    expect(await pointers()).toEqual(pointersBefore);
+
+    // A re-sync of a slimmed event (same content, so the same hash) lands on the SAME row through
+    // the connector's upsert: no new raw row, and the stored payload stays slim.
+    const resynced = fullPayload("slim_8d", before.find((row) => row.id === "slim_8d")!.payload.occurredAt as string);
+    const upserted = await db.query<{ id: string }>(
+      `insert into raw_records (
+         id, workspace_id, source_id, sync_batch_id, provider, object_type,
+         external_id, payload, payload_version, source_record_hash, source_updated_at
+       )
+       values ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9,$10,$11::timestamptz)
+       on conflict (source_id, object_type, external_id, source_record_hash)
+       do update set payload = raw_records.payload
+       returning id, object_type, external_id, source_record_hash`,
+      [
+        "raw_resync_must_not_land",
+        WS,
+        SRC,
+        "batch_slim",
+        "posthog",
+        "posthog_event",
+        "posthog:slim_8d",
+        JSON.stringify(resynced),
+        "live-v1",
+        hashOf(resynced),
+        null
+      ]
+    );
+    expect(upserted.map((row) => row.id)).toEqual(["slim_8d"]);
+    expect((await rawRows()).length).toBe(before.length);
+    expect(await slimmedIds()).toEqual(slimmed);
+
+    // The 0088 prune still finds slimmed copies by event day: with the watermark nine days back it
+    // deletes the unreferenced 10-day copy and keeps the ones truth, a session and a person hold.
+    await db.query(
+      `insert into posthog_prune_watermarks (workspace_id, source_id, pruned_before)
+       values ('${WS}', '${SRC}', (now() at time zone 'utc')::date - 9)`
+    );
+    expect(
+      (
+        await db.query<{ pruned: string }>(`select prune_posthog_raw_copies($1, $2, 100)::text as pruned`, [WS, SRC])
+      )[0]!.pruned
+    ).toBe("1");
+    expect(await slimmedIds()).toEqual(["slim_8d", "slim_person", "slim_session", "slim_truth"]);
+
+    // Another source's copies wait for their own call.
+    expect(await slim(100, SRC2)).toBe("1");
+
+    // Guards: never another provider's raw, never another workspace's source, never unbounded.
+    await expect(slim(100, GA4)).rejects.toThrow(/not a PostHog source/);
+    await expect(slim(100, SRC, "ws_someone_else")).rejects.toThrow(/not a PostHog source/);
+    await expect(slim(0)).rejects.toThrow(/outside 1\.\.10000/);
+    await expect(slim(10001)).rejects.toThrow(/outside 1\.\.10000/);
   });
 
   it("materialized the GA4 event grain + snapshot-replacement grants (0061)", async () => {
@@ -4915,6 +5151,157 @@ describe("0087 + 0088 re-applied (the cloud engine's one-call execute_sql recipe
       await pg.close();
     }
   }, 60_000);
+});
+
+describe("0089 + 0090 re-applied (the cloud engine's one-call execute_sql recipe can run a file twice)", () => {
+  it("re-runs both files on a fully migrated database as no-ops", async () => {
+    const { PGlite } = (await import("@electric-sql/pglite")) as unknown as {
+      PGlite: new () => { exec(sql: string): Promise<unknown>; query<T>(sql: string): Promise<{ rows: T[] }>; close(): Promise<void> };
+    };
+    const pg = new PGlite();
+    try {
+      for (const migration of loadMigrations()) {
+        await pg.exec(migration.sql);
+      }
+      const rawIndexes = async () =>
+        (await pg.query<{ indexname: string }>("select indexname from pg_indexes where tablename = 'raw_records' order by indexname")).rows.map(
+          (row) => row.indexname
+        );
+      const before = await rawIndexes();
+      for (const id of ["0089_raw_records_drop_unused_indexes.sql", "0090_posthog_raw_copies_slim.sql"]) {
+        const sql = loadMigrations().find((m) => m.id === id)?.sql ?? "";
+        expect(sql).not.toBe("");
+        await pg.exec(sql);
+      }
+      expect(before).toEqual([
+        "raw_records_pkey",
+        "raw_records_posthog_event_day_idx",
+        "raw_records_posthog_unslimmed_idx",
+        "raw_records_source_id_object_type_external_id_source_record_key"
+      ]);
+      expect(await rawIndexes()).toEqual(before);
+      const fns = await pg.query<{ proname: string }>("select proname from pg_proc where proname = 'slim_posthog_raw_copies'");
+      expect(fns.rows).toHaveLength(1);
+    } finally {
+      await pg.close();
+    }
+  }, 60_000);
+});
+
+describe("0089 + 0090 keep the raw_records reads on an index (partial-migration + planner proof)", () => {
+  // Applies 0001..0088, seeds one busy PostHog source, then applies 0089 alone and 0090 alone and
+  // reads the plans of the raw_records reads that remain: the connector's dedupe lookup, the Meta
+  // last-seen-scan reader (by primary key) and the slim step's work queue.
+  let dataDir: string;
+  let url: string;
+
+  beforeAll(() => {
+    dataDir = mkdtempSync(join(tmpdir(), "infinite-os-pglite-0089-idx-"));
+    url = `pglite://${dataDir}`;
+  });
+
+  afterAll(() => {
+    rmSync(dataDir, { recursive: true, force: true });
+  });
+
+  const DEDUPE_LOOKUP = `select id from raw_records
+     where source_id = 'src_busy' and object_type = 'posthog_event' and external_id = 'posthog:busy_42'`;
+  // src/lib/analysis/sources/meta-versions.ts (cloud) readLastSeenScanStarts' raw_records predicate.
+  const LAST_SEEN_READ = `select rr.id from raw_records rr
+     where rr.workspace_id = 'ws_busy' and rr.source_id = any(array['src_busy']::text[])
+       and rr.id = any(array['raw_busy_1', 'raw_busy_2']::text[])`;
+  // 0090's candidate scan, as slim_posthog_raw_copies runs it.
+  const SLIM_QUEUE = `select r.id from raw_records r
+     where r.source_id = 'src_busy' and r.object_type = 'posthog_event' and not (r.payload ? 'slimmed')
+       and r.extracted_at < now() - interval '7 days'
+     order by r.extracted_at desc limit 100`;
+
+  async function planOf(db: InfiniteOsDb, sql: string): Promise<string> {
+    const rows = await db.query<Record<string, unknown>>(`explain ${sql}`);
+    return rows
+      .map((row) => Object.values(row)[0] as string)
+      .join("\n")
+      .toLowerCase();
+  }
+
+  it("applies on a DB already at 0088: lookups move to the unique key and the primary key, the slim queue to its own index", async () => {
+    const all = loadMigrations();
+    const upTo0088 = all.filter((m) => m.id < "0089");
+    const m0089 = all.find((m) => m.id === "0089_raw_records_drop_unused_indexes.sql");
+    const m0090 = all.find((m) => m.id === "0090_posthog_raw_copies_slim.sql");
+    expect(m0089).toBeDefined();
+    expect(m0090).toBeDefined();
+
+    // One open handle at a time: runPgliteMigrations opens its own on the same data dir.
+    await runPgliteMigrations(url, upTo0088);
+    const db = createInfiniteOsDb(url);
+    try {
+      await db.withTransaction(async (tx) => {
+        await tx.ensureWorkspace("ws_busy", "Raw Index WS");
+        await tx.ensureFirstPhaseDatasets("ws_busy");
+      });
+      const ds = await db.query<{ id: string }>("select id from datasets where workspace_id = 'ws_busy' and key = 'web'");
+      await db.query(
+        `insert into sources (id, workspace_id, dataset_id, provider, connection_name, account_external_id, status)
+         values ('src_busy', 'ws_busy', $1, 'posthog', 'conn', 'src_busy_acct', 'connected')`,
+        [ds[0]?.id]
+      );
+      // 3,000 PostHog copies written over 30 days; all but 300 already slimmed (the steady state).
+      await db.query(
+        `insert into raw_records (id, workspace_id, source_id, provider, object_type, external_id, payload, source_record_hash, extracted_at)
+         select 'raw_busy_' || g, 'ws_busy', 'src_busy', 'posthog', 'posthog_event', 'posthog:busy_' || g,
+                case when g % 10 = 0
+                  then jsonb_build_object('eventId', 'busy_' || g, 'occurredAt', '2026-01-01T00:00:00.000Z',
+                                          'properties', jsonb_build_object('padding', repeat('x', 300)))
+                  else jsonb_build_object('occurredAt', '2026-01-01T00:00:00.000Z', 'slimmed', true) end,
+                md5(g::text), now() - make_interval(hours => g % 720)
+           from generate_series(1, 3000) g`
+      );
+      await db.query("analyze raw_records");
+
+      // Before 0089 the dedupe lookup takes the narrower 0002 prefix index.
+      expect(await planOf(db, DEDUPE_LOOKUP)).toContain("raw_records_source_object_external_idx");
+    } finally {
+      await db.close();
+    }
+
+    expect(await runPgliteMigrations(url, [m0089!])).toEqual([m0089!.id]);
+    const db2 = createInfiniteOsDb(url);
+    try {
+      await db2.query("analyze raw_records");
+      const dedupe = await planOf(db2, DEDUPE_LOOKUP);
+      expect(dedupe).toContain("raw_records_source_id_object_type_external_id_source_record_key");
+      expect(dedupe).not.toContain("seq scan");
+      const lastSeen = await planOf(db2, LAST_SEEN_READ);
+      expect(lastSeen).toContain("raw_records_pkey");
+      expect(lastSeen).not.toContain("seq scan");
+    } finally {
+      await db2.close();
+    }
+
+    expect(await runPgliteMigrations(url, [m0090!])).toEqual([m0090!.id]);
+    const db3 = createInfiniteOsDb(url);
+    try {
+      await db3.query("analyze raw_records");
+      const queue = await planOf(db3, SLIM_QUEUE);
+      expect(queue).toContain("raw_records_posthog_unslimmed_idx");
+      expect(queue).not.toContain("seq scan");
+
+      // The queue drains: every unslimmed copy older than a week, and nothing else.
+      const eligible = await db3.query<{ n: string }>(
+        `select count(*)::text as n from raw_records
+          where source_id = 'src_busy' and not (payload ? 'slimmed') and extracted_at < now() - interval '7 days'`
+      );
+      const slimmed = await db3.query<{ n: string }>(`select slim_posthog_raw_copies('ws_busy', 'src_busy', 10000)::text as n`);
+      expect(slimmed[0]!.n).toBe(eligible[0]!.n);
+      expect(Number(slimmed[0]!.n)).toBeGreaterThan(0);
+      expect(
+        (await db3.query<{ n: string }>(`select slim_posthog_raw_copies('ws_busy', 'src_busy', 10000)::text as n`))[0]!.n
+      ).toBe("0");
+    } finally {
+      await db3.close();
+    }
+  }, 120_000);
 });
 
 describe("0086 re-applied (the cloud engine's one-call execute_sql recipe can run a file twice)", () => {
