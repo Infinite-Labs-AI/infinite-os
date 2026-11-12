@@ -1,0 +1,41 @@
+-- Drop three raw_records indexes from 0002 that no read needs.
+--
+-- raw_records is written once per synced record and read in a few ways, each served by another
+-- index:
+--   - the connector's upsert (`on conflict (source_id, object_type, external_id,
+--     source_record_hash)`) and any lookup by source, object type and external id -> the unique key
+--     on those four columns;
+--   - lookups by raw row id (the readers that date a provider row through its raw row and sync
+--     batch, the Stripe recurring-value evidence join) -> the primary key;
+--   - the PostHog raw-copy prune (0088) -> raw_records_posthog_event_day_idx (0087);
+--   - the foreign-key check when a source is deleted -> the unique key (source_id leads it).
+--
+-- The three dropped:
+--   - raw_records_source_object_external_idx (source_id, object_type, external_id): an exact prefix
+--     of the unique key, so the unique key serves every query it could serve, the same way. It
+--     costs about as much space as the unique key's first three columns, and a write per row.
+--   - raw_records_provider_object_type_idx (provider, object_type): no query filters raw_records by
+--     provider, and every read that names an object type also names the source.
+--   - raw_records_workspace_source_extracted_at_idx (workspace_id, source_id, extracted_at): no
+--     query reads extracted_at. The planner did pick it for reads that pin raw row ids by workspace,
+--     source and id when the workspace's statistics undercount its rows, and then walked every row
+--     of the source and fetched each from the heap, where the primary key needs one probe per id.
+--     Without it those reads probe the primary key. A project delete (deleteProject: `delete from
+--     raw_records where workspace_id = $1`, then the workspaces foreign-key check) scans the table
+--     instead. It already scans it once per deleted sync batch for the raw_records.sync_batch_id
+--     foreign key, which has never had an index, so the delete's cost does not change in kind.
+--
+-- DELIBERATELY NOT `concurrently`, like 0087: the migration runner applies each file inside a
+-- transaction, where `drop index concurrently` is an error. On a large, live shared database the
+-- operator drops them ONLINE first (`drop index concurrently if exists`, each statement on its own,
+-- outside any transaction); this file then finds nothing to drop and takes no lock. Run as-is, each
+-- drop holds an ACCESS EXCLUSIVE lock on raw_records for the moment the drop takes.
+--
+-- Removes indexes only: an index changes plans, never results. No table, row or function is
+-- touched. Idempotent (`if exists`).
+--
+-- ROLLBACK: recreate the three from 0002's definitions.
+
+drop index if exists raw_records_source_object_external_idx;
+drop index if exists raw_records_workspace_source_extracted_at_idx;
+drop index if exists raw_records_provider_object_type_idx;
