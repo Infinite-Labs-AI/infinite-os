@@ -43,8 +43,9 @@
 -- first would be wasted work.
 --
 -- BOUNDED: at most p_limit rows per call (1..10000), one short transaction; the caller loops. Rows a
--- concurrent sync holds are skipped (`for update skip locked`) and taken by a later call, so a call
--- never waits on, or deadlocks with, a sync. The locked ids are collected first and the update finds
+-- concurrent sync holds are skipped (`for no key update skip locked`) and taken by a later call, so a
+-- call never waits on, or deadlocks with, a sync. NO KEY: the id never changes, so the lock does not
+-- block a sync's foreign-key checks on the row (a truth or batch-record insert pointing at it). The locked ids are collected first and the update finds
 -- them by primary key (0088's shape), so no plan can turn the update into a join over the whole
 -- table. Idempotent: a slimmed row is not a candidate again.
 -- The source must be a PostHog source of that workspace (raises otherwise): this function never
@@ -94,7 +95,7 @@ begin
          and r.extracted_at < now() - interval '7 days'
        order by r.extracted_at desc
        limit p_limit
-         for update skip locked
+         for no key update skip locked
     ) c;
   if v_ids is null then
     return 0;
@@ -108,7 +109,7 @@ begin
 end $$;
 
 -- Grants (0065/0088 pattern: a SECURITY INVOKER function, so a credentialed caller needs the table
--- rights; `for update` needs UPDATE). Re-issued idempotently so this file stands alone.
+-- rights; `for no key update` needs UPDATE). Re-issued idempotently so this file stands alone.
 grant select on sources to growth_os_worker;
 grant select, update on raw_records to growth_os_worker;
 do $$

@@ -1359,7 +1359,8 @@ describe("Infinite OS migration stack", () => {
     // A week after the copy was written (truth was written in the same transaction), newest first.
     expect(sql).toContain("r.extracted_at < now() - interval '7 days'");
     expect(sql).toContain("order by r.extracted_at desc");
-    expect(sql).toContain("for update skip locked");
+    // NO KEY: the id never changes, so the lock does not block a sync's foreign-key checks on the row.
+    expect(sql).toContain("for no key update skip locked");
     // The update finds its rows by primary key from the locked id list (0088's shape), so no plan can
     // turn it into a join over the whole table.
     expect(sql).toContain("where r.id = any(v_ids)");
